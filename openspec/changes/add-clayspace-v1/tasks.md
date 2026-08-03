@@ -2,8 +2,8 @@
 
 ## 1. Milestone 0 — Feasibility spike (de-risk before hardening)
 
-- [ ] 1.1 Scaffold the **claycore** C++20 library (CMake presets per docs/05 §13: cpu-only + metal; kernel shim header; test harness) with Mac+Linux CI build
-- [ ] 1.2 Create the Xcode project (Swift, SwiftUI shell, CAMetalLayer viewport, iPadOS 18+ target) consuming claycore via SwiftPM-wrapped C ABI, with CI build
+- [ ] 1.1 Scaffold the **claycore** C++20 library in the [ClayCore repo](https://github.com/CyberdyneCorp/ClayCore) (CMake presets per docs/05 §13: cpu-only + metal; kernel shim header; test harness) with Mac+Linux CI build
+- [ ] 1.2 Create the Xcode project (Swift, SwiftUI shell, CAMetalLayer viewport, iPadOS 18+ target) consuming ClayCore via SwiftPM-wrapped C ABI pinned by tag, with CI build
 - [ ] 1.3 Metal prototype: sparse brick evaluation (16³ fp16 bricks) of a 100-item edit list + sphere-traced MatCap view, kernels compiled from the shared claycore headers; benchmark on M1 and latest iPad Pro
 - [ ] 1.4 Metal prototype: analytic live-drag raymarch of a short edit list via argument buffers; measure stroke-preview latency
 - [ ] 1.5 GPU marching cubes prototype over the brick cache; verify watertightness on boolean-heavy cases

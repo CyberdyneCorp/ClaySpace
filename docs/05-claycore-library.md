@@ -1,5 +1,7 @@
 # claycore — C++20 SDF + Voxel Engine Library
 
+**Repository:** <https://github.com/CyberdyneCorp/ClayCore> (separate repo; the ClaySpace app consumes it as a dependency — see §13)
+
 Complete description of `claycore`, the portable C++20 core that owns all SDF/voxel mathematics, scene semantics, evaluation, meshing, and file I/O for ClaySpace — and stands alone as a reusable engine for tools, pipelines, and research. The iPad app is claycore's first client, not its boundary.
 
 Math and algorithms are the ones catalogued in [01-sdf-math-foundations.md](01-sdf-math-foundations.md); architecture follows the decisions in the `add-clayspace-v1` OpenSpec change (Dreams-style brick cache, ordered edit lists, rigid blends).
@@ -202,8 +204,9 @@ assimp is kept out of the shipping library (heavy, licensing surface) but used *
 
 ## 13. Build, packaging, testing
 
+- **Separate repository** ([CyberdyneCorp/ClayCore](https://github.com/CyberdyneCorp/ClayCore)) with its own CI, versioning, and release cadence; ClaySpace pins it by tag. Cross-repo coordination: claycore changes that alter spec-visible behavior are proposed as OpenSpec changes in the ClaySpace repo (which owns the product specs), referencing the ClayCore PR.
 - **CMake** presets: `cpu-only` (any platform), `+metal` (Apple), `+cuda`, `+opencl`; warnings-as-errors, sanitizers in CI.
-- **SwiftPM wrapper** target so the Xcode app consumes claycore as a package (prebuilt xcframework or source).
+- **SwiftPM wrapper** target so the Xcode app consumes claycore as a package (prebuilt xcframework or source, resolved from the ClayCore repo by version tag).
 - **Wheels** via scikit-build-core + cibuildwheel.
 - **clay-cli**: `clay mesh in.clayspace --res 512 -o out.fbx`, `clay validate out.fbx`, `clay eval --points pts.npy` — CI's workhorse and a user-facing converter.
 - **Test pyramid**: kernel unit tests vs. reference values from docs/01 → property tests (Lipschitz bounds hold, blends rigid, locality bit-identity) → backend parity suite → golden-scene meshing tests (watertight/manifold across the op matrix) → I/O round-trip + fuzz → performance benchmarks with regression gates (points/sec, bricks/sec, mesh time on fixed scenes).

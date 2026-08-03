@@ -37,7 +37,7 @@ _None — greenfield project, no existing specs._
 ## Impact
 
 - New Xcode project: Swift + SwiftUI/UIKit app shell, Metal compute for SDF evaluation/meshing, PencilKit-adjacent raw `UITouch`/`UIPencilInteraction` input handling.
-- New C++20 core library **claycore** (see `docs/05-claycore-library.md` and design D9) owning all SDF/voxel math, scene semantics, meshing, and file I/O; the app consumes it via a C ABI. Headless — its test suite runs on Mac/Linux CI.
+- New C++20 core library **claycore** in its own repository ([CyberdyneCorp/ClayCore](https://github.com/CyberdyneCorp/ClayCore); see `docs/05-claycore-library.md` and design D9) owning all SDF/voxel math, scene semantics, meshing, and file I/O; the app consumes it via a C ABI, pinned by version tag. Headless — its test suite runs on Mac/Linux CI. Implementation tasks marked "claycore" in tasks.md land in that repo.
 - Third-party surface: FBX I/O requires a library decision (ufbx/FBX SDK/Assimp — see design.md); OBJ and USDZ are feasible with Model I/O.
 - No existing code is affected (greenfield repo; only `docs/` exists).
 - Non-goals for v1 (explicit scope guardrail): path-traced rendering, cloud sync/collaboration beyond iCloud documents, generative/ML mesh-to-CSG import, 3D-print health tooling, rigging/animation, macOS/visionOS targets, monetization mechanics.
