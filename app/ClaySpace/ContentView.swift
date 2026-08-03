@@ -7,15 +7,26 @@ import ClayCoreC
 /// contextual bars arrive with their own tasks (groups 5–8).
 struct ContentView: View {
     @State private var state = ViewportState()
+    @State private var showGestures = false
+    @AppStorage("hasSeenGesturesSheet") private var hasSeenGestures = false
     private let coreVersion = String(cString: clay_version_string())
 
     var body: some View {
         HStack(spacing: 0) {
+            ToolRail(state: state)
             ZStack(alignment: .top) {
                 MetalViewport(state: state)
                     .ignoresSafeArea()
                 topBar
                 toastOverlay
+                if let anchor = state.radialMenuLocation {
+                    RadialMenu(
+                        anchor: anchor,
+                        actions: state.radialActions,
+                        perform: { state.perform($0) },
+                        dismiss: { state.closeRadialMenu() }
+                    )
+                }
             }
             if state.inspectorVisible {
                 inspector
@@ -23,6 +34,13 @@ struct ContentView: View {
             }
         }
         .animation(.easeOut(duration: 0.2), value: state.inspectorVisible)
+        .sheet(isPresented: $showGestures) { GesturesSheet() }
+        .onAppear {
+            if !hasSeenGestures {
+                hasSeenGestures = true
+                showGestures = true
+            }
+        }
     }
 
     private var topBar: some View {
@@ -36,6 +54,10 @@ struct ContentView: View {
             Text(coreVersion)
                 .font(.system(size: 11, design: .monospaced))
                 .foregroundStyle(.secondary)
+            Button("Gestures") { showGestures = true }
+                .font(.system(size: 13))
+                .buttonStyle(.bordered)
+                .tint(.secondary)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)

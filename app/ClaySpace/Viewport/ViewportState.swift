@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import CoreGraphics
 
 /// Shared state between the SwiftUI chrome and the Metal viewport.
 /// The gesture layer mutates it; the renderer reads `camera` each frame.
@@ -9,6 +10,59 @@ final class ViewportState {
     var camera = OrbitCamera()
     var toast: String?
     var inspectorVisible = true
+
+    // MARK: Tools
+
+    var activeTool: Tool = .sculpt
+    private var previousTool: Tool = .sculpt
+    /// MRU order; seeds the radial menu's six slots (5 tools + Undo).
+    private(set) var recentTools: [Tool] = Tool.allCases
+
+    /// Radial menu anchor in viewport coordinates; nil = closed.
+    var radialMenuLocation: CGPoint?
+
+    func activate(_ tool: Tool, announce: Bool = true) {
+        if tool != activeTool { previousTool = activeTool }
+        activeTool = tool
+        recentTools.removeAll { $0 == tool }
+        recentTools.insert(tool, at: 0)
+        if announce { showToast(tool.title) }
+    }
+
+    /// Pencil double-tap: eraser toggle (input-gestures spec).
+    func togglePencilEraser() {
+        if activeTool == .erase {
+            activate(previousTool)
+        } else {
+            activate(.erase)
+        }
+    }
+
+    var radialActions: [RadialAction] {
+        recentTools.prefix(5).map { RadialAction.tool($0) } + [.undo]
+    }
+
+    func openRadialMenu(at point: CGPoint) {
+        radialMenuLocation = point
+    }
+
+    func closeRadialMenu() {
+        radialMenuLocation = nil
+    }
+
+    func perform(_ action: RadialAction) {
+        switch action {
+        case .tool(let tool): activate(tool)
+        case .undo: requestUndo()
+        }
+        closeRadialMenu()
+    }
+
+    /// Pencil Pro barrel roll. Applied to the selected item's rotation once
+    /// selection exists (sdf-sculpting spec); plumbing only until then.
+    func pencilBarrelRolled(delta: Float) {
+        _ = delta
+    }
 
     private var toastTask: Task<Void, Never>?
 

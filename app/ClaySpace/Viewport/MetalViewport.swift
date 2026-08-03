@@ -35,6 +35,9 @@ final class MetalViewportView: UIView {
     /// Finger touches currently on the viewport, in begin order.
     private var fingerTouches: [UITouch] = []
 
+    /// Last observed Pencil barrel-roll angle (Pencil Pro), radians.
+    private var lastRollAngle: Float?
+
     init(state: ViewportState) {
         self.state = state
         super.init(frame: .zero)
@@ -66,6 +69,20 @@ final class MetalViewportView: UIView {
         let edgeSwipe = UIScreenEdgePanGestureRecognizer(target: self, action: #selector(edgeSwiped))
         edgeSwipe.edges = .right
         addGestureRecognizer(edgeSwipe)
+
+        // Pencil Pro squeeze + double-tap (input-gestures spec).
+        addInteraction(UIPencilInteraction(delegate: self))
+
+        // Radial-menu fallback for Pencils without squeeze: pencil long-press.
+        let pencilHold = UILongPressGestureRecognizer(target: self, action: #selector(pencilHeld))
+        pencilHold.allowedTouchTypes = [UITouch.TouchType.pencil.rawValue as NSNumber]
+        pencilHold.minimumPressDuration = 0.45
+        addGestureRecognizer(pencilHold)
+    }
+
+    @objc private func pencilHeld(_ recognizer: UILongPressGestureRecognizer) {
+        guard recognizer.state == .began else { return }
+        state.openRadialMenu(at: recognizer.location(in: self))
     }
 
     @objc private func undoTapped() { state.requestUndo() }
@@ -93,8 +110,21 @@ final class MetalViewportView: UIView {
         for touch in touches where touch.type == .pencil {
             pencilSink?.pencilMoved(to: touch.location(in: self),
                                     pressure: pressure(of: touch))
+            trackBarrelRoll(of: touch)
         }
         updateCamera(movedTouches: touches)
+    }
+
+    /// Pencil Pro barrel roll: forward the incremental angle to the state
+    /// (applied to the selected item once selection exists).
+    private func trackBarrelRoll(of touch: UITouch) {
+        let angle = Float(touch.rollAngle)
+        defer { lastRollAngle = angle }
+        guard let last = lastRollAngle else { return }
+        var delta = angle - last
+        if delta > .pi { delta -= 2 * .pi }
+        if delta < -.pi { delta += 2 * .pi }
+        if delta != 0 { state.pencilBarrelRolled(delta: delta) }
     }
 
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
@@ -109,6 +139,7 @@ final class MetalViewportView: UIView {
         for touch in touches {
             if touch.type == .pencil {
                 pencilSink?.pencilEnded(at: touch.location(in: self))
+                lastRollAngle = nil
             } else {
                 fingerTouches.removeAll { $0 === touch }
             }
@@ -193,5 +224,30 @@ final class MetalViewportView: UIView {
         renderer?.draw(to: drawable,
                        time: Float(CACurrentMediaTime() - startTime),
                        camera: state.camera)
+    }
+}
+
+// MARK: Pencil Pro squeeze & double-tap
+
+extension MetalViewportView: UIPencilInteractionDelegate {
+    func pencilInteraction(_ interaction: UIPencilInteraction,
+                           didReceiveSqueeze squeeze: UIPencilInteraction.Squeeze) {
+        guard squeeze.phase == .ended else { return }
+        // Squeeze opens the recent-tools radial menu under the hand, at the
+        // hover position when available (input-gestures spec).
+        let anchor = squeeze.hoverPose?.location
+            ?? CGPoint(x: bounds.midX, y: bounds.midY)
+        state.openRadialMenu(at: anchor)
+    }
+
+    func pencilInteractionDidTap(_ interaction: UIPencilInteraction) {
+        // Respect the system-level double-tap preference: only act for the
+        // eraser/previous-tool intents; .ignore means do nothing.
+        switch UIPencilInteraction.preferredTapAction {
+        case .ignore:
+            break
+        default:
+            state.togglePencilEraser()
+        }
     }
 }
