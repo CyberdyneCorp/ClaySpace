@@ -19,6 +19,15 @@ struct ContentView: View {
                     .ignoresSafeArea()
                 topBar
                 toastOverlay
+                VStack {
+                    Spacer().frame(height: 58)
+                    HStack {
+                        Spacer()
+                        ViewportHUD(state: state)
+                            .padding(.trailing, 14)
+                    }
+                    Spacer()
+                }
                 if let anchor = state.radialMenuLocation {
                     RadialMenu(
                         anchor: anchor,

@@ -68,6 +68,29 @@ struct OrbitCamera {
         return cam
     }
 
+    // MARK: Interpolation (bookmark/preset recall animation)
+
+    static func interpolate(from a: OrbitCamera, to b: OrbitCamera, t: Float) -> OrbitCamera {
+        func mix(_ x: Float, _ y: Float) -> Float { x + (y - x) * t }
+        var azimuthDelta = b.azimuth - a.azimuth
+        while azimuthDelta > .pi { azimuthDelta -= 2 * .pi }
+        while azimuthDelta < -.pi { azimuthDelta += 2 * .pi }
+
+        var cam = b
+        cam.azimuth = a.azimuth + azimuthDelta * t
+        cam.elevation = mix(a.elevation, b.elevation)
+        cam.distance = mix(a.distance, b.distance)
+        cam.rollAngle = mix(a.rollAngle, b.rollAngle)
+        cam.lens = mix(a.lens, b.lens)
+        cam.target = a.target + (b.target - a.target) * t
+        // Ortho half-height lerps toward zero as extreme zoom; when the
+        // projection kind changes, switch at the midpoint instead.
+        cam.orthoHalfHeight = a.isOrthographic == b.isOrthographic
+            ? mix(a.orthoHalfHeight, b.orthoHalfHeight)
+            : (t < 0.5 ? a.orthoHalfHeight : b.orthoHalfHeight)
+        return cam
+    }
+
     // MARK: Ray-generation basis (consumed by the renderer)
 
     var position: SIMD3<Float> {

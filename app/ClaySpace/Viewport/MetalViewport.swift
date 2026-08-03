@@ -101,6 +101,7 @@ final class MetalViewportView: UIView {
                 pencilSink?.pencilBegan(at: touch.location(in: self),
                                         pressure: pressure(of: touch))
             } else {
+                state.cancelCameraAnimation() // touch takes over any recall
                 fingerTouches.append(touch)
             }
         }

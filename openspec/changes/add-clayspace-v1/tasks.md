@@ -34,8 +34,8 @@
 - [ ] 4.1 Sphere-tracing renderer over brick caches: pixel-proportional epsilon, tetrahedron normals, MatCap shading (≥3 matcaps)
 - [ ] 4.2 Field-derived AO + soft shadows with light-direction dial hookup
 - [ ] 4.3 Voxel layer renderer: greedy meshing + raster pass, depth-composited with the raymarch pass
-- [ ] 4.4 Camera system: orbit/pan/zoom/roll, perspective/ortho + presets, orientation widget, zoom-to-selection, camera bookmarks — IN PROGRESS: `OrbitCamera` (orbit/pan/zoom/roll, perspective/ortho, axis presets) done; orientation widget, zoom-to-selection, and bookmarks pending
-- [ ] 4.5 Selection highlight incl. occluded X-ray hint; on-canvas status/hints/toasts
+- [x] 4.4 Camera system: orbit/pan/zoom/roll, perspective/ortho + presets, orientation widget, zoom-to-selection, camera bookmarks — `OrbitCamera` + `ViewportHUD` (Front/Side/Top/Home, projection toggle, 4 bookmark slots tap-recall/hold-save with animated interpolation, view readout); zoom-to-selection deferred to 4.5 with selection highlighting
+- [ ] 4.5 Selection highlight incl. occluded X-ray hint; on-canvas status/hints/toasts; zoom-to-selection (deferred from 4.4, needs selection bounds)
 - [ ] 4.6 Performance pass to spec targets (60/120 fps, ≤1-frame stroke preview, ≤250 ms refinement); MetalFX if needed
 
 ## 5. Input — Pencil & touch

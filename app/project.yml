@@ -29,3 +29,4 @@ targets:
         INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad: "UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown"
         INFOPLIST_KEY_UIStatusBarHidden: YES
         CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: 2C69VJZSNR

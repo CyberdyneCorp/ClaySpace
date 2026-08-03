@@ -64,6 +64,75 @@ final class ViewportState {
         _ = delta
     }
 
+    // MARK: Camera bookmarks, presets & animated recall (task 4.4)
+
+    private(set) var bookmarks: [OrbitCamera?] = [nil, nil, nil, nil]
+    private var cameraAnimationTask: Task<Void, Never>?
+
+    func saveBookmark(_ slot: Int) {
+        guard bookmarks.indices.contains(slot) else { return }
+        bookmarks[slot] = camera
+        showToast("Saved view \(slot + 1)")
+    }
+
+    func recallBookmark(_ slot: Int) {
+        guard bookmarks.indices.contains(slot) else { return }
+        guard let saved = bookmarks[slot] else {
+            showToast("Hold to save view \(slot + 1)")
+            return
+        }
+        animateCamera(to: saved)
+    }
+
+    enum ViewPreset: String, CaseIterable {
+        case front = "Front", side = "Side", top = "Top", home = "Home"
+    }
+
+    func go(to preset: ViewPreset) {
+        switch preset {
+        case .front: animateCamera(to: .preset(front: true, distance: camera.distance))
+        case .side: animateCamera(to: .preset(side: true, distance: camera.distance))
+        case .top: animateCamera(to: .preset(top: true, distance: camera.distance))
+        case .home: animateCamera(to: OrbitCamera())
+        }
+        showToast(preset.rawValue)
+    }
+
+    func toggleProjection() {
+        var target = camera
+        target.setOrthographic(!camera.isOrthographic)
+        camera = target
+        showToast(camera.isOrthographic ? "Orthographic" : "Perspective")
+    }
+
+    /// User touch takes over instantly: any in-flight recall stops.
+    func cancelCameraAnimation() {
+        cameraAnimationTask?.cancel()
+        cameraAnimationTask = nil
+    }
+
+    private func animateCamera(to target: OrbitCamera, duration: Double = 0.35) {
+        cancelCameraAnimation()
+        let start = camera
+        cameraAnimationTask = Task { [weak self] in
+            let steps = max(Int(duration * 120), 1)
+            for step in 1...steps {
+                try? await Task.sleep(for: .seconds(duration / Double(steps)))
+                guard !Task.isCancelled, let self else { return }
+                let t = Float(step) / Float(steps)
+                let eased = t * t * (3 - 2 * t)
+                self.camera = .interpolate(from: start, to: target, t: eased)
+            }
+        }
+    }
+
+    var viewLabel: String {
+        let degrees = (Int(camera.azimuth * 180 / .pi) % 360 + 360) % 360
+        let zoom = Int((3.2 / max(camera.distance, 0.01)) * 100)
+        let projection = camera.isOrthographic ? "ortho" : "persp"
+        return "Turn \(degrees)° · \(zoom)% · \(projection)"
+    }
+
     private var toastTask: Task<Void, Never>?
 
     func showToast(_ message: String) {
