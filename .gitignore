@@ -1,1 +1,7 @@
 .DS_Store
+
+# Xcode — project is generated from app/project.yml via xcodegen
+app/ClaySpace.xcodeproj
+xcuserdata/
+DerivedData/
+.build/

@@ -3,7 +3,7 @@
 ## 1. Milestone 0 — Feasibility spike (de-risk before hardening)
 
 - [ ] 1.1 Scaffold the **claycore** C++20 library in the [ClayCore repo](https://github.com/CyberdyneCorp/ClayCore) (CMake presets per docs/05 §13: cpu-only + metal; kernel shim header; test harness) with Mac+Linux CI build
-- [ ] 1.2 Create the Xcode project (Swift, SwiftUI shell, CAMetalLayer viewport, iPadOS 18+ target) consuming ClayCore via SwiftPM-wrapped C ABI pinned by tag, with CI build
+- [x] 1.2 Create the Xcode project (Swift, SwiftUI shell, CAMetalLayer viewport, iPadOS 18+ target) consuming ClayCore via SwiftPM-wrapped C ABI pinned by tag, with CI build — shipped against local `packages/ClayCoreStub` until the real package publishes (see 2.8); project generated from `app/project.yml` (xcodegen)
 - [ ] 1.3 Metal prototype: sparse brick evaluation (16³ fp16 bricks) of a 100-item edit list + sphere-traced MatCap view, kernels compiled from the shared claycore headers; benchmark on M1 and latest iPad Pro
 - [ ] 1.4 Metal prototype: analytic live-drag raymarch of a short edit list via argument buffers; measure stroke-preview latency
 - [ ] 1.5 GPU marching cubes prototype over the brick cache; verify watertightness on boolean-heavy cases
@@ -18,6 +18,7 @@
 - [ ] 2.5 Binary document format (versioned chunks, RLE voxel grids, embedded thumbnail) + load/save round-trip tests
 - [ ] 2.6 UIDocument + document browser integration (Files/iCloud, create/duplicate/rename/delete), autosave, save-state indicator
 - [ ] 2.7 Sample document shipping both layer kinds; first-launch copy-on-open behavior
+- [ ] 2.8 Replace `packages/ClayCoreStub` with the real tag-pinned ClayCore package once its C ABI lands
 
 ## 3. SDF engine (claycore: `kernel`, `brick`, `eval`, `pick`)
 
@@ -33,13 +34,13 @@
 - [ ] 4.1 Sphere-tracing renderer over brick caches: pixel-proportional epsilon, tetrahedron normals, MatCap shading (≥3 matcaps)
 - [ ] 4.2 Field-derived AO + soft shadows with light-direction dial hookup
 - [ ] 4.3 Voxel layer renderer: greedy meshing + raster pass, depth-composited with the raymarch pass
-- [ ] 4.4 Camera system: orbit/pan/zoom/roll, perspective/ortho + presets, orientation widget, zoom-to-selection, camera bookmarks
+- [ ] 4.4 Camera system: orbit/pan/zoom/roll, perspective/ortho + presets, orientation widget, zoom-to-selection, camera bookmarks — IN PROGRESS: `OrbitCamera` (orbit/pan/zoom/roll, perspective/ortho, axis presets) done; orientation widget, zoom-to-selection, and bookmarks pending
 - [ ] 4.5 Selection highlight incl. occluded X-ray hint; on-canvas status/hints/toasts
 - [ ] 4.6 Performance pass to spec targets (60/120 fps, ≤1-frame stroke preview, ≤250 ms refinement); MetalFX if needed
 
 ## 5. Input — Pencil & touch
 
-- [ ] 5.1 Touch router: pencil→tools, fingers→camera; recognizer suite (1-finger orbit, 2-finger pinch/pan/twist, 3-/4-finger tap undo/redo, right-edge swipe)
+- [x] 5.1 Touch router: pencil→tools, fingers→camera; recognizer suite (1-finger orbit, 2-finger pinch/pan/twist, 3-/4-finger tap undo/redo, right-edge swipe) — pencil routes to the `PencilToolSink` protocol (tools attach in 5.2+); undo/redo taps show honest placeholder toasts until the command stack lands (2.2)
 - [ ] 5.2 Pencil pressure/tilt pipeline with real-time tool preview binding
 - [ ] 5.3 Hover previews (voxel ghost, primitive footprint, stroke tip)
 - [ ] 5.4 UIPencilInteraction: squeeze→radial menu (6 recent tools, long-press fallback), double-tap→eraser toggle, barrel roll→rotate selection

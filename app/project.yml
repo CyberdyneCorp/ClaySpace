@@ -1,0 +1,31 @@
+name: ClaySpace
+options:
+  bundleIdPrefix: com.cyberdyne
+  deploymentTarget:
+    iOS: "18.0"
+  createIntermediateGroups: true
+
+packages:
+  ClayCoreStub:
+    path: ../packages/ClayCoreStub
+
+targets:
+  ClaySpace:
+    type: application
+    platform: iOS
+    deploymentTarget: "18.0"
+    sources:
+      - ClaySpace
+    dependencies:
+      - package: ClayCoreStub
+        product: ClayCoreC
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.cyberdyne.clayspace
+        TARGETED_DEVICE_FAMILY: "2"          # iPad only
+        SWIFT_VERSION: "6.0"
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad: "UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown"
+        INFOPLIST_KEY_UIStatusBarHidden: YES
+        CODE_SIGN_STYLE: Automatic
