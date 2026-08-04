@@ -7,14 +7,14 @@ struct ViewportHUD: View {
 
     var body: some View {
         VStack(alignment: .trailing, spacing: 6) {
+            NavigationGizmo(state: state)
+
             HStack(spacing: 2) {
-                ForEach(ViewportState.ViewPreset.allCases, id: \.self) { preset in
-                    Button(preset.rawValue) { state.go(to: preset) }
-                        .font(.system(size: 12))
-                        .padding(.horizontal, 9)
-                        .padding(.vertical, 6)
-                        .foregroundStyle(.primary)
-                }
+                Button("Home") { state.go(to: .home) }
+                    .font(.system(size: 12))
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 6)
+                    .foregroundStyle(.primary)
                 Divider().frame(height: 16)
                 Button {
                     state.toggleProjection()

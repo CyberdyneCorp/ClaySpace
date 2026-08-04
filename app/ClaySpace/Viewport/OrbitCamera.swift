@@ -12,7 +12,7 @@ struct OrbitCamera {
     var lens: Float = 1.7          // perspective focal factor (rd z-scale)
     var orthoHalfHeight: Float = 0 // > 0 switches to orthographic
 
-    private static let elevationLimit: Float = 1.53
+    static let elevationLimit: Float = 1.53
 
     // MARK: Navigation
 

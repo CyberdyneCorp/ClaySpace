@@ -98,6 +98,23 @@ final class ViewportState {
         showToast(preset.rawValue)
     }
 
+    /// Navigation-gizmo snap: place the camera on the given world axis
+    /// (Blender-style), switching to orthographic like the axis presets.
+    func snapToAxis(_ axis: SIMD3<Float>, named name: String) {
+        var target = camera
+        if axis.y > 0.5 {
+            target.elevation = OrbitCamera.elevationLimit
+        } else if axis.y < -0.5 {
+            target.elevation = -OrbitCamera.elevationLimit
+        } else {
+            target.elevation = 0
+            target.azimuth = atan2(axis.x, axis.z)
+        }
+        target.setOrthographic(true)
+        animateCamera(to: target)
+        showToast(name)
+    }
+
     func toggleProjection() {
         var target = camera
         target.setOrthographic(!camera.isOrthographic)
