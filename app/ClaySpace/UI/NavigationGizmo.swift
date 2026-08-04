@@ -9,9 +9,9 @@ import simd
 struct NavigationGizmo: View {
     @Bindable var state: ViewportState
 
-    private let diameter: CGFloat = 92
-    private let orbitRadius: CGFloat = 33
-    private let ballSize: CGFloat = 22
+    private let diameter: CGFloat = 118
+    private let orbitRadius: CGFloat = 43
+    private let ballSize: CGFloat = 25
 
     private struct Handle: Identifiable {
         let id: String
@@ -57,12 +57,27 @@ struct NavigationGizmo: View {
                     path.move(to: center)
                     path.addLine(to: point)
                     context.stroke(path, with: .color(handle.color.opacity(depth > 0 ? 0.35 : 0.9)),
-                                   lineWidth: 1.8)
+                                   lineWidth: 2)
                 }
             }
             .allowsHitTesting(false)
+            .zIndex(-2)
 
-            // Balls, back-to-front so front handles win taps and overlap.
+            // Center cube = Home (default perspective view), like Unity's gizmo.
+            Button {
+                state.go(to: .home)
+            } label: {
+                Image(systemName: "cube.fill")
+                    .font(.system(size: 17))
+                    .foregroundStyle(Color(white: 0.55))
+                    .frame(width: 30, height: 30)
+                    .contentShape(Circle())
+            }
+            .position(center)
+            .zIndex(0)
+            .accessibilityLabel("Home view")
+
+            // Balls; front handles layer above the center cube, back ones below.
             ForEach(projected.sorted { $0.2 > $1.2 }, id: \.0.id) { handle, point, depth in
                 let behind = depth > 0
                 Button {
@@ -84,6 +99,7 @@ struct NavigationGizmo: View {
                     .frame(width: ballSize, height: ballSize)
                 }
                 .position(point)
+                .zIndex(Double(-depth))
                 .accessibilityLabel("\(handle.viewName) view")
             }
         }

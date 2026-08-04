@@ -6,57 +6,21 @@ struct ViewportHUD: View {
     @Bindable var state: ViewportState
 
     var body: some View {
-        VStack(alignment: .trailing, spacing: 6) {
+        VStack(alignment: .center, spacing: 2) {
             NavigationGizmo(state: state)
 
-            HStack(spacing: 2) {
-                Button("Home") { state.go(to: .home) }
-                    .font(.system(size: 12))
-                    .padding(.horizontal, 9)
-                    .padding(.vertical, 6)
-                    .foregroundStyle(.primary)
-                Divider().frame(height: 16)
-                Button {
-                    state.toggleProjection()
-                } label: {
-                    Image(systemName: state.camera.isOrthographic ? "grid" : "cube.transparent")
-                        .font(.system(size: 13))
-                        .padding(.horizontal, 9)
-                        .padding(.vertical, 6)
-                        .foregroundStyle(.primary)
-                }
-                .accessibilityLabel("Toggle projection")
+            // Tappable readout doubles as the persp/ortho toggle,
+            // like Unity's "Persp" tag under its gizmo.
+            Button {
+                state.toggleProjection()
+            } label: {
+                Text(state.viewLabel)
+                    .font(.system(size: 10.5, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
             }
-            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 5))
-
-            HStack(spacing: 4) {
-                ForEach(0..<4, id: \.self) { slot in
-                    Button {
-                        state.recallBookmark(slot)
-                    } label: {
-                        Text("\(slot + 1)")
-                            .font(.system(size: 11, weight: .medium))
-                            .frame(width: 26, height: 24)
-                            .foregroundStyle(state.bookmarks[slot] == nil ? .secondary : .primary)
-                            .background(
-                                RoundedRectangle(cornerRadius: 4)
-                                    .fill(state.bookmarks[slot] == nil ? .clear : .orange.opacity(0.25))
-                            )
-                    }
-                    .simultaneousGesture(
-                        LongPressGesture(minimumDuration: 0.4).onEnded { _ in
-                            state.saveBookmark(slot)
-                        }
-                    )
-                    .accessibilityLabel("View bookmark \(slot + 1)")
-                }
-            }
-            .padding(3)
-            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 5))
-
-            Text(state.viewLabel)
-                .font(.system(size: 10.5, design: .monospaced))
-                .foregroundStyle(.secondary)
+            .accessibilityLabel("Toggle projection")
         }
     }
 }

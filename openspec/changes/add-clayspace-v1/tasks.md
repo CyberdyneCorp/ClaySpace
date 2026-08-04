@@ -34,7 +34,7 @@
 - [ ] 4.1 Sphere-tracing renderer over brick caches: pixel-proportional epsilon, tetrahedron normals, MatCap shading (≥3 matcaps)
 - [ ] 4.2 Field-derived AO + soft shadows with light-direction dial hookup
 - [ ] 4.3 Voxel layer renderer: greedy meshing + raster pass, depth-composited with the raymarch pass
-- [x] 4.4 Camera system: orbit/pan/zoom/roll, perspective/ortho + presets, orientation widget, zoom-to-selection, camera bookmarks — `OrbitCamera` + `ViewportHUD` (Front/Side/Top/Home, projection toggle, 4 bookmark slots tap-recall/hold-save with animated interpolation, view readout); zoom-to-selection deferred to 4.5 with selection highlighting
+- [x] 4.4 Camera system: orbit/pan/zoom/roll, perspective/ortho + presets, orientation widget, zoom-to-selection, camera bookmarks — `OrbitCamera` + Blender-style `NavigationGizmo` (axis balls snap views, center cube = Home) with tappable persp/ortho readout; zoom-to-selection deferred to 4.5. NOTE: bookmark save/recall lives in `ViewportState` but its UI was removed by design review — the viewport-rendering spec requires ≥4 bookmarks, so give them a new surface (e.g. gizmo long-press or a view menu) or amend the spec before archiving
 - [ ] 4.5 Selection highlight incl. occluded X-ray hint; on-canvas status/hints/toasts; zoom-to-selection (deferred from 4.4, needs selection bounds)
 - [ ] 4.6 Performance pass to spec targets (60/120 fps, ≤1-frame stroke preview, ≤250 ms refinement); MetalFX if needed
 
