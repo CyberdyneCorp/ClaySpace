@@ -36,6 +36,13 @@ final class MetalViewportView: UIView {
     private var fingerTouches: [UITouch] = []
     private var fingerStartLocations: [UITouch: CGPoint] = [:]
 
+    /// Dynamic resolution: render at reduced scale while any touch is down
+    /// (camera moves, sculpt strokes), native when idle. The raymarcher's
+    /// cost is per-pixel, so this halves interaction cost where it matters.
+    private var activeTouchCount = 0
+    private var currentRenderScale: CGFloat = 1.0
+    private static let interactionRenderScale: CGFloat = 0.72
+
     /// Last observed Pencil barrel-roll angle (Pencil Pro), radians.
     private var lastRollAngle: Float?
 
@@ -98,6 +105,7 @@ final class MetalViewportView: UIView {
     // MARK: Touch routing (pencil → tool, fingers → camera)
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        activeTouchCount += touches.count
         for touch in touches {
             if touch.type == .pencil {
                 pencilSink?.pencilBegan(at: touch.location(in: self),
@@ -140,6 +148,7 @@ final class MetalViewportView: UIView {
     }
 
     private func removeTouches(_ touches: Set<UITouch>) {
+        activeTouchCount = max(0, activeTouchCount - touches.count)
         for touch in touches {
             if touch.type == .pencil {
                 pencilSink?.pencilEnded(at: touch.location(in: self))
@@ -231,7 +240,11 @@ final class MetalViewportView: UIView {
     override func layoutSubviews() {
         super.layoutSubviews()
         state.viewportSize = bounds.size
-        let scale = window?.screen.scale ?? traitCollection.displayScale
+        updateDrawableSize()
+    }
+
+    private func updateDrawableSize() {
+        let scale = (window?.screen.scale ?? traitCollection.displayScale) * currentRenderScale
         let size = CGSize(width: bounds.width * scale, height: bounds.height * scale)
         if size.width > 0, size.height > 0 {
             metalLayer.drawableSize = size
@@ -239,11 +252,17 @@ final class MetalViewportView: UIView {
     }
 
     @objc private func step(_ link: CADisplayLink) {
+        let targetScale = activeTouchCount > 0 ? Self.interactionRenderScale : 1.0
+        if targetScale != currentRenderScale {
+            currentRenderScale = targetScale
+            updateDrawableSize()
+        }
         guard let drawable = metalLayer.nextDrawable() else { return }
         renderer?.draw(to: drawable,
                        time: Float(CACurrentMediaTime() - startTime),
                        camera: state.camera,
                        items: state.engine.items,
+                       strokePoints: state.engine.strokePoints,
                        sceneVersion: state.engine.version)
     }
 }

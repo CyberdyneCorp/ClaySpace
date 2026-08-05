@@ -25,6 +25,7 @@ final class Renderer {
 
     static let maxItems = 256
     private let itemBuffer: MTLBuffer
+    private let strokePointBuffer: MTLBuffer
     private var uploadedVersion = -1
 
     init?(device: MTLDevice, pixelFormat: MTLPixelFormat) {
@@ -42,20 +43,31 @@ final class Renderer {
         guard let pipeline = try? device.makeRenderPipelineState(descriptor: descriptor),
               let itemBuffer = device.makeBuffer(
                   length: MemoryLayout<SceneItem>.stride * Self.maxItems,
+                  options: .storageModeShared),
+              let strokePointBuffer = device.makeBuffer(
+                  length: MemoryLayout<SIMD4<Float>>.stride * ClayEngine.maxStrokePoints,
                   options: .storageModeShared)
         else { return nil }
 
         self.queue = queue
         self.pipeline = pipeline
         self.itemBuffer = itemBuffer
+        self.strokePointBuffer = strokePointBuffer
     }
 
     func draw(to drawable: CAMetalDrawable, time: Float, camera: OrbitCamera,
-              items: [SceneItem], sceneVersion: Int) {
+              items: [SceneItem], strokePoints: [SIMD4<Float>], sceneVersion: Int) {
         if sceneVersion != uploadedVersion {
             let count = min(items.count, Self.maxItems)
             items.prefix(count).withUnsafeBytes { src in
                 itemBuffer.contents().copyMemory(from: src.baseAddress!, byteCount: src.count)
+            }
+            if !strokePoints.isEmpty {
+                let pointCount = min(strokePoints.count, ClayEngine.maxStrokePoints)
+                strokePoints.prefix(pointCount).withUnsafeBytes { src in
+                    strokePointBuffer.contents().copyMemory(from: src.baseAddress!,
+                                                            byteCount: src.count)
+                }
             }
             uploadedVersion = sceneVersion
         }
@@ -84,6 +96,7 @@ final class Renderer {
         encoder.setRenderPipelineState(pipeline)
         encoder.setFragmentBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 0)
         encoder.setFragmentBuffer(itemBuffer, offset: 0, index: 1)
+        encoder.setFragmentBuffer(strokePointBuffer, offset: 0, index: 2)
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
         encoder.endEncoding()
 

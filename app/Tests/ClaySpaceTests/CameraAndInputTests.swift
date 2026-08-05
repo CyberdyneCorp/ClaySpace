@@ -111,12 +111,26 @@ final class CameraAndInputTests: XCTestCase {
         XCTAssertEqual(state.engine.items.count, 1, "the undo gesture unwinds the tap")
     }
 
-    func testDragBeyondSlopDoesNotPlace() {
+    func testPencilDragSmearsASingleStroke() {
         let state = ViewportState()
         state.viewportSize = CGSize(width: 800, height: 600)
+        state.activate(.sculpt, announce: false)
+
         state.pencilBegan(at: CGPoint(x: 400, y: 300), pressure: 0.5)
-        state.pencilEnded(at: CGPoint(x: 460, y: 300))
-        XCTAssertEqual(state.engine.items.count, 1, "a drag is not a tap (strokes land later)")
+        for x in stride(from: 410, through: 560, by: 10) {
+            state.pencilMoved(to: CGPoint(x: CGFloat(x), y: 300), pressure: 0.6)
+        }
+        state.pencilEnded(at: CGPoint(x: 560, y: 300))
+
+        XCTAssertEqual(state.engine.items.count, 2, "one stroke item, not a trail of spheres")
+        let stroke = state.engine.items[1]
+        XCTAssertEqual(stroke.prim, ClayEngine.strokePrim)
+        XCTAssertGreaterThan(Int(stroke.params.y), 2, "the drag appended chain points")
+        XCTAssertEqual(state.engine.strokePoints.count, Int(stroke.params.y))
+
+        state.requestUndo()
+        XCTAssertEqual(state.engine.items.count, 1, "the whole smear undoes as one step")
+        XCTAssertTrue(state.engine.strokePoints.isEmpty, "the point pool trims with it")
     }
 
     func testEraseTapCarves() {

@@ -54,6 +54,38 @@ final class ClayEngineTests: XCTestCase {
                      "a ray over the scene misses")
     }
 
+    func testStrokeLifecycleGroupsUndoAndSyncsThePointPool() throws {
+        let engine = ClayEngine()
+        XCTAssertTrue(engine.beginStroke(at: SIMD3(0, 1.6, 0), radius: 0.15,
+                                         op: CLAY_OP_ADD, blendK: 0.08,
+                                         color: ClayEngine.clayColor),
+                      engine.lastError ?? "")
+        XCTAssertTrue(engine.isStroking)
+        XCTAssertFalse(engine.undo(), "undo is unavailable while the group is open")
+
+        engine.appendStrokePoint(SIMD3(0.3, 1.6, 0), radius: 0.15)
+        engine.appendStrokePoint(SIMD3(0.6, 1.6, 0), radius: 0.12)
+        engine.endStroke()
+        XCTAssertFalse(engine.isStroking)
+        XCTAssertEqual(engine.items.count, 2)
+        XCTAssertEqual(engine.strokePoints.count, 3)
+        XCTAssertEqual(Int(engine.items[1].params.y), 3)
+
+        let probe = (origin: SIMD3<Float>(0.6, 1.6, 3), dir: SIMD3<Float>(0, 0, -1))
+        XCTAssertNotNil(engine.raycast(origin: probe.origin, direction: probe.dir),
+                        "the smeared arm is real document geometry")
+
+        XCTAssertTrue(engine.undo())
+        XCTAssertEqual(engine.items.count, 1, "item + all appended points = one step")
+        XCTAssertTrue(engine.strokePoints.isEmpty)
+        XCTAssertNil(engine.raycast(origin: probe.origin, direction: probe.dir),
+                     "the geometry is gone with it")
+
+        XCTAssertTrue(engine.redo())
+        XCTAssertEqual(engine.strokePoints.count, 3, "redo restores the chain")
+        XCTAssertNotNil(engine.raycast(origin: probe.origin, direction: probe.dir))
+    }
+
     func testCarvingRecedesTheSurface() throws {
         let engine = ClayEngine()
         let origin = SIMD3<Float>(0, 0.8, 3)

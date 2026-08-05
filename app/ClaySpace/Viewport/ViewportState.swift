@@ -18,10 +18,14 @@ final class ViewportState {
     /// screen-point → world-ray conversion.
     var viewportSize = CGSize.zero
 
-    // Pencil tap tracking (PencilToolSink extension; stored here because
-    // extensions cannot add storage).
+    // Pencil stroke/tap tracking (PencilToolSink extension; stored here
+    // because extensions cannot add storage).
     fileprivate var pencilStart: CGPoint?
     fileprivate var pencilPeakPressure: Float = 0
+    /// While a smear is live: the working plane through the stroke's start,
+    /// perpendicular to the view, that moves project onto.
+    fileprivate var strokePlane: (point: SIMD3<Float>, normal: SIMD3<Float>)?
+    fileprivate var lastStrokePoint: SIMD3<Float>?
 
     // MARK: Tools
 
@@ -175,12 +179,15 @@ final class ViewportState {
     }
 
     /// Undo/redo: ClayCore's document undo stack (3-/4-finger taps,
-    /// tool-rail buttons, radial menu).
+    /// tool-rail buttons, radial menu). Ignored while a stroke is live —
+    /// its undo group is still open.
     func requestUndo() {
+        guard !engine.isStroking else { return }
         showToast(engine.undo() ? "Undo" : "Nothing to undo")
     }
 
     func requestRedo() {
+        guard !engine.isStroking else { return }
         showToast(engine.redo() ? "Redo" : "Nothing to redo")
     }
 
@@ -202,52 +209,85 @@ protocol PencilToolSink: AnyObject {
 // MARK: Pencil → document edits
 
 extension ViewportState: PencilToolSink {
-    private static let tapSlop: CGFloat = 9
+
+    private func radius(for pressure: Float) -> Float {
+        0.07 + pressure * 0.28
+    }
 
     func pencilBegan(at point: CGPoint, pressure: Float) {
         pencilStart = point
         pencilPeakPressure = max(pressure, 0.1)
+
+        // Sculpt/Erase begin a stroke immediately — a tap is just a
+        // one-point stroke, so the preview responds on touch-down.
+        guard activeTool == .sculpt || activeTool == .erase,
+              let ray = ray(through: point) else { return }
+        let hit = engine.raycast(origin: ray.origin, direction: ray.direction)
+
+        let start: SIMD3<Float>?
+        switch activeTool {
+        case .sculpt: start = hit?.position ?? groundPoint(on: ray)
+        default: start = hit?.position // carving needs a surface
+        }
+        guard let start else { return }
+
+        let r = radius(for: max(pressure, 0.1))
+        let op: clay_op = activeTool == .erase ? CLAY_OP_SUBTRACT : CLAY_OP_ADD
+        let blend = activeTool == .erase ? r * 0.35 : r * 0.55
+        if engine.beginStroke(at: start, radius: r, op: op,
+                              blendK: blend, color: ClayEngine.clayColor) {
+            // Later moves project onto the view-parallel plane through the
+            // start point: predictable smears that don't chase their own
+            // freshly-built surface.
+            strokePlane = (start, camera.basis.forward)
+            lastStrokePoint = start
+        }
     }
 
     func pencilMoved(to point: CGPoint, pressure: Float) {
         pencilPeakPressure = max(pencilPeakPressure, pressure)
+        guard engine.isStroking,
+              let plane = strokePlane,
+              let last = lastStrokePoint,
+              let ray = ray(through: point),
+              let p = intersect(ray: ray, plane: plane) else { return }
+
+        let r = radius(for: max(pressure, 0.1))
+        // Decimate: only append once the Pencil has travelled a fraction of
+        // the brush radius, so point counts stay low and segments smooth.
+        guard simd_distance(p, last) > r * 0.45 else { return }
+        engine.appendStrokePoint(p, radius: r)
+        lastStrokePoint = p
     }
 
     func pencilEnded(at point: CGPoint) {
-        guard let start = pencilStart else { return }
         pencilStart = nil
-        // Taps place edits; drags become sculpt strokes in a later task.
-        guard hypot(point.x - start.x, point.y - start.y) < Self.tapSlop else { return }
-        handleTap(at: point, pressure: pencilPeakPressure)
-    }
-
-    private func handleTap(at point: CGPoint, pressure: Float) {
-        guard let ray = ray(through: point) else { return }
-        let radius = 0.07 + pressure * 0.28
-        let hit = engine.raycast(origin: ray.origin, direction: ray.direction)
-
+        if engine.isStroking {
+            engine.endStroke()
+            strokePlane = nil
+            lastStrokePoint = nil
+            return
+        }
+        // Non-stroke tools: tap actions (placeholders until their tasks).
         switch activeTool {
-        case .sculpt:
-            // On-surface adds blend into the clay; misses build on the floor.
-            let position = hit?.position ?? groundPoint(on: ray)
-            guard let position else {
-                showToast("Tap the clay or the floor")
-                return
-            }
-            engine.addPrimitive(CLAY_PRIM_SPHERE, params: [radius],
-                                at: position, op: CLAY_OP_ADD,
-                                blendK: radius * 0.55, color: ClayEngine.clayColor)
-        case .erase:
-            guard let hit else {
-                showToast("Nothing to carve there")
-                return
-            }
-            engine.addPrimitive(CLAY_PRIM_SPHERE, params: [radius],
-                                at: hit.position, op: CLAY_OP_SUBTRACT,
-                                blendK: radius * 0.35, color: ClayEngine.clayColor)
+        case .erase where strokePlane == nil:
+            showToast("Nothing to carve there")
         case .paint, .select, .move:
             showToast("\(activeTool.title) lands with a later task")
+        default:
+            break
         }
+        strokePlane = nil
+        lastStrokePoint = nil
+    }
+
+    private func intersect(ray: (origin: SIMD3<Float>, direction: SIMD3<Float>),
+                           plane: (point: SIMD3<Float>, normal: SIMD3<Float>)) -> SIMD3<Float>? {
+        let denom = simd_dot(ray.direction, plane.normal)
+        guard abs(denom) > 1e-5 else { return nil }
+        let t = simd_dot(plane.point - ray.origin, plane.normal) / denom
+        guard t > 0 else { return nil }
+        return ray.origin + ray.direction * t
     }
 
     /// World ray through a viewport point — the inverse of the shader's
