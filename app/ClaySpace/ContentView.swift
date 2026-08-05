@@ -29,6 +29,9 @@ struct ContentView: View {
                         Spacer()
                         ViewportHUD(state: state)
                             .padding(.trailing, 14)
+                            .onGeometryChange(for: CGRect.self) {
+                                $0.frame(in: .global)
+                            } action: { state.chromeRects["hud"] = $0 }
                     }
                     Spacer()
                 }
@@ -36,6 +39,9 @@ struct ContentView: View {
                     Spacer()
                     MirrorBar(state: state)
                         .padding(.bottom, 16)
+                        .onGeometryChange(for: CGRect.self) {
+                            $0.frame(in: .global)
+                        } action: { state.chromeRects["mirrorBar"] = $0 }
                 }
                 if let anchor = state.radialMenuLocation {
                     RadialMenu(
@@ -80,6 +86,9 @@ struct ContentView: View {
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
         .background(.ultraThinMaterial)
+        .onGeometryChange(for: CGRect.self) {
+            $0.frame(in: .global)
+        } action: { state.chromeRects["topBar"] = $0 }
     }
 
     private var toastOverlay: some View {

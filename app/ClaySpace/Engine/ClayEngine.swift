@@ -358,6 +358,14 @@ final class ClayEngine {
         scheduleBake()
     }
 
+    /// Aborts the in-flight stroke (touch cancelled by the system/UI): close
+    /// the group and undo it, so the cancelled gesture leaves no edit.
+    func cancelStroke() {
+        guard activeStroke != nil else { return }
+        endStroke()
+        _ = undo()
+    }
+
     // MARK: Undo / redo (ClayCore's document undo stack)
 
     /// Returns whether something was undone. Not available mid-stroke.

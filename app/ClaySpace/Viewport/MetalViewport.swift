@@ -35,6 +35,9 @@ final class MetalViewportView: UIView {
     /// Finger touches currently on the viewport, in begin order.
     private var fingerTouches: [UITouch] = []
     private var fingerStartLocations: [UITouch: CGPoint] = [:]
+    /// Touches that began over UI chrome: swallowed entirely — SwiftUI owns
+    /// them, they must not sculpt or move the camera.
+    private var chromeTouches = Set<UITouch>()
 
     /// Dynamic resolution: render at reduced scale while any touch is down
     /// (camera moves, sculpt strokes), native when idle. The raymarcher's
@@ -115,6 +118,10 @@ final class MetalViewportView: UIView {
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
         activeTouchCount += touches.count
         for touch in touches {
+            if state.isChromePoint(touch.location(in: nil)) {
+                chromeTouches.insert(touch)
+                continue
+            }
             if touch.type == .pencil {
                 pencilSink?.pencilBegan(at: touch.location(in: self),
                                         pressure: pressure(of: touch))
@@ -127,7 +134,7 @@ final class MetalViewportView: UIView {
     }
 
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
-        for touch in touches where touch.type == .pencil {
+        for touch in touches where touch.type == .pencil && !chromeTouches.contains(touch) {
             pencilSink?.pencilMoved(to: touch.location(in: self),
                                     pressure: pressure(of: touch))
             trackBarrelRoll(of: touch)
@@ -148,25 +155,30 @@ final class MetalViewportView: UIView {
     }
 
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
-        removeTouches(touches)
+        removeTouches(touches, cancelled: false)
     }
 
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
-        removeTouches(touches)
+        removeTouches(touches, cancelled: true)
     }
 
-    private func removeTouches(_ touches: Set<UITouch>) {
+    private func removeTouches(_ touches: Set<UITouch>, cancelled: Bool) {
         activeTouchCount = max(0, activeTouchCount - touches.count)
         for touch in touches {
+            if chromeTouches.remove(touch) != nil { continue } // swallowed
             if touch.type == .pencil {
-                pencilSink?.pencilEnded(at: touch.location(in: self))
+                if cancelled {
+                    // A cancelled pencil gesture must leave no edit behind.
+                    state.pencilCancelled()
+                } else {
+                    pencilSink?.pencilEnded(at: touch.location(in: self))
+                }
                 lastRollAngle = nil
             } else {
                 #if targetEnvironment(simulator)
                 // No Pencil in the simulator: a stationary single-finger tap
-                // stands in for a Pencil tap. Device builds keep the strict
-                // pencil/finger split.
-                if fingerTouches.count == 1,
+                // stands in for a Pencil tap (never from a cancelled touch).
+                if !cancelled, fingerTouches.count == 1,
                    let start = fingerStartLocations[touch] {
                     let end = touch.location(in: self)
                     if hypot(end.x - start.x, end.y - start.y) < 9 {

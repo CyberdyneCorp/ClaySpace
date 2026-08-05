@@ -18,6 +18,15 @@ final class ViewportState {
     /// screen-point → world-ray conversion.
     var viewportSize = CGSize.zero
 
+    /// Window-space frames of UI chrome overlaying the viewport (bars, HUD).
+    /// The touch router swallows touches beginning inside them, so button
+    /// taps never leak into sculpting or camera moves.
+    var chromeRects: [String: CGRect] = [:]
+
+    func isChromePoint(_ windowPoint: CGPoint) -> Bool {
+        chromeRects.values.contains { $0.contains(windowPoint) }
+    }
+
     // Pencil stroke/tap tracking (PencilToolSink extension; stored here
     // because extensions cannot add storage).
     fileprivate var pencilStart: CGPoint?
@@ -290,6 +299,14 @@ extension ViewportState: PencilToolSink {
         guard simd_distance(p, last) > r * 0.45 else { return }
         engine.appendStrokePoint(p, radius: r)
         lastStrokePoint = p
+    }
+
+    /// The system/UI cancelled the pencil gesture: abort without an edit.
+    func pencilCancelled() {
+        pencilStart = nil
+        strokePlane = nil
+        lastStrokePoint = nil
+        engine.cancelStroke()
     }
 
     func pencilEnded(at point: CGPoint) {

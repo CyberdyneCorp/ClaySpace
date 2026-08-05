@@ -133,6 +133,61 @@ final class CameraAndInputTests: XCTestCase {
         XCTAssertTrue(state.engine.strokePoints.isEmpty, "the point pool trims with it")
     }
 
+    func testRadialArmedViaUIFlowThenTapAdds() {
+        // Exact UI sequence from the failing XCUITest: toggleRadial() (not
+        // setRadial directly), then a plain tap.
+        let state = ViewportState()
+        state.viewportSize = CGSize(width: 800, height: 600)
+        state.activate(.sculpt, announce: false)
+        state.toggleRadial()
+        XCTAssertEqual(state.engine.radialCount, 6)
+        state.pencilBegan(at: CGPoint(x: 400, y: 300), pressure: 0.5)
+        state.pencilEnded(at: CGPoint(x: 400, y: 300))
+        XCTAssertEqual(state.engine.items.count, 2,
+                       "tap with radial armed adds (lastError: \(state.engine.lastError ?? "none"))")
+    }
+
+    func testRadialStrokeDragThroughTheFullInputPath() async {
+        // Reproduces the app flow exactly: radial armed, Pencil drag with
+        // many appended points, bake, second stroke, undo — the path the
+        // reported crash lives on.
+        let state = ViewportState()
+        state.viewportSize = CGSize(width: 800, height: 600)
+        state.activate(.sculpt, announce: false)
+        state.engine.setRadial(count: 8)
+
+        state.pencilBegan(at: CGPoint(x: 400, y: 300), pressure: 0.5)
+        for x in stride(from: 405, through: 560, by: 5) {
+            state.pencilMoved(to: CGPoint(x: CGFloat(x), y: CGFloat(300 - (x - 400) / 3)),
+                              pressure: 0.7)
+        }
+        state.pencilEnded(at: CGPoint(x: 560, y: 247))
+        XCTAssertEqual(state.engine.items.count, 2)
+        XCTAssertEqual(state.engine.items[1].radialCount, 8)
+        XCTAssertGreaterThan(Int(state.engine.items[1].params.y), 3, "points appended")
+
+        await state.engine.bakeNow()
+        XCTAssertNotNil(state.engine.fieldCache, "radial stroke bakes")
+
+        // Second radial stroke on top of the baked ring.
+        state.pencilBegan(at: CGPoint(x: 380, y: 320), pressure: 0.6)
+        state.pencilMoved(to: CGPoint(x: 420, y: 340), pressure: 0.6)
+        state.pencilEnded(at: CGPoint(x: 420, y: 340))
+        XCTAssertEqual(state.engine.items.count, 3)
+
+        // Mirror + radial combined, then unwind everything.
+        state.engine.setMirror(axes: 1)
+        state.pencilBegan(at: CGPoint(x: 500, y: 300), pressure: 0.5)
+        state.pencilEnded(at: CGPoint(x: 500, y: 300))
+        XCTAssertEqual(state.engine.items.count, 4)
+
+        state.requestUndo()
+        state.requestUndo()
+        state.requestUndo()
+        XCTAssertEqual(state.engine.items.count, 1, "all three strokes unwound")
+        XCTAssertTrue(state.engine.strokePoints.isEmpty)
+    }
+
     func testEraseTapCarves() {
         let state = ViewportState()
         state.viewportSize = CGSize(width: 800, height: 600)
