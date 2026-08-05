@@ -4,7 +4,7 @@ import simd
 /// plane, dolly zoom, roll about the view axis, perspective or
 /// orthographic projection with axis presets.
 struct OrbitCamera {
-    var target = SIMD3<Float>(0, 0, 0)
+    var target = SIMD3<Float>(0, 0.7, 0)
     var distance: Float = 3.2
     var azimuth: Float = 0.55      // radians, 0 = looking down -Z
     var elevation: Float = 0.32    // radians, clamped short of the poles

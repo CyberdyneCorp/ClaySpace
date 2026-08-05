@@ -34,6 +34,7 @@ final class MetalViewportView: UIView {
 
     /// Finger touches currently on the viewport, in begin order.
     private var fingerTouches: [UITouch] = []
+    private var fingerStartLocations: [UITouch: CGPoint] = [:]
 
     /// Last observed Pencil barrel-roll angle (Pencil Pro), radians.
     private var lastRollAngle: Float?
@@ -42,6 +43,7 @@ final class MetalViewportView: UIView {
         self.state = state
         super.init(frame: .zero)
         isMultipleTouchEnabled = true
+        pencilSink = state
 
         guard let device = MTLCreateSystemDefaultDevice() else { return }
         metalLayer.device = device
@@ -103,6 +105,7 @@ final class MetalViewportView: UIView {
             } else {
                 state.cancelCameraAnimation() // touch takes over any recall
                 fingerTouches.append(touch)
+                fingerStartLocations[touch] = touch.location(in: self)
             }
         }
     }
@@ -142,7 +145,21 @@ final class MetalViewportView: UIView {
                 pencilSink?.pencilEnded(at: touch.location(in: self))
                 lastRollAngle = nil
             } else {
+                #if targetEnvironment(simulator)
+                // No Pencil in the simulator: a stationary single-finger tap
+                // stands in for a Pencil tap. Device builds keep the strict
+                // pencil/finger split.
+                if fingerTouches.count == 1,
+                   let start = fingerStartLocations[touch] {
+                    let end = touch.location(in: self)
+                    if hypot(end.x - start.x, end.y - start.y) < 9 {
+                        pencilSink?.pencilBegan(at: end, pressure: 0.5)
+                        pencilSink?.pencilEnded(at: end)
+                    }
+                }
+                #endif
                 fingerTouches.removeAll { $0 === touch }
+                fingerStartLocations[touch] = nil
             }
         }
     }
@@ -213,6 +230,7 @@ final class MetalViewportView: UIView {
 
     override func layoutSubviews() {
         super.layoutSubviews()
+        state.viewportSize = bounds.size
         let scale = window?.screen.scale ?? traitCollection.displayScale
         let size = CGSize(width: bounds.width * scale, height: bounds.height * scale)
         if size.width > 0, size.height > 0 {
@@ -224,7 +242,9 @@ final class MetalViewportView: UIView {
         guard let drawable = metalLayer.nextDrawable() else { return }
         renderer?.draw(to: drawable,
                        time: Float(CACurrentMediaTime() - startTime),
-                       camera: state.camera)
+                       camera: state.camera,
+                       items: state.engine.items,
+                       sceneVersion: state.engine.version)
     }
 }
 

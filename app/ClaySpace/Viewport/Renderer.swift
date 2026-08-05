@@ -19,7 +19,13 @@ final class Renderer {
         var up: SIMD3<Float>
         var forward: SIMD3<Float>
         var params: SIMD4<Float> // aspect, time, lens, orthoHalfHeight
+        var itemCount: Int32
+        var pad: SIMD3<Float> = .zero
     }
+
+    static let maxItems = 256
+    private let itemBuffer: MTLBuffer
+    private var uploadedVersion = -1
 
     init?(device: MTLDevice, pixelFormat: MTLPixelFormat) {
         guard let queue = device.makeCommandQueue(),
@@ -33,14 +39,26 @@ final class Renderer {
         descriptor.fragmentFunction = fragmentFn
         descriptor.colorAttachments[0].pixelFormat = pixelFormat
 
-        guard let pipeline = try? device.makeRenderPipelineState(descriptor: descriptor)
+        guard let pipeline = try? device.makeRenderPipelineState(descriptor: descriptor),
+              let itemBuffer = device.makeBuffer(
+                  length: MemoryLayout<SceneItem>.stride * Self.maxItems,
+                  options: .storageModeShared)
         else { return nil }
 
         self.queue = queue
         self.pipeline = pipeline
+        self.itemBuffer = itemBuffer
     }
 
-    func draw(to drawable: CAMetalDrawable, time: Float, camera: OrbitCamera) {
+    func draw(to drawable: CAMetalDrawable, time: Float, camera: OrbitCamera,
+              items: [SceneItem], sceneVersion: Int) {
+        if sceneVersion != uploadedVersion {
+            let count = min(items.count, Self.maxItems)
+            items.prefix(count).withUnsafeBytes { src in
+                itemBuffer.contents().copyMemory(from: src.baseAddress!, byteCount: src.count)
+            }
+            uploadedVersion = sceneVersion
+        }
         let pass = MTLRenderPassDescriptor()
         pass.colorAttachments[0].texture = drawable.texture
         pass.colorAttachments[0].loadAction = .clear
@@ -59,11 +77,13 @@ final class Renderer {
             right: basis.right,
             up: basis.up,
             forward: basis.forward,
-            params: SIMD4(width / height, time, camera.lens, camera.orthoHalfHeight)
+            params: SIMD4(width / height, time, camera.lens, camera.orthoHalfHeight),
+            itemCount: Int32(min(items.count, Self.maxItems))
         )
 
         encoder.setRenderPipelineState(pipeline)
         encoder.setFragmentBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 0)
+        encoder.setFragmentBuffer(itemBuffer, offset: 0, index: 1)
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
         encoder.endEncoding()
 
