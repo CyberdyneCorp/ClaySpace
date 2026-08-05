@@ -122,7 +122,7 @@ final class ClayEngine {
     private func strokeBound(chainK: Float, blendK: Float) -> (SIMD3<Float>, Float) {
         let center = (strokeMin + strokeMax) * 0.5
         let radius = simd_length(strokeMax - strokeMin) * 0.5
-            + strokeMaxRadius + chainK + blendK * 1.1 + 0.01
+            + strokeMaxRadius + chainK * 4 + blendK * 4 + 0.02
         return (center, radius)
     }
 
@@ -185,7 +185,7 @@ final class ClayEngine {
         if recordMirror {
             var p = SIMD4<Float>(repeating: 0)
             for (i, v) in params.prefix(4).enumerated() { p[i] = v }
-            let bound = Self.geometricRadius(prim: prim, params: params) + blendK * 1.1 + 0.01
+            let bound = Self.geometricRadius(prim: prim, params: params) + blendK * 4 + 0.02
             items.append(SceneItem(
                 position: position, scale: 1,
                 rotation: SIMD4(0, 0, 0, 1),
@@ -224,7 +224,7 @@ final class ClayEngine {
             return false
         }
         clay_item_add_stroke_point(item, [position.x, position.y, position.z], radius)
-        clay_item_set_stroke_blend_k(item, radius * 0.5)
+        clay_item_set_stroke_blend_k(item, radius * 0.12)
         clay_item_set_op(item, Int32(op.rawValue))
         clay_item_set_blend(item, Int32(CLAY_BLEND_QUADRATIC.rawValue), blendK)
         clay_item_set_color(item, [color.x, color.y, color.z])
@@ -244,14 +244,14 @@ final class ClayEngine {
         let bound = strokeBound(chainK: radius * 0.5, blendK: blendK)
         items.append(SceneItem(
             position: .zero, scale: 1, rotation: SIMD4(0, 0, 0, 1),
-            params: SIMD4(Float(strokePoints.count), 1, radius * 0.5, 0),
+            params: SIMD4(Float(strokePoints.count), 1, radius * 0.12, 0),
             color: color, blendK: blendK,
             prim: Self.strokePrim, op: Int32(op.rawValue),
             blend: Int32(CLAY_BLEND_QUADRATIC.rawValue), rounding: 0,
             boundCenter: bound.0, boundRadius: bound.1
         ))
         strokePoints.append(SIMD4(position.x, position.y, position.z, radius))
-        let pad = radius + radius * 0.5 + blendK * 1.1 + 0.01
+        let pad = radius + radius * 0.12 * 4 + blendK * 4 + 0.02
         itemAABBs.append((position - SIMD3(repeating: pad),
                           position + SIMD3(repeating: pad)))
         redoMirror.removeAll()
@@ -276,8 +276,8 @@ final class ClayEngine {
                                 blendK: items[items.count - 1].blendK)
         items[items.count - 1].boundCenter = bound.0
         items[items.count - 1].boundRadius = bound.1
-        let pad = strokeMaxRadius + items[items.count - 1].params.z
-            + items[items.count - 1].blendK * 1.1 + 0.01
+        let pad = strokeMaxRadius + items[items.count - 1].params.z * 4
+            + items[items.count - 1].blendK * 4 + 0.02
         itemAABBs[itemAABBs.count - 1] = (strokeMin - SIMD3(repeating: pad),
                                           strokeMax + SIMD3(repeating: pad))
         version += 1

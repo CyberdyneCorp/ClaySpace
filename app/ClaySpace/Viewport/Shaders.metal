@@ -83,10 +83,14 @@ constant int OP_ADD = 0;
 constant int OP_SUBTRACT = 1;
 constant int OP_INTERSECT = 2;
 
-// Quadratic smin in plain form, for chaining stroke segments.
-static float sminQ(float a, float b, float k) {
-    float h = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0);
-    return mix(b, a, h) - k * h * (1.0 - h);
+// ClayCore's quadratic smin, mirrored EXACTLY (kernel/ops.h
+// csmin_quadratic): support is 4k, depth h²·k. The preview must match the
+// document's field or bakes appear to change the sculpt.
+static float csminQ(float a, float b, float k) {
+    float s = 4.0 * k;
+    if (s <= 0.0) return min(a, b);
+    float h = max(s - abs(a - b), 0.0) / s;
+    return min(a, b) - h * h * s * 0.25;
 }
 
 // Sphere-swept cone between two points with per-end radii (docs/01 §1.1,
@@ -126,10 +130,10 @@ static float sdStroke(float3 p, constant SceneItem &it, constant float4 *pts) {
         // so the item-level bound isn't enough — skip segments the point
         // can't reach (blend margin included).
         float3 mid = 0.5 * (A.xyz + B.xyz);
-        float reach = 0.5 * length(B.xyz - A.xyz) + max(A.w, B.w) + chainK;
+        float reach = 0.5 * length(B.xyz - A.xyz) + max(A.w, B.w) + 4.0 * chainK;
         if (length(p - mid) - reach >= d) continue;
         float seg = sdRoundCone(p, A.xyz, B.xyz, A.w, B.w);
-        d = (chainK > 0.0) ? sminQ(d, seg, chainK) : min(d, seg);
+        d = (chainK > 0.0) ? csminQ(d, seg, chainK) : min(d, seg);
     }
     return d;
 }
@@ -198,21 +202,11 @@ static float mapDist(float3 p, FieldCtx ctx) {
         float di = sdItem(p, it, ctx.pts);
         float k = (it.blend != 0) ? it.blendK : 0.0;
         if (it.op == OP_ADD) {
-            if (k > 0.0) {
-                float h = clamp(0.5 + 0.5 * (d - di) / k, 0.0, 1.0);
-                d = mix(d, di, h) - k * h * (1.0 - h);
-            } else {
-                d = min(d, di);
-            }
+            d = csminQ(d, di, k);
         } else if (it.op == OP_SUBTRACT) {
-            if (k > 0.0) {
-                float h = clamp(0.5 - 0.5 * (d + di) / k, 0.0, 1.0);
-                d = mix(d, -di, h) + k * h * (1.0 - h);
-            } else {
-                d = max(d, -di);
-            }
+            d = -csminQ(-d, di, k); // op_ssubtract: item carved from accum
         } else if (it.op == OP_INTERSECT) {
-            d = max(d, di);
+            d = -csminQ(-d, -di, k);
         }
     }
     return d;
@@ -239,22 +233,18 @@ static float4 mapShade(float3 p, FieldCtx ctx) {
         float di = sdItem(p, it, ctx.pts);
         float k = (it.blend != 0) ? it.blendK : 0.0;
         if (it.op == OP_ADD) {
-            if (k > 0.0) {
-                float h = clamp(0.5 + 0.5 * (d - di) / k, 0.0, 1.0);
-                d = mix(d, di, h) - k * h * (1.0 - h);
-                col = mix(col, it.color, h);
-            } else {
-                if (di < d) { d = di; col = it.color; }
-            }
+            // csmin_quadratic_m: h² drives the material mix.
+            float sup = max(4.0 * k, 1e-9);
+            float hh = 1.0 - min(abs(d - di) / sup, 1.0);
+            float w = hh * hh;
+            float m = (di < d) ? 1.0 - w * 0.5 : w * 0.5;
+            if (k <= 0.0) m = (di < d) ? 1.0 : 0.0;
+            col = mix(col, it.color, m);
+            d = csminQ(d, di, k);
         } else if (it.op == OP_SUBTRACT) {
-            if (k > 0.0) {
-                float h = clamp(0.5 - 0.5 * (d + di) / k, 0.0, 1.0);
-                d = mix(d, -di, h) + k * h * (1.0 - h);
-            } else {
-                d = max(d, -di);
-            }
+            d = -csminQ(-d, di, k);
         } else if (it.op == OP_INTERSECT) {
-            d = max(d, di);
+            d = -csminQ(-d, -di, k);
         }
     }
     return float4(col, d);

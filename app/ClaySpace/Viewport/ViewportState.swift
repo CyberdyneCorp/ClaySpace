@@ -233,7 +233,7 @@ extension ViewportState: PencilToolSink {
 
         let r = radius(for: max(pressure, 0.1))
         let op: clay_op = activeTool == .erase ? CLAY_OP_SUBTRACT : CLAY_OP_ADD
-        let blend = activeTool == .erase ? r * 0.35 : r * 0.55
+        let blend = activeTool == .erase ? r * 0.09 : r * 0.14
         if engine.beginStroke(at: start, radius: r, op: op,
                               blendK: blend, color: ClayEngine.clayColor) {
             // Later moves project onto the view-parallel plane through the
