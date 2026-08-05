@@ -23,6 +23,7 @@ final class Renderer {
         var pad: SIMD2<Float> = .zero
         var gridOrigin: SIMD4<Float>    // xyz origin; w = cache enabled (0/1)
         var gridInvExtent: SIMD4<Float> // xyz = 1/extent; w = normal epsilon
+        var gridScale: SIMD4<Float>     // xyz = dims/maxResolution
     }
 
     static let maxItems = 256
@@ -45,7 +46,7 @@ final class Renderer {
         descriptor.fragmentFunction = fragmentFn
         descriptor.colorAttachments[0].pixelFormat = pixelFormat
 
-        let n = FieldCache.resolution
+        let n = FieldCache.maxResolution
         let distanceDesc = MTLTextureDescriptor()
         distanceDesc.textureType = .type3D
         distanceDesc.pixelFormat = .r16Float
@@ -102,17 +103,17 @@ final class Renderer {
         }
 
         if let cache = engine.fieldCache, engine.fieldCacheVersion != uploadedCacheVersion {
-            let n = FieldCache.resolution
-            let region = MTLRegionMake3D(0, 0, 0, n, n, n)
+            let nx = Int(cache.dims.x), ny = Int(cache.dims.y), nz = Int(cache.dims.z)
+            let region = MTLRegionMake3D(0, 0, 0, nx, ny, nz)
             cache.distances.withUnsafeBytes { src in
                 distanceTexture.replace(region: region, mipmapLevel: 0, slice: 0,
                                         withBytes: src.baseAddress!,
-                                        bytesPerRow: n * 2, bytesPerImage: n * n * 2)
+                                        bytesPerRow: nx * 2, bytesPerImage: nx * ny * 2)
             }
             cache.colors.withUnsafeBytes { src in
                 colorTexture.replace(region: region, mipmapLevel: 0, slice: 0,
                                      withBytes: src.baseAddress!,
-                                     bytesPerRow: n * 4, bytesPerImage: n * n * 4)
+                                     bytesPerRow: nx * 4, bytesPerImage: nx * ny * 4)
             }
             uploadedCacheVersion = engine.fieldCacheVersion
         }
@@ -144,8 +145,13 @@ final class Renderer {
                 : SIMD4(0, 0, 0, 0),
             gridInvExtent: cacheUsable
                 ? SIMD4(1 / cache!.extent.x, 1 / cache!.extent.y, 1 / cache!.extent.z,
-                        max(0.0007, cache!.voxelSize * 0.35))
-                : SIMD4(0, 0, 0, 0.0007)
+                        max(0.0007, cache!.voxelSize * 0.3))
+                : SIMD4(0, 0, 0, 0.0007),
+            gridScale: cacheUsable
+                ? SIMD4(Float(cache!.dims.x) / Float(FieldCache.maxResolution),
+                        Float(cache!.dims.y) / Float(FieldCache.maxResolution),
+                        Float(cache!.dims.z) / Float(FieldCache.maxResolution), 0)
+                : SIMD4(1, 1, 1, 0)
         )
 
         encoder.setRenderPipelineState(pipeline)

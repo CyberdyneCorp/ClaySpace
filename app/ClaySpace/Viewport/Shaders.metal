@@ -17,6 +17,7 @@ struct Uniforms {
     float2 _pad;
     float4 gridOrigin;    // xyz cache origin; w = cache enabled (0/1)
     float4 gridInvExtent; // xyz = 1/extent; w = normal epsilon
+    float4 gridScale;     // xyz = dims/maxResolution (texture sub-region)
 };
 
 // Must match SceneItem in ClayEngine.swift (80 bytes).
@@ -158,7 +159,16 @@ struct FieldCtx {
     texture3d<float> ctex;
     float4 gridOrigin;   // w = cache enabled
     float4 gridInvExtent;
+    float4 gridScale;    // dims/maxResolution: the used texture sub-region
 };
+
+// Map a [0,1]³ grid coordinate into the texture's used sub-region, clamped
+// half a texel inside so the sampler never blends with stale texels.
+static float3 gridTexCoord(float3 uvw, float4 gridScale) {
+    const float maxRes = 192.0;
+    float3 halfTexel = 0.5 / (maxRes * gridScale.xyz);
+    return clamp(uvw, halfTexel, 1.0 - halfTexel) * gridScale.xyz;
+}
 
 constexpr sampler fieldSampler(filter::linear, address::clamp_to_edge);
 
@@ -166,7 +176,7 @@ constexpr sampler fieldSampler(filter::linear, address::clamp_to_edge);
 // the world-space distance to the grid so stepping stays conservative.
 static float sampleCache(float3 p, FieldCtx ctx) {
     float3 uvw = (p - ctx.gridOrigin.xyz) * ctx.gridInvExtent.xyz;
-    float d = ctx.dtex.sample(fieldSampler, uvw).r;
+    float d = ctx.dtex.sample(fieldSampler, gridTexCoord(uvw, ctx.gridScale)).r;
     float3 outside = (uvw - clamp(uvw, 0.0, 1.0)) / ctx.gridInvExtent.xyz;
     return d + length(outside);
 }
@@ -216,7 +226,7 @@ static float4 mapShade(float3 p, FieldCtx ctx) {
     if (cached) {
         d = sampleCache(p, ctx);
         float3 uvw = (p - ctx.gridOrigin.xyz) * ctx.gridInvExtent.xyz;
-        col = ctx.ctex.sample(fieldSampler, uvw).rgb;
+        col = ctx.ctex.sample(fieldSampler, gridTexCoord(uvw, ctx.gridScale)).rgb;
     }
     for (int i = cached ? ctx.start : 0; i < ctx.count; i++) {
         constant SceneItem &it = items[i];
@@ -267,7 +277,8 @@ fragment float4 raymarch_fragment(VertexOut in [[stage_in]],
                                   texture3d<float> distanceTex [[texture(0)]],
                                   texture3d<float> colorTex [[texture(1)]]) {
     FieldCtx ctx{items, u.itemCount, u.bakedCount, strokePts,
-                 distanceTex, colorTex, u.gridOrigin, u.gridInvExtent};
+                 distanceTex, colorTex, u.gridOrigin, u.gridInvExtent,
+                 u.gridScale};
     const float aspect = u.params.x;
     const float lens = u.params.z;
     const float orthoHalfHeight = u.params.w;
