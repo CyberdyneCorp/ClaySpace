@@ -20,7 +20,8 @@ final class Renderer {
         var params: SIMD4<Float> // aspect, time, lens, orthoHalfHeight
         var itemCount: Int32
         var bakedCount: Int32    // items below this index live in the cache
-        var pad: SIMD2<Float> = .zero
+        var mirrorAxes: Int32    // layer mirror bits (CLAY_MIRROR_*)
+        var mirrorK: Float       // Mirror Blend seam width
         var gridOrigin: SIMD4<Float>    // xyz origin; w = cache enabled (0/1)
         var gridInvExtent: SIMD4<Float> // xyz = 1/extent; w = normal epsilon
         var gridScale: SIMD4<Float>     // xyz = dims/maxResolution
@@ -140,6 +141,8 @@ final class Renderer {
             params: SIMD4(width / height, time, camera.lens, camera.orthoHalfHeight),
             itemCount: Int32(min(items.count, Self.maxItems)),
             bakedCount: Int32(cacheUsable ? (cache?.bakedItemCount ?? 0) : 0),
+            mirrorAxes: engine.mirrorAxes,
+            mirrorK: engine.mirrorK,
             gridOrigin: cacheUsable
                 ? SIMD4(cache!.origin.x, cache!.origin.y, cache!.origin.z, 1)
                 : SIMD4(0, 0, 0, 0),

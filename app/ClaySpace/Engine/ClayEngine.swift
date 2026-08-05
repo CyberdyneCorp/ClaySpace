@@ -4,7 +4,7 @@ import claycore
 import simd
 
 /// One SDF edit item mirrored for rendering. Layout must match `SceneItem`
-/// in Shaders.metal (96 bytes, float3 fields on 16-byte strides).
+/// in Shaders.metal (112 bytes, float3 fields on 16-byte strides).
 struct SceneItem {
     var position: SIMD3<Float>
     var scale: Float
@@ -20,6 +20,10 @@ struct SceneItem {
     /// raymarcher skips items whose bound cannot affect the current point.
     var boundCenter: SIMD3<Float>
     var boundRadius: Float
+    /// 1 when the item mirrors through the layer's mirror axes (ClayCore
+    /// item.mirror); the axes themselves are layer state in Uniforms.
+    var mirrorFlag: Int32
+    var pad2 = SIMD3<Float>.zero
 }
 
 /// Baked field cache (design D2, task 3.1 first stage): the document's SDF
@@ -126,7 +130,27 @@ final class ClayEngine {
         return (center, radius)
     }
 
+    /// Layer mirror state (clay_set_layer_mirror): bit0=X bit1=Y bit2=Z,
+    /// matching CLAY_MIRROR_*; mirrorK is the Mirror Blend seam width.
+    private(set) var mirrorAxes: Int32 = 0
+    private(set) var mirrorK: Float = 0.04
+
     private(set) var lastError: String?
+
+    /// Not undoable by design — mirror is tool state, like ClayCore's own
+    /// direct-mutating clay_set_layer_mirror.
+    func setMirror(axes: Int32, k: Float? = nil) {
+        guard let doc else { return }
+        let seam = k ?? mirrorK
+        guard check(clay_set_layer_mirror(doc, layer,
+                                          (axes & 1) != 0 ? 1 : 0,
+                                          (axes & 2) != 0 ? 1 : 0,
+                                          (axes & 4) != 0 ? 1 : 0, seam)) else { return }
+        mirrorAxes = axes
+        mirrorK = seam
+        version += 1
+        scheduleBake()
+    }
 
     init() {
         doc = clay_document_create()
@@ -177,7 +201,7 @@ final class ClayEngine {
         desc.blend_k = blendK
         desc.rounding = 0
         desc.color = (color.x, color.y, color.z)
-        desc.mirror = 0
+        desc.mirror = mirrorAxes != 0 ? 1 : 0
 
         var node: clay_node_id = 0
         guard check(clay_add_item(doc, layer, &desc, &node)) else { return false }
@@ -193,7 +217,8 @@ final class ClayEngine {
                 color: color, blendK: blendK,
                 prim: Int32(prim.rawValue), op: Int32(op.rawValue),
                 blend: desc.blend, rounding: 0,
-                boundCenter: position, boundRadius: bound
+                boundCenter: position, boundRadius: bound,
+                mirrorFlag: desc.mirror
             ))
             itemAABBs.append((position - SIMD3(repeating: bound),
                               position + SIMD3(repeating: bound)))
@@ -228,6 +253,7 @@ final class ClayEngine {
         clay_item_set_op(item, Int32(op.rawValue))
         clay_item_set_blend(item, Int32(CLAY_BLEND_QUADRATIC.rawValue), blendK)
         clay_item_set_color(item, [color.x, color.y, color.z])
+        clay_item_set_mirror(item, mirrorAxes != 0 ? 1 : 0)
 
         var node: clay_node_id = 0
         let added = check(clay_layer_add_item(doc, layer, item, &node))
@@ -248,7 +274,8 @@ final class ClayEngine {
             color: color, blendK: blendK,
             prim: Self.strokePrim, op: Int32(op.rawValue),
             blend: Int32(CLAY_BLEND_QUADRATIC.rawValue), rounding: 0,
-            boundCenter: bound.0, boundRadius: bound.1
+            boundCenter: bound.0, boundRadius: bound.1,
+            mirrorFlag: mirrorAxes != 0 ? 1 : 0
         ))
         strokePoints.append(SIMD4(position.x, position.y, position.z, radius))
         let pad = radius + radius * 0.12 * 4 + blendK * 4 + 0.02
@@ -398,9 +425,21 @@ final class ClayEngine {
         guard !itemAABBs.isEmpty else { return (SIMD3(repeating: -1), SIMD3(repeating: 1)) }
         var mn = SIMD3<Float>(repeating: .greatestFiniteMagnitude)
         var mx = -mn
-        for aabb in itemAABBs {
+        for (index, aabb) in itemAABBs.enumerated() {
             mn = simd_min(mn, aabb.min)
             mx = simd_max(mx, aabb.max)
+            // A mirrored item also occupies its reflections (+ seam blend).
+            if mirrorAxes != 0, items.indices.contains(index),
+               items[index].mirrorFlag != 0 {
+                let pad = SIMD3<Float>(repeating: 4 * mirrorK)
+                for axis in 0..<3 where (mirrorAxes & (1 << axis)) != 0 {
+                    var rMin = aabb.min, rMax = aabb.max
+                    rMin[axis] = -aabb.max[axis]
+                    rMax[axis] = -aabb.min[axis]
+                    mn = simd_min(mn, rMin - pad)
+                    mx = simd_max(mx, rMax + pad)
+                }
+            }
         }
         return (mn, mx)
     }

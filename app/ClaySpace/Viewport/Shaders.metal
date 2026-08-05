@@ -14,7 +14,8 @@ struct Uniforms {
     float4 params; // aspect, time, lens, orthoHalfHeight (0 = perspective)
     int itemCount;
     int bakedCount;       // items below this index live in the field cache
-    float2 _pad;
+    int mirrorAxes;       // layer mirror bits (CLAY_MIRROR_*)
+    float mirrorK;        // Mirror Blend seam width
     float4 gridOrigin;    // xyz cache origin; w = cache enabled (0/1)
     float4 gridInvExtent; // xyz = 1/extent; w = normal epsilon
     float4 gridScale;     // xyz = dims/maxResolution (texture sub-region)
@@ -34,6 +35,8 @@ struct SceneItem {
     float rounding;
     float3 boundCenter;
     float boundRadius;
+    int mirrorFlag; // item mirrors through the layer's axes
+    float3 _pad2;
 };
 
 struct VertexOut {
@@ -164,7 +167,40 @@ struct FieldCtx {
     float4 gridOrigin;   // w = cache enabled
     float4 gridInvExtent;
     float4 gridScale;    // dims/maxResolution: the used texture sub-region
+    int mirrorAxes;      // layer mirror bits
+    float mirrorK;       // Mirror Blend seam width
 };
+
+// Item distance including its mirror copies — ClayCore's emit_item order
+// exactly: the item, then per enabled axis one reflection about that axis
+// plane, each folded in with Add at mirror_k (csminQ handles k=0 as min).
+static float sdItemMirrored(float3 p, constant SceneItem &it, FieldCtx ctx) {
+    float di = sdItem(p, it, ctx.pts);
+    if (it.mirrorFlag != 0 && ctx.mirrorAxes != 0) {
+        for (int axis = 0; axis < 3; axis++) {
+            if ((ctx.mirrorAxes & (1 << axis)) == 0) continue;
+            float3 rp = p;
+            rp[axis] = -rp[axis];
+            di = csminQ(di, sdItem(rp, it, ctx.pts), ctx.mirrorK);
+        }
+    }
+    return di;
+}
+
+// Bound test that also covers the reflections and the seam blend support.
+static float itemBound(float3 p, constant SceneItem &it, FieldCtx ctx) {
+    float b = length(p - it.boundCenter);
+    if (it.mirrorFlag != 0 && ctx.mirrorAxes != 0) {
+        for (int axis = 0; axis < 3; axis++) {
+            if ((ctx.mirrorAxes & (1 << axis)) == 0) continue;
+            float3 rp = p;
+            rp[axis] = -rp[axis];
+            b = min(b, length(rp - it.boundCenter));
+        }
+        return b - it.boundRadius - 4.0 * ctx.mirrorK;
+    }
+    return b - it.boundRadius;
+}
 
 // Map a [0,1]³ grid coordinate into the texture's used sub-region, clamped
 // half a texel inside so the sampler never blends with stale texels.
@@ -193,13 +229,13 @@ static float mapDist(float3 p, FieldCtx ctx) {
     float d = cached ? sampleCache(p, ctx) : 1e9;
     for (int i = cached ? ctx.start : 0; i < ctx.count; i++) {
         constant SceneItem &it = items[i];
-        float bound = length(p - it.boundCenter) - it.boundRadius;
+        float bound = itemBound(p, it, ctx);
         if (it.op == OP_ADD) {
             if (bound >= d) continue; // cannot beat or blend with current best
         } else if (bound > 0.0) {
             continue; // subtract/paint only act inside their influence
         }
-        float di = sdItem(p, it, ctx.pts);
+        float di = sdItemMirrored(p, it, ctx);
         float k = (it.blend != 0) ? it.blendK : 0.0;
         if (it.op == OP_ADD) {
             d = csminQ(d, di, k);
@@ -224,13 +260,13 @@ static float4 mapShade(float3 p, FieldCtx ctx) {
     }
     for (int i = cached ? ctx.start : 0; i < ctx.count; i++) {
         constant SceneItem &it = items[i];
-        float bound = length(p - it.boundCenter) - it.boundRadius;
+        float bound = itemBound(p, it, ctx);
         if (it.op == OP_ADD) {
             if (bound >= d) continue;
         } else if (bound > 0.0) {
             continue;
         }
-        float di = sdItem(p, it, ctx.pts);
+        float di = sdItemMirrored(p, it, ctx);
         float k = (it.blend != 0) ? it.blendK : 0.0;
         if (it.op == OP_ADD) {
             // csmin_quadratic_m: h² drives the material mix.
@@ -268,7 +304,7 @@ fragment float4 raymarch_fragment(VertexOut in [[stage_in]],
                                   texture3d<float> colorTex [[texture(1)]]) {
     FieldCtx ctx{items, u.itemCount, u.bakedCount, strokePts,
                  distanceTex, colorTex, u.gridOrigin, u.gridInvExtent,
-                 u.gridScale};
+                 u.gridScale, u.mirrorAxes, u.mirrorK};
     const float aspect = u.params.x;
     const float lens = u.params.z;
     const float orthoHalfHeight = u.params.w;

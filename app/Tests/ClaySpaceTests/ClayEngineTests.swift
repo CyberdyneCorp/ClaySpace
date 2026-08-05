@@ -102,6 +102,50 @@ final class ClayEngineTests: XCTestCase {
                           cache.voxelSize * 2, "trilinear surface within two voxels")
     }
 
+    func testMirroredStrokeExistsOnBothSides() async throws {
+        let engine = ClayEngine()
+        engine.setMirror(axes: 1) // X
+
+        // One arm on +X only.
+        XCTAssertTrue(engine.beginStroke(at: SIMD3(0.7, 0.8, 0), radius: 0.15,
+                                         op: CLAY_OP_ADD, blendK: 0.02,
+                                         color: ClayEngine.clayColor))
+        engine.appendStrokePoint(SIMD3(1.1, 0.9, 0), radius: 0.15)
+        engine.appendStrokePoint(SIMD3(1.5, 1.0, 0), radius: 0.15)
+        engine.endStroke()
+        XCTAssertEqual(engine.items[1].mirrorFlag, 1)
+
+        // The document (real ClayCore field) has the arm on BOTH sides.
+        XCTAssertNotNil(engine.raycast(origin: SIMD3(1.5, 1.0, 3),
+                                       direction: SIMD3(0, 0, -1)), "authored side")
+        XCTAssertNotNil(engine.raycast(origin: SIMD3(-1.5, 1.0, 3),
+                                       direction: SIMD3(0, 0, -1)), "mirrored side")
+
+        // The bake grid covers the reflection too.
+        await engine.bakeNow()
+        let cache = try XCTUnwrap(engine.fieldCache)
+        XCTAssertLessThan(cache.sample(at: SIMD3(-1.5, 1.0, 0)), 0.05,
+                          "reflected arm is inside the baked grid")
+
+        // One undo removes both sides (single item).
+        XCTAssertTrue(engine.undo())
+        XCTAssertNil(engine.raycast(origin: SIMD3(-1.5, 1.0, 3),
+                                    direction: SIMD3(0, 0, -1)))
+    }
+
+    func testMirrorOffLeavesNewStrokesUnmirrored() {
+        let engine = ClayEngine()
+        engine.setMirror(axes: 1)
+        engine.setMirror(axes: 0) // toggled back off
+        engine.beginStroke(at: SIMD3(1.3, 0.8, 0), radius: 0.15,
+                           op: CLAY_OP_ADD, blendK: 0.02, color: ClayEngine.clayColor)
+        engine.endStroke()
+        XCTAssertEqual(engine.items[1].mirrorFlag, 0)
+        XCTAssertNil(engine.raycast(origin: SIMD3(-1.3, 0.8, 3),
+                                    direction: SIMD3(0, 0, -1)),
+                     "no reflection when mirror is off (probe clears the base ball)")
+    }
+
     func testBakeTimeStaysInteractive() async throws {
         // A creature-sized scene: base ball + 12 strokes of ~14 points.
         let engine = ClayEngine()

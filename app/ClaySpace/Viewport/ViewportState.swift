@@ -194,6 +194,16 @@ final class ViewportState {
     func toggleInspector() {
         inspectorVisible.toggle()
     }
+
+    /// Mirror sculpting (sdf-sculpting spec): toggling an axis affects new
+    /// strokes and every mirror-flagged item, matching ClayCore semantics.
+    func toggleMirrorAxis(_ bit: Int32) {
+        let axes = engine.mirrorAxes ^ bit
+        engine.setMirror(axes: axes)
+        let names = [(Int32(1), "X"), (2, "Y"), (4, "Z")]
+            .filter { axes & $0.0 != 0 }.map(\.1)
+        showToast(names.isEmpty ? "Mirror off" : "Mirror \(names.joined(separator: "+"))")
+    }
 }
 
 /// Sink for Pencil touches routed by the viewport (design D6). Tools

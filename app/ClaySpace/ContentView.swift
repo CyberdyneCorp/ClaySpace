@@ -32,6 +32,11 @@ struct ContentView: View {
                     }
                     Spacer()
                 }
+                VStack {
+                    Spacer()
+                    MirrorBar(state: state)
+                        .padding(.bottom, 16)
+                }
                 if let anchor = state.radialMenuLocation {
                     RadialMenu(
                         anchor: anchor,

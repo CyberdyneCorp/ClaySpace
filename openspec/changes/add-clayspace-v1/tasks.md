@@ -26,7 +26,7 @@
 - [ ] 3.2 Single-source kernel headers (sphere, box, rounded box, cylinder, cone, capsule, torus, prism, ellipsoid) compiling to CPU and MSL, with unit tests against reference values from docs/01 and a CPU↔Metal parity suite
 - [ ] 3.3 CSG ops (Add/Subtract/Intersect/Paint) with quadratic smin + chamfer variants and color-mix falloff; edit-list → flat-tape compiler shared by all backends
 - [ ] 3.4 Stroke item type: capsule/round-cone chain with per-point radius; live path → brick commit on Pencil lift
-- [ ] 3.5 Mirror (XYZ + Mirror Blend), linear array, radial array as non-destructive item/group modifiers
+- [ ] 3.5 Mirror (XYZ + Mirror Blend), linear array, radial array as non-destructive item/group modifiers — IN PROGRESS: mirror sculpting shipped (MirrorBar X/Y/Z toggles → `clay_set_layer_mirror` + per-item mirror flags, preview mirrors ClayCore's emit_item reflection order verbatim, bake bounds cover reflections); linear/radial arrays pending (`clay_item_set_repeat_*` in the ABI)
 - [ ] 3.6 Blend-locality regression tests (distant-edit bit-identity per scene-model spec)
 - [ ] 3.7 Replace the hand-mirrored preview math with ClayCore's single-source kernel headers compiled into the app's MSL, plus the host parity fixture — blocked on [ClayCore#3](https://github.com/CyberdyneCorp/ClayCore/issues/3); until then any new op surfaced in the preview copies `kernel/ops.h` verbatim (see design Risks)
 
