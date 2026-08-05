@@ -35,8 +35,9 @@ struct SceneItem {
     float rounding;
     float3 boundCenter;
     float boundRadius;
-    int mirrorFlag; // item mirrors through the layer's axes
-    float3 _pad2;
+    int mirrorFlag;    // item mirrors through the layer's axes
+    float radialCount; // >= 2: radial repeat about world Y
+    float2 _pad2;
 };
 
 struct VertexOut {
@@ -141,7 +142,26 @@ static float sdStroke(float3 p, constant SceneItem &it, constant float4 *pts) {
     return d;
 }
 
-static float sdItem(float3 p, constant SceneItem &it, constant float4 *pts) {
+// ClayCore kernel/repeat.h crep_radial_point / crep_radial_neighbor,
+// mirrored exactly: snap into the nearest sector, and evaluate its angular
+// neighbor too (O(2) regardless of count), taking the min.
+static float3 repRadialPoint(float3 p, int count, int offset) {
+    float sector = 6.2831853 / float(count);
+    float angle = atan2(p.z, p.x);
+    float idx = rint(angle / sector) + float(offset);
+    float a = -idx * sector;
+    float c = cos(a), s = sin(a);
+    return float3(c * p.x - s * p.z, p.y, s * p.x + c * p.z);
+}
+
+static int repRadialNeighbor(float3 p, int count) {
+    float sector = 6.2831853 / float(count);
+    float angle = atan2(p.z, p.x);
+    float frac = angle / sector - rint(angle / sector);
+    return frac >= 0.0 ? 1 : -1;
+}
+
+static float sdItemSingle(float3 p, constant SceneItem &it, constant float4 *pts) {
     if (it.prim == PRIM_STROKE) return sdStroke(p, it, pts) - it.rounding;
     float s = it.scale != 0.0 ? it.scale : 1.0;
     float3 q = quatRotateInv(it.rotation, p - it.position) / s;
@@ -154,6 +174,16 @@ static float sdItem(float3 p, constant SceneItem &it, constant float4 *pts) {
         default: d = length(q) - it.params.x; break;
     }
     return d * s - it.rounding;
+}
+
+static float sdItem(float3 p, constant SceneItem &it, constant float4 *pts) {
+    int rc = int(it.radialCount);
+    if (rc >= 2) {
+        float d0 = sdItemSingle(repRadialPoint(p, rc, 0), it, pts);
+        float dn = sdItemSingle(repRadialPoint(p, rc, repRadialNeighbor(p, rc)), it, pts);
+        return min(d0, dn);
+    }
+    return sdItemSingle(p, it, pts);
 }
 
 // Field evaluation context: the baked cache plus the analytic tail.

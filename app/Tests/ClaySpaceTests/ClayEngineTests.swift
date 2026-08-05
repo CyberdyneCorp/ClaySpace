@@ -133,6 +133,43 @@ final class ClayEngineTests: XCTestCase {
                                     direction: SIMD3(0, 0, -1)))
     }
 
+    func testRadialSymmetryRepeatsAStrokeAroundTheAxis() async throws {
+        let engine = ClayEngine()
+        engine.setRadial(count: 6)
+
+        // One blob at ring radius 1.2 on the +X side.
+        XCTAssertTrue(engine.beginStroke(at: SIMD3(1.2, 0.8, 0), radius: 0.2,
+                                         op: CLAY_OP_ADD, blendK: 0.02,
+                                         color: ClayEngine.clayColor))
+        engine.endStroke()
+        XCTAssertEqual(engine.items[1].radialCount, 6)
+
+        // Vertical probes only intersect their own ring position (horizontal
+        // rays would clip neighboring sectors and the base ball).
+        // A copy sits one sector (60°) around the world Y axis…
+        let copy = SIMD3<Float>(1.2 * cos(Float.pi / 3), 0.8, 1.2 * sin(Float.pi / 3))
+        XCTAssertNotNil(engine.raycast(origin: SIMD3(copy.x, 3, copy.z),
+                                       direction: SIMD3(0, -1, 0)),
+                        "sector copy exists in the real document field")
+
+        // …and the half-sector gap (30°) between copies is empty.
+        let gap = SIMD3<Float>(1.2 * cos(Float.pi / 6), 0.8, 1.2 * sin(Float.pi / 6))
+        XCTAssertNil(engine.raycast(origin: SIMD3(gap.x, 3, gap.z),
+                                    direction: SIMD3(0, -1, 0)),
+                     "copies are discrete, not a smeared ring")
+
+        // The bake grid covers the whole ring.
+        await engine.bakeNow()
+        let cache = try XCTUnwrap(engine.fieldCache)
+        XCTAssertLessThan(cache.sample(at: SIMD3(-1.2, 0.8, 0)), 0.05,
+                          "the opposite-side copy is inside the baked grid")
+
+        // One undo removes the whole ring (single item).
+        XCTAssertTrue(engine.undo())
+        XCTAssertNil(engine.raycast(origin: SIMD3(copy.x, 3, copy.z),
+                                    direction: SIMD3(0, -1, 0)))
+    }
+
     func testMirrorOffLeavesNewStrokesUnmirrored() {
         let engine = ClayEngine()
         engine.setMirror(axes: 1)

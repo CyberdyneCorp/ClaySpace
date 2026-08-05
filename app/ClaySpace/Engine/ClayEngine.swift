@@ -23,7 +23,11 @@ struct SceneItem {
     /// 1 when the item mirrors through the layer's mirror axes (ClayCore
     /// item.mirror); the axes themselves are layer state in Uniforms.
     var mirrorFlag: Int32
-    var pad2 = SIMD3<Float>.zero
+    /// >= 2: the item radially repeats about the world Y axis
+    /// (clay_item_set_repeat_radial), evaluated with ClayCore's O(2)
+    /// nearest-sector scheme.
+    var radialCount: Float
+    var pad2 = SIMD2<Float>.zero
 }
 
 /// Baked field cache (design D2, task 3.1 first stage): the document's SDF
@@ -134,6 +138,31 @@ final class ClayEngine {
     /// matching CLAY_MIRROR_*; mirrorK is the Mirror Blend seam width.
     private(set) var mirrorAxes: Int32 = 0
     private(set) var mirrorK: Float = 0.04
+    /// Radial symmetry for NEW strokes (kaleidoscope about world Y);
+    /// 0 = off, otherwise >= 2. Per-item at creation, unlike mirror.
+    private(set) var radialCount: Int32 = 0
+
+    func setRadial(count: Int32) {
+        radialCount = count >= 2 ? min(count, 16) : 0
+        version += 1
+    }
+
+    /// Circumscribe an AABB's ring sweep about the world Y axis.
+    private static func ringAABB(_ aabb: (min: SIMD3<Float>, max: SIMD3<Float>))
+        -> (min: SIMD3<Float>, max: SIMD3<Float>) {
+        var r: Float = 0
+        for x in [aabb.min.x, aabb.max.x] {
+            for z in [aabb.min.z, aabb.max.z] {
+                r = max(r, sqrt(x * x + z * z))
+            }
+        }
+        return (SIMD3(-r, aabb.min.y, -r), SIMD3(r, aabb.max.y, r))
+    }
+
+    private static func ringBound(center: SIMD3<Float>, radius: Float)
+        -> (SIMD3<Float>, Float) {
+        (SIMD3(0, center.y, 0), sqrt(center.x * center.x + center.z * center.z) + radius)
+    }
 
     private(set) var lastError: String?
 
@@ -218,7 +247,8 @@ final class ClayEngine {
                 prim: Int32(prim.rawValue), op: Int32(op.rawValue),
                 blend: desc.blend, rounding: 0,
                 boundCenter: position, boundRadius: bound,
-                mirrorFlag: desc.mirror
+                mirrorFlag: desc.mirror,
+                radialCount: 0
             ))
             itemAABBs.append((position - SIMD3(repeating: bound),
                               position + SIMD3(repeating: bound)))
@@ -254,6 +284,9 @@ final class ClayEngine {
         clay_item_set_blend(item, Int32(CLAY_BLEND_QUADRATIC.rawValue), blendK)
         clay_item_set_color(item, [color.x, color.y, color.z])
         clay_item_set_mirror(item, mirrorAxes != 0 ? 1 : 0)
+        if radialCount >= 2 {
+            clay_item_set_repeat_radial(item, radialCount, 0)
+        }
 
         var node: clay_node_id = 0
         let added = check(clay_layer_add_item(doc, layer, item, &node))
@@ -275,12 +308,15 @@ final class ClayEngine {
             prim: Self.strokePrim, op: Int32(op.rawValue),
             blend: Int32(CLAY_BLEND_QUADRATIC.rawValue), rounding: 0,
             boundCenter: bound.0, boundRadius: bound.1,
-            mirrorFlag: mirrorAxes != 0 ? 1 : 0
+            mirrorFlag: mirrorAxes != 0 ? 1 : 0,
+            radialCount: Float(radialCount)
         ))
         strokePoints.append(SIMD4(position.x, position.y, position.z, radius))
         let pad = radius + radius * 0.12 * 4 + blendK * 4 + 0.02
-        itemAABBs.append((position - SIMD3(repeating: pad),
-                          position + SIMD3(repeating: pad)))
+        var aabb = (min: position - SIMD3(repeating: pad),
+                    max: position + SIMD3(repeating: pad))
+        if radialCount >= 2 { aabb = Self.ringAABB(aabb) }
+        itemAABBs.append(aabb)
         redoMirror.removeAll()
         version += 1
         return true
@@ -299,14 +335,19 @@ final class ClayEngine {
         strokeMin = simd_min(strokeMin, position)
         strokeMax = simd_max(strokeMax, position)
         strokeMaxRadius = max(strokeMaxRadius, radius)
-        let bound = strokeBound(chainK: items[items.count - 1].params.z,
+        var bound = strokeBound(chainK: items[items.count - 1].params.z,
                                 blendK: items[items.count - 1].blendK)
-        items[items.count - 1].boundCenter = bound.0
-        items[items.count - 1].boundRadius = bound.1
         let pad = strokeMaxRadius + items[items.count - 1].params.z * 4
             + items[items.count - 1].blendK * 4 + 0.02
-        itemAABBs[itemAABBs.count - 1] = (strokeMin - SIMD3(repeating: pad),
-                                          strokeMax + SIMD3(repeating: pad))
+        var aabb = (min: strokeMin - SIMD3(repeating: pad),
+                    max: strokeMax + SIMD3(repeating: pad))
+        if items[items.count - 1].radialCount >= 2 {
+            bound = Self.ringBound(center: bound.0, radius: bound.1)
+            aabb = Self.ringAABB(aabb)
+        }
+        items[items.count - 1].boundCenter = bound.0
+        items[items.count - 1].boundRadius = bound.1
+        itemAABBs[itemAABBs.count - 1] = aabb
         version += 1
     }
 

@@ -195,6 +195,28 @@ final class ViewportState {
         inspectorVisible.toggle()
     }
 
+    /// Radial symmetry for new strokes (kaleidoscope about world Y).
+    /// Remembers the last count across toggles.
+    private var lastRadialCount: Int32 = 6
+
+    func toggleRadial() {
+        if engine.radialCount >= 2 {
+            lastRadialCount = engine.radialCount
+            engine.setRadial(count: 0)
+            showToast("Radial off")
+        } else {
+            engine.setRadial(count: lastRadialCount)
+            showToast("Radial ×\(engine.radialCount)")
+        }
+    }
+
+    func adjustRadial(by delta: Int32) {
+        guard engine.radialCount >= 2 else { return }
+        let count = max(2, min(16, engine.radialCount + delta))
+        engine.setRadial(count: count)
+        showToast("Radial ×\(count)")
+    }
+
     /// Mirror sculpting (sdf-sculpting spec): toggling an axis affects new
     /// strokes and every mirror-flagged item, matching ClayCore semantics.
     func toggleMirrorAxis(_ bit: Int32) {

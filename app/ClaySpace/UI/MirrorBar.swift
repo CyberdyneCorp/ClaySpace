@@ -30,6 +30,53 @@ struct MirrorBar: View {
                 )
                 .accessibilityLabel("Mirror \(axis.label)")
             }
+
+            Divider().frame(height: 18)
+
+            let radialOn = state.engine.radialCount >= 2
+            Button {
+                state.toggleRadial()
+            } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: "circle.grid.cross")
+                        .font(.system(size: 13))
+                    Text("Radial")
+                        .font(.system(size: 13))
+                }
+                .padding(.horizontal, 8)
+                .frame(height: 26)
+                .foregroundStyle(radialOn ? .white : .primary)
+                .background(
+                    RoundedRectangle(cornerRadius: 4)
+                        .fill(radialOn ? Color.orange : Color.primary.opacity(0.06))
+                )
+            }
+            .accessibilityLabel("Radial symmetry")
+
+            if radialOn {
+                Button {
+                    state.adjustRadial(by: -1)
+                } label: {
+                    Image(systemName: "minus")
+                        .font(.system(size: 11, weight: .semibold))
+                        .frame(width: 24, height: 24)
+                        .foregroundStyle(.primary)
+                }
+                .accessibilityLabel("Fewer copies")
+                Text("\(state.engine.radialCount)")
+                    .font(.system(size: 13, weight: .medium, design: .monospaced))
+                    .frame(minWidth: 20)
+                    .accessibilityIdentifier("radialCount")
+                Button {
+                    state.adjustRadial(by: 1)
+                } label: {
+                    Image(systemName: "plus")
+                        .font(.system(size: 11, weight: .semibold))
+                        .frame(width: 24, height: 24)
+                        .foregroundStyle(.primary)
+                }
+                .accessibilityLabel("More copies")
+            }
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 8)
