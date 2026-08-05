@@ -118,6 +118,12 @@ static float sdStroke(float3 p, constant SceneItem &it, constant float4 *pts) {
     for (int i = 0; i < count - 1; i++) {
         float4 A = pts[first + i];
         float4 B = pts[first + i + 1];
+        // Per-segment bound: strokes overlap the model where the eye looks,
+        // so the item-level bound isn't enough — skip segments the point
+        // can't reach (blend margin included).
+        float3 mid = 0.5 * (A.xyz + B.xyz);
+        float reach = 0.5 * length(B.xyz - A.xyz) + max(A.w, B.w) + chainK;
+        if (length(p - mid) - reach >= d) continue;
         float seg = sdRoundCone(p, A.xyz, B.xyz, A.w, B.w);
         d = (chainK > 0.0) ? sminQ(d, seg, chainK) : min(d, seg);
     }

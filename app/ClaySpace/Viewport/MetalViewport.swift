@@ -43,6 +43,14 @@ final class MetalViewportView: UIView {
     private var currentRenderScale: CGFloat = 1.0
     private static let interactionRenderScale: CGFloat = 0.72
 
+    /// On-demand rendering: the display link fires at ProMotion rate, but
+    /// the GPU only draws when the camera, the scene, or the drawable
+    /// changed. Idle scenes cost nothing — which also keeps the device
+    /// cool, so sustained sculpting doesn't thermally throttle.
+    private var lastDrawnCamera: OrbitCamera?
+    private var lastDrawnVersion = -1
+    private var lastDrawnSize = CGSize.zero
+
     /// Last observed Pencil barrel-roll angle (Pencil Pro), radians.
     private var lastRollAngle: Float?
 
@@ -257,13 +265,23 @@ final class MetalViewportView: UIView {
             currentRenderScale = targetScale
             updateDrawableSize()
         }
+
+        let camera = state.camera
+        let version = state.engine.version
+        guard camera != lastDrawnCamera
+                || version != lastDrawnVersion
+                || metalLayer.drawableSize != lastDrawnSize else { return }
+
         guard let drawable = metalLayer.nextDrawable() else { return }
+        lastDrawnCamera = camera
+        lastDrawnVersion = version
+        lastDrawnSize = metalLayer.drawableSize
         renderer?.draw(to: drawable,
                        time: Float(CACurrentMediaTime() - startTime),
-                       camera: state.camera,
+                       camera: camera,
                        items: state.engine.items,
                        strokePoints: state.engine.strokePoints,
-                       sceneVersion: state.engine.version)
+                       sceneVersion: version)
     }
 }
 

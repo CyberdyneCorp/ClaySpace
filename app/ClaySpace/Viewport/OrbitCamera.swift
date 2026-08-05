@@ -2,8 +2,9 @@ import simd
 
 /// Orbit camera (task 4.4): target + spherical orbit, pan in the view
 /// plane, dolly zoom, roll about the view axis, perspective or
-/// orthographic projection with axis presets.
-struct OrbitCamera {
+/// orthographic projection with axis presets. Equatable so the render
+/// loop can skip frames when the view hasn't changed.
+struct OrbitCamera: Equatable {
     var target = SIMD3<Float>(0, 0.7, 0)
     var distance: Float = 3.2
     var azimuth: Float = 0.55      // radians, 0 = looking down -Z
