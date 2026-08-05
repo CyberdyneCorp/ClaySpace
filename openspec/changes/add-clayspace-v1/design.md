@@ -64,6 +64,8 @@ Working name **ClaySpace** (repo name). The study's "Chisel" collides with the e
 
 ## Risks / Trade-offs
 
+- **[LEARNED THE HARD WAY — kernel drift]** The app's Metal preview initially re-implemented blend math by hand and drifted from ClayCore's kernels (preview smin support `k` vs the library's `4k`): sculpts looked crisp live, then every bake "destroyed" them by revealing the true, goopier field. Fixed by mirroring `kernel/ops.h` line-for-line (ClaySpace `9bfae5a`), but the durable fix is D2's single-source kernels — ClayCore shipping MSL-compilable kernel headers plus a host parity fixture, requested as [ClayCore#3](https://github.com/CyberdyneCorp/ClayCore/issues/3). Until that lands, any new op/blend/deformer surfaced in the app MUST copy the kernel implementation verbatim and note the source function.
+
 - **[Performance ceiling unknown]** The 200-item @ 60 fps target and 512³ per-layer resolution are educated guesses (docs 04 §6 Q4 explicitly says "needs a Metal prototype benchmark, not a guess"). → Mitigation: Milestone 0 in tasks.md is a spike benchmarking brick eval + sphere tracing on M1/M4 iPads; spec numbers get revised from data before feature work hardens.
 - **[FBX fidelity]** FBX is a proprietary, quirky format; engine-import fidelity (units, axes, vertex colors) is where it bites. → Mitigation: automated round-trip tests against Blender/assimp importers in CI; USDZ/OBJ as always-correct fallbacks.
 - **[Two modes in v1 = scope weight]** Dual mode roughly doubles editing-surface work. Trade-off accepted for product differentiation; mitigated because the modes share document, camera, gestures, palette, and export machinery — the deltas are the two tool sets.

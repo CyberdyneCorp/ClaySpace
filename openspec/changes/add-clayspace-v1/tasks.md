@@ -28,6 +28,7 @@
 - [ ] 3.4 Stroke item type: capsule/round-cone chain with per-point radius; live path → brick commit on Pencil lift
 - [ ] 3.5 Mirror (XYZ + Mirror Blend), linear array, radial array as non-destructive item/group modifiers
 - [ ] 3.6 Blend-locality regression tests (distant-edit bit-identity per scene-model spec)
+- [ ] 3.7 Replace the hand-mirrored preview math with ClayCore's single-source kernel headers compiled into the app's MSL, plus the host parity fixture — blocked on [ClayCore#3](https://github.com/CyberdyneCorp/ClayCore/issues/3); until then any new op surfaced in the preview copies `kernel/ops.h` verbatim (see design Risks)
 
 ## 4. Viewport & rendering
 

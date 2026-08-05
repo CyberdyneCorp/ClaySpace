@@ -426,34 +426,89 @@ final class ClayEngine {
         }
         let nx = cells(extent.x), ny = cells(extent.y), nz = cells(extent.z)
 
-        var distances = [Float16](repeating: 0, count: nx * ny * nz)
-        var colors = [UInt8](repeating: 255, count: nx * ny * nz * 4)
-        var slicePoints = [Float](repeating: 0, count: nx * ny * 3)
-        var sliceDistances = [Float](repeating: 0, count: nx * ny)
-        var sliceColors = [Float](repeating: 0, count: nx * ny * 3)
-
-        for z in 0..<nz {
-            let wz = mn.z + extent.z * (Float(z) + 0.5) / Float(nz)
-            var i = 0
-            for y in 0..<ny {
-                let wy = mn.y + extent.y * (Float(y) + 0.5) / Float(ny)
-                for x in 0..<nx {
-                    slicePoints[i * 3 + 0] = mn.x + extent.x * (Float(x) + 0.5) / Float(nx)
-                    slicePoints[i * 3 + 1] = wy
-                    slicePoints[i * 3 + 2] = wz
-                    i += 1
+        // Two-pass narrow-band bake: a coarse pass locates the surface, the
+        // fine pass evaluates only cells near it (the shell is typically
+        // 10-15% of the grid). Far cells take the coarse value with a
+        // conservative bias — they only guide ray stepping.
+        let cnx = max(6, (nx + 3) / 4), cny = max(6, (ny + 3) / 4), cnz = max(6, (nz + 3) / 4)
+        var coarse = [Float](repeating: 0, count: cnx * cny * cnz)
+        var coarsePoints = [Float](repeating: 0, count: cnx * cny * cnz * 3)
+        var ci = 0
+        for z in 0..<cnz {
+            let wz = mn.z + extent.z * (Float(z) + 0.5) / Float(cnz)
+            for y in 0..<cny {
+                let wy = mn.y + extent.y * (Float(y) + 0.5) / Float(cny)
+                for x in 0..<cnx {
+                    coarsePoints[ci * 3 + 0] = mn.x + extent.x * (Float(x) + 0.5) / Float(cnx)
+                    coarsePoints[ci * 3 + 1] = wy
+                    coarsePoints[ci * 3 + 2] = wz
+                    ci += 1
                 }
             }
-            guard clay_eval_points(bakeDoc, nil, slicePoints, nx * ny,
-                                   &sliceDistances, &sliceColors) == CLAY_OK
-            else { return nil }
-            let base = z * nx * ny
-            for idx in 0..<(nx * ny) {
-                distances[base + idx] = Float16(max(-60000, min(60000, sliceDistances[idx])))
-                colors[(base + idx) * 4 + 0] = UInt8(max(0, min(255, sliceColors[idx * 3 + 0] * 255)))
-                colors[(base + idx) * 4 + 1] = UInt8(max(0, min(255, sliceColors[idx * 3 + 1] * 255)))
-                colors[(base + idx) * 4 + 2] = UInt8(max(0, min(255, sliceColors[idx * 3 + 2] * 255)))
+        }
+        guard clay_eval_points(bakeDoc, nil, coarsePoints, cnx * cny * cnz,
+                               &coarse, nil) == CLAY_OK else { return nil }
+
+        let coarseVoxel = max(extent.x / Float(cnx),
+                              max(extent.y / Float(cny), extent.z / Float(cnz)))
+        let band = coarseVoxel * 3.0
+
+        var distances = [Float16](repeating: 0, count: nx * ny * nz)
+        // Far cells shade never; default color is the clay blue.
+        var colors = [UInt8](repeating: 255, count: nx * ny * nz * 4)
+        for i in 0..<(nx * ny * nz) {
+            colors[i * 4 + 0] = 56; colors[i * 4 + 1] = 166; colors[i * 4 + 2] = 207
+        }
+
+        // Partition fine cells by nearest coarse sample.
+        var surfacePoints = [Float]()
+        var surfaceIndices = [Int]()
+        surfacePoints.reserveCapacity(600_000 * 3)
+        surfaceIndices.reserveCapacity(600_000)
+        for z in 0..<nz {
+            let wz = mn.z + extent.z * (Float(z) + 0.5) / Float(nz)
+            let cz = min(cnz - 1, z * cnz / nz)
+            for y in 0..<ny {
+                let wy = mn.y + extent.y * (Float(y) + 0.5) / Float(ny)
+                let cy = min(cny - 1, y * cny / ny)
+                let coarseRow = (cz * cny + cy) * cnx
+                let fineRow = (z * ny + y) * nx
+                for x in 0..<nx {
+                    let dc = coarse[coarseRow + min(cnx - 1, x * cnx / nx)]
+                    if abs(dc) <= band {
+                        surfaceIndices.append(fineRow + x)
+                        surfacePoints.append(mn.x + extent.x * (Float(x) + 0.5) / Float(nx))
+                        surfacePoints.append(wy)
+                        surfacePoints.append(wz)
+                    } else {
+                        // Conservative for sphere tracing: bias toward zero.
+                        distances[fineRow + x] = Float16(max(-60000, min(60000,
+                            dc - (dc > 0 ? coarseVoxel : -coarseVoxel))))
+                    }
+                }
             }
+        }
+
+        // Fine pass over the shell, in large chunks.
+        let chunkSize = 786_432
+        var offset = 0
+        var chunkDistances = [Float](repeating: 0, count: min(chunkSize, surfaceIndices.count))
+        var chunkColors = [Float](repeating: 0, count: min(chunkSize, surfaceIndices.count) * 3)
+        while offset < surfaceIndices.count {
+            let count = min(chunkSize, surfaceIndices.count - offset)
+            let ok = surfacePoints.withUnsafeBufferPointer { buf in
+                clay_eval_points(bakeDoc, nil, buf.baseAddress! + offset * 3, count,
+                                 &chunkDistances, &chunkColors) == CLAY_OK
+            }
+            guard ok else { return nil }
+            for i in 0..<count {
+                let idx = surfaceIndices[offset + i]
+                distances[idx] = Float16(max(-60000, min(60000, chunkDistances[i])))
+                colors[idx * 4 + 0] = UInt8(max(0, min(255, chunkColors[i * 3 + 0] * 255)))
+                colors[idx * 4 + 1] = UInt8(max(0, min(255, chunkColors[i * 3 + 1] * 255)))
+                colors[idx * 4 + 2] = UInt8(max(0, min(255, chunkColors[i * 3 + 2] * 255)))
+            }
+            offset += count
         }
         return FieldCache(origin: mn, extent: extent,
                           dims: SIMD3(Int32(nx), Int32(ny), Int32(nz)),

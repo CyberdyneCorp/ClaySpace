@@ -16,6 +16,7 @@ packages:
 settings:
   base:
     SWIFT_VERSION: "6.0"
+    ENABLE_TESTABILITY: YES   # lets the (perf) tests run against Release too
     CODE_SIGN_STYLE: Automatic
     DEVELOPMENT_TEAM: 2C69VJZSNR
     # claycore is a C++-implemented static library behind a C ABI: link

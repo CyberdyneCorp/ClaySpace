@@ -102,6 +102,37 @@ final class ClayEngineTests: XCTestCase {
                           cache.voxelSize * 2, "trilinear surface within two voxels")
     }
 
+    func testBakeTimeStaysInteractive() async throws {
+        // A creature-sized scene: base ball + 12 strokes of ~14 points.
+        let engine = ClayEngine()
+        for s in 0..<12 {
+            let angle = Float(s) * .pi / 6
+            let dir = SIMD3<Float>(cos(angle), 0.4, sin(angle))
+            XCTAssertTrue(engine.beginStroke(at: SIMD3(0, 0.8, 0) + dir * 0.7,
+                                             radius: 0.12, op: CLAY_OP_ADD,
+                                             blendK: 0.02, color: ClayEngine.clayColor))
+            for i in 1...13 {
+                engine.appendStrokePoint(SIMD3(0, 0.8, 0) + dir * (0.7 + Float(i) * 0.07),
+                                         radius: 0.12)
+            }
+            engine.endStroke()
+        }
+        XCTAssertEqual(engine.items.count, 13)
+
+        let clock = ContinuousClock()
+        let start = clock.now
+        await engine.bakeNow()
+        let elapsed = start.duration(to: clock.now)
+
+        let cache = try XCTUnwrap(engine.fieldCache)
+        let ms = Double(elapsed.components.seconds) * 1000
+            + Double(elapsed.components.attoseconds) / 1e15
+        print("BAKE_METRIC: \(String(format: "%.0f", ms)) ms for 13 items, " +
+              "grid \(cache.dims.x)x\(cache.dims.y)x\(cache.dims.z), " +
+              "voxel \(String(format: "%.1f", cache.voxelSize * 100)) cm")
+        XCTAssertLessThan(ms, 3000, "bakes must stay well under interactive patience")
+    }
+
     func testUndoBelowTheBakePointDropsTheCache() async {
         let engine = ClayEngine()
         engine.addPrimitive(CLAY_PRIM_SPHERE, params: [0.2],
