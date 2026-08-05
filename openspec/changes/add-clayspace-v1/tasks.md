@@ -83,7 +83,7 @@
 
 ## 10. Validation & release readiness
 
-- [ ] 10.1 `openspec validate --all --strict` green; spec scenarios mapped to XCTest/UI-test cases
+- [ ] 10.1 `openspec validate --all --strict` green; spec scenarios mapped to XCTest/UI-test cases — IN PROGRESS: ClaySpaceTests (engine, camera/input, ClayCore feature contracts: strokes/voxels/meshing/IO/picking) + ClaySpaceUITests (end-to-end tap-to-sculpt, simulator) run via `scripts/test.sh` (`--device` for connected iPads) and in CI; remaining scenarios join as their features land
 - [ ] 10.2 Device matrix pass (M1 iPad Pro, M4 iPad Pro, iPad Air) for performance targets
 - [ ] 10.3 Offline/airplane-mode full-workflow test; crash-recovery autosave test
 - [ ] 10.4 Update `docs/` with any spec-relevant findings from Milestone 0 and archive this change

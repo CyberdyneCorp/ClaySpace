@@ -36,11 +36,11 @@ jobs:
         run: brew install xcodegen xcbeautify
       - name: Generate Xcode project
         run: xcodegen generate --spec app/project.yml --project app
-      - name: Build for iOS Simulator
+      - name: Run tests on iOS Simulator
         run: >
-          xcodebuild build
+          xcodebuild test
           -project app/ClaySpace.xcodeproj
           -scheme ClaySpace
-          -destination 'generic/platform=iOS Simulator'
+          -destination 'platform=iOS Simulator,name=iPad Pro 11-inch (M4)'
           CODE_SIGNING_ALLOWED=NO
           | xcbeautify --renderer github-actions || exit ${PIPESTATUS[0]}

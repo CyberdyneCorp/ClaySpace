@@ -100,6 +100,14 @@ struct ContentView: View {
             Text("Layers, surface, and light arrive with the scene model.")
                 .font(.system(size: 12.5))
                 .foregroundStyle(.secondary)
+            HStack {
+                Text("Shapes")
+                Spacer()
+                Text("\(state.engine.items.count)")
+                    .accessibilityIdentifier("shapeCount")
+            }
+            .font(.system(size: 12.5))
+            .foregroundStyle(.secondary)
             Spacer()
         }
         .padding(16)

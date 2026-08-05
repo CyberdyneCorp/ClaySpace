@@ -8,10 +8,21 @@ options:
 # ClayCore (https://github.com/CyberdyneCorp/ClayCore) is consumed as a
 # sibling checkout pinned to a release tag; its Package.swift wraps the
 # prebuilt dist/claycore.xcframework (run tools/build_xcframework.sh in
-# the ClayCore repo after checking out the tag). Pinned: v0.5.0.
+# the ClayCore repo after checking out the tag). Pinned: v0.5.0
+# (+ fix/adds-escape-undo until CyberdyneCorp/ClayCore#2 merges).
 packages:
   claycore:
     path: ../../ClayCore
+
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    CODE_SIGN_STYLE: Automatic
+    DEVELOPMENT_TEAM: 2C69VJZSNR
+    # claycore is a C++-implemented static library behind a C ABI: link
+    # libc++; the xcframework's simulator slice is arm64-only.
+    OTHER_LDFLAGS: "-lc++"
+    "EXCLUDED_ARCHS[sdk=iphonesimulator*]": x86_64
 
 targets:
   ClaySpace:
@@ -27,15 +38,50 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.cyberdyne.clayspace
         TARGETED_DEVICE_FAMILY: "2"          # iPad only
-        SWIFT_VERSION: "6.0"
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
         INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad: "UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown"
         INFOPLIST_KEY_UIStatusBarHidden: YES
-        CODE_SIGN_STYLE: Automatic
-        DEVELOPMENT_TEAM: 2C69VJZSNR
-        # claycore is a C++-implemented static library behind a C ABI:
-        # the app links libc++; the xcframework's simulator slice is
-        # arm64-only, so exclude x86_64 there.
-        OTHER_LDFLAGS: "-lc++"
-        "EXCLUDED_ARCHS[sdk=iphonesimulator*]": x86_64
+
+  ClaySpaceTests:
+    type: bundle.unit-test
+    platform: iOS
+    deploymentTarget: "18.0"
+    sources:
+      - Tests/ClaySpaceTests
+    dependencies:
+      - target: ClaySpace
+      - package: claycore
+        product: claycore
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/ClaySpace.app/ClaySpace"
+        BUNDLE_LOADER: "$(TEST_HOST)"
+
+  ClaySpaceUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    deploymentTarget: "18.0"
+    sources:
+      - Tests/ClaySpaceUITests
+    dependencies:
+      - target: ClaySpace
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_TARGET_NAME: ClaySpace
+
+schemes:
+  ClaySpace:
+    build:
+      targets:
+        ClaySpace: all
+    run:
+      config: Debug
+    test:
+      config: Debug
+      gatherCoverageData: true
+      targets:
+        - ClaySpaceTests
+        - ClaySpaceUITests
