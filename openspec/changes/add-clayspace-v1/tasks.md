@@ -18,7 +18,7 @@
 - [ ] 2.5 Binary document format (versioned chunks, RLE voxel grids, embedded thumbnail) + load/save round-trip tests
 - [ ] 2.6 UIDocument + document browser integration (Files/iCloud, create/duplicate/rename/delete), autosave, save-state indicator
 - [ ] 2.7 Sample document shipping both layer kinds; first-launch copy-on-open behavior
-- [ ] 2.8 Replace `packages/ClayCoreStub` with the real tag-pinned ClayCore package once its C ABI lands
+- [x] 2.8 Replace `packages/ClayCoreStub` with the real tag-pinned ClayCore package once its C ABI lands — consuming ClayCore v0.5.0 (sibling checkout, SwiftPM binaryTarget over `dist/claycore.xcframework`; app links libc++, sim arch arm64-only); CI checks out the tag and builds the xcframework
 
 ## 3. SDF engine (claycore: `kernel`, `brick`, `eval`, `pick`)
 

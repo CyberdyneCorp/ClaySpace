@@ -5,9 +5,13 @@ options:
     iOS: "18.0"
   createIntermediateGroups: true
 
+# ClayCore (https://github.com/CyberdyneCorp/ClayCore) is consumed as a
+# sibling checkout pinned to a release tag; its Package.swift wraps the
+# prebuilt dist/claycore.xcframework (run tools/build_xcframework.sh in
+# the ClayCore repo after checking out the tag). Pinned: v0.5.0.
 packages:
-  ClayCoreStub:
-    path: ../packages/ClayCoreStub
+  claycore:
+    path: ../../ClayCore
 
 targets:
   ClaySpace:
@@ -17,8 +21,8 @@ targets:
     sources:
       - ClaySpace
     dependencies:
-      - package: ClayCoreStub
-        product: ClayCoreC
+      - package: claycore
+        product: claycore
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.cyberdyne.clayspace
@@ -30,3 +34,8 @@ targets:
         INFOPLIST_KEY_UIStatusBarHidden: YES
         CODE_SIGN_STYLE: Automatic
         DEVELOPMENT_TEAM: 2C69VJZSNR
+        # claycore is a C++-implemented static library behind a C ABI:
+        # the app links libc++; the xcframework's simulator slice is
+        # arm64-only, so exclude x86_64 there.
+        OTHER_LDFLAGS: "-lc++"
+        "EXCLUDED_ARCHS[sdk=iphonesimulator*]": x86_64

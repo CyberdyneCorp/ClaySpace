@@ -1,5 +1,5 @@
 import SwiftUI
-import ClayCoreC
+import claycore
 
 /// App shell: full-screen Metal viewport with the top-bar chrome overlaid
 /// and the inspector panel on the trailing edge (toggled by the
@@ -9,7 +9,11 @@ struct ContentView: View {
     @State private var state = ViewportState()
     @State private var showGestures = false
     @AppStorage("hasSeenGesturesSheet") private var hasSeenGestures = false
-    private let coreVersion = String(cString: clay_version_string())
+    private let coreVersion: String = {
+        var major: Int32 = 0, minor: Int32 = 0, patch: Int32 = 0
+        clay_version(&major, &minor, &patch)
+        return "claycore \(major).\(minor).\(patch)"
+    }()
 
     var body: some View {
         HStack(spacing: 0) {
