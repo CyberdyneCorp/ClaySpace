@@ -86,6 +86,35 @@ final class ClayEngineTests: XCTestCase {
         XCTAssertNotNil(engine.raycast(origin: probe.origin, direction: probe.dir))
     }
 
+    func testFieldBakeMatchesTheAnalyticField() async throws {
+        let engine = ClayEngine()
+        engine.addPrimitive(CLAY_PRIM_SPHERE, params: [0.3],
+                            at: SIMD3(1.2, 0.3, 0), op: CLAY_OP_ADD,
+                            blendK: 0.1, color: ClayEngine.clayColor)
+        await engine.bakeNow()
+
+        let cache = try XCTUnwrap(engine.fieldCache)
+        XCTAssertEqual(cache.bakedItemCount, 2, "both items baked")
+        XCTAssertLessThan(cache.sample(at: SIMD3(0, 0.8, 0)), 0, "inside the base ball")
+        XCTAssertGreaterThan(cache.sample(at: SIMD3(1.2, 0.3, 0)), -0.35, "inside the small sphere")
+        XCTAssertGreaterThan(cache.sample(at: SIMD3(0, 3.5, 0)), 0.5, "open air is far")
+        XCTAssertLessThan(abs(cache.sample(at: SIMD3(0, 1.6, 0))),
+                          cache.voxelSize * 2, "trilinear surface within two voxels")
+    }
+
+    func testUndoBelowTheBakePointDropsTheCache() async {
+        let engine = ClayEngine()
+        engine.addPrimitive(CLAY_PRIM_SPHERE, params: [0.2],
+                            at: SIMD3(0, 1.8, 0), op: CLAY_OP_ADD,
+                            blendK: 0, color: ClayEngine.clayColor)
+        await engine.bakeNow()
+        XCTAssertNotNil(engine.fieldCache)
+
+        XCTAssertTrue(engine.undo(), "undo the baked item")
+        XCTAssertNil(engine.fieldCache,
+                     "a cache holding a removed item is stale and must drop")
+    }
+
     func testCarvingRecedesTheSurface() throws {
         let engine = ClayEngine()
         let origin = SIMD3<Float>(0, 0.8, 3)

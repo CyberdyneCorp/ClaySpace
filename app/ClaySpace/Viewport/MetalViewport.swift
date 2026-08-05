@@ -279,9 +279,7 @@ final class MetalViewportView: UIView {
         renderer?.draw(to: drawable,
                        time: Float(CACurrentMediaTime() - startTime),
                        camera: camera,
-                       items: state.engine.items,
-                       strokePoints: state.engine.strokePoints,
-                       sceneVersion: version)
+                       engine: state.engine)
     }
 }
 

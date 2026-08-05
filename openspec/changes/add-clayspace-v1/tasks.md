@@ -22,7 +22,7 @@
 
 ## 3. SDF engine (claycore: `kernel`, `brick`, `eval`, `pick`)
 
-- [ ] 3.1 Productionize sparse brick cache: per-layer grids, narrow band, dirty-brick tracking, async re-eval queue
+- [ ] 3.1 Productionize sparse brick cache: per-layer grids, narrow band, dirty-brick tracking, async re-eval queue — IN PROGRESS: first stage shipped app-side as a dense 128³ baked field (background bake of a document snapshot via `clay_eval_points`, 3D-texture tracing with analytic tail for post-bake items, undo-below-bake invalidation); sparse bricks + dirty-region re-eval move to ClayCore next
 - [ ] 3.2 Single-source kernel headers (sphere, box, rounded box, cylinder, cone, capsule, torus, prism, ellipsoid) compiling to CPU and MSL, with unit tests against reference values from docs/01 and a CPU↔Metal parity suite
 - [ ] 3.3 CSG ops (Add/Subtract/Intersect/Paint) with quadratic smin + chamfer variants and color-mix falloff; edit-list → flat-tape compiler shared by all backends
 - [ ] 3.4 Stroke item type: capsule/round-cone chain with per-point radius; live path → brick commit on Pencil lift

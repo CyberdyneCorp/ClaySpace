@@ -13,7 +13,10 @@ struct Uniforms {
     float3 forward;
     float4 params; // aspect, time, lens, orthoHalfHeight (0 = perspective)
     int itemCount;
-    float3 _pad;
+    int bakedCount;       // items below this index live in the field cache
+    float2 _pad;
+    float4 gridOrigin;    // xyz cache origin; w = cache enabled (0/1)
+    float4 gridInvExtent; // xyz = 1/extent; w = normal epsilon
 };
 
 // Must match SceneItem in ClayEngine.swift (80 bytes).
@@ -145,12 +148,36 @@ static float sdItem(float3 p, constant SceneItem &it, constant float4 *pts) {
     return d * s - it.rounding;
 }
 
+// Field evaluation context: the baked cache plus the analytic tail.
+struct FieldCtx {
+    constant SceneItem *items;
+    int count;
+    int start;           // first analytic item (bakedCount when cache is on)
+    constant float4 *pts;
+    texture3d<float> dtex;
+    texture3d<float> ctex;
+    float4 gridOrigin;   // w = cache enabled
+    float4 gridInvExtent;
+};
+
+constexpr sampler fieldSampler(filter::linear, address::clamp_to_edge);
+
+// Baked field lookup; outside the grid the clamped-edge sample is padded by
+// the world-space distance to the grid so stepping stays conservative.
+static float sampleCache(float3 p, FieldCtx ctx) {
+    float3 uvw = (p - ctx.gridOrigin.xyz) * ctx.gridInvExtent.xyz;
+    float d = ctx.dtex.sample(fieldSampler, uvw).r;
+    float3 outside = (uvw - clamp(uvw, 0.0, 1.0)) / ctx.gridInvExtent.xyz;
+    return d + length(outside);
+}
+
 // Quadratic smin in mix form: h drives both distance and color blending
 // (docs/01 §2.2 — material mix falls out of the falloff).
-static float mapDist(float3 p, constant SceneItem *items, int count,
-                     constant float4 *pts) {
-    float d = 1e9;
-    for (int i = 0; i < count; i++) {
+static float mapDist(float3 p, FieldCtx ctx) {
+    constant SceneItem *items = ctx.items;
+    bool cached = ctx.gridOrigin.w > 0.5;
+    float d = cached ? sampleCache(p, ctx) : 1e9;
+    for (int i = cached ? ctx.start : 0; i < ctx.count; i++) {
         constant SceneItem &it = items[i];
         float bound = length(p - it.boundCenter) - it.boundRadius;
         if (it.op == OP_ADD) {
@@ -158,7 +185,7 @@ static float mapDist(float3 p, constant SceneItem *items, int count,
         } else if (bound > 0.0) {
             continue; // subtract/paint only act inside their influence
         }
-        float di = sdItem(p, it, pts);
+        float di = sdItem(p, it, ctx.pts);
         float k = (it.blend != 0) ? it.blendK : 0.0;
         if (it.op == OP_ADD) {
             if (k > 0.0) {
@@ -181,11 +208,17 @@ static float mapDist(float3 p, constant SceneItem *items, int count,
     return d;
 }
 
-static float4 mapShade(float3 p, constant SceneItem *items, int count,
-                       constant float4 *pts) {
+static float4 mapShade(float3 p, FieldCtx ctx) {
+    constant SceneItem *items = ctx.items;
+    bool cached = ctx.gridOrigin.w > 0.5;
     float d = 1e9;
     float3 col = float3(0.22, 0.65, 0.81);
-    for (int i = 0; i < count; i++) {
+    if (cached) {
+        d = sampleCache(p, ctx);
+        float3 uvw = (p - ctx.gridOrigin.xyz) * ctx.gridInvExtent.xyz;
+        col = ctx.ctex.sample(fieldSampler, uvw).rgb;
+    }
+    for (int i = cached ? ctx.start : 0; i < ctx.count; i++) {
         constant SceneItem &it = items[i];
         float bound = length(p - it.boundCenter) - it.boundRadius;
         if (it.op == OP_ADD) {
@@ -193,7 +226,7 @@ static float4 mapShade(float3 p, constant SceneItem *items, int count,
         } else if (bound > 0.0) {
             continue;
         }
-        float di = sdItem(p, it, pts);
+        float di = sdItem(p, it, ctx.pts);
         float k = (it.blend != 0) ? it.blendK : 0.0;
         if (it.op == OP_ADD) {
             if (k > 0.0) {
@@ -217,20 +250,24 @@ static float4 mapShade(float3 p, constant SceneItem *items, int count,
     return float4(col, d);
 }
 
-static float3 calcNormal(float3 p, constant SceneItem *items, int count,
-                         constant float4 *pts) {
-    const float h = 0.0007;
+static float3 calcNormal(float3 p, FieldCtx ctx) {
+    // Epsilon scales with cache voxel size so trilinear normals stay smooth.
+    const float h = ctx.gridInvExtent.w;
     const float2 k = float2(1, -1);
-    return normalize(k.xyy * mapDist(p + k.xyy * h, items, count, pts) +
-                     k.yyx * mapDist(p + k.yyx * h, items, count, pts) +
-                     k.yxy * mapDist(p + k.yxy * h, items, count, pts) +
-                     k.xxx * mapDist(p + k.xxx * h, items, count, pts));
+    return normalize(k.xyy * mapDist(p + k.xyy * h, ctx) +
+                     k.yyx * mapDist(p + k.yyx * h, ctx) +
+                     k.yxy * mapDist(p + k.yxy * h, ctx) +
+                     k.xxx * mapDist(p + k.xxx * h, ctx));
 }
 
 fragment float4 raymarch_fragment(VertexOut in [[stage_in]],
                                   constant Uniforms &u [[buffer(0)]],
                                   constant SceneItem *items [[buffer(1)]],
-                                  constant float4 *strokePts [[buffer(2)]]) {
+                                  constant float4 *strokePts [[buffer(2)]],
+                                  texture3d<float> distanceTex [[texture(0)]],
+                                  texture3d<float> colorTex [[texture(1)]]) {
+    FieldCtx ctx{items, u.itemCount, u.bakedCount, strokePts,
+                 distanceTex, colorTex, u.gridOrigin, u.gridInvExtent};
     const float aspect = u.params.x;
     const float lens = u.params.z;
     const float orthoHalfHeight = u.params.w;
@@ -248,7 +285,7 @@ fragment float4 raymarch_fragment(VertexOut in [[stage_in]],
     float t = 0.0;
     bool hit = false;
     for (int i = 0; i < 112 && t < 24.0; i++) {
-        float d = mapDist(ro + rd * t, items, u.itemCount, strokePts);
+        float d = mapDist(ro + rd * t, ctx);
         if (d < 0.001 * max(t, 1.0)) { hit = true; break; }
         t += max(d * 0.9, 0.0014 * max(t, 1.0)); // 0.9: blends bound; floor: grazing rays
     }
@@ -269,7 +306,7 @@ fragment float4 raymarch_fragment(VertexOut in [[stage_in]],
             float line = smoothstep(0.47, 0.5, max(cell.x, cell.y));
             ground = mix(ground, ground * 0.93, line);
             // contact shadow from the field
-            float clearance = mapDist(gp, items, u.itemCount, strokePts);
+            float clearance = mapDist(gp, ctx);
             float shadow = 1.0 - 0.35 * exp(-2.2 * max(clearance, 0.0));
             // fade at the edge of the build area
             float edge = smoothstep(6.0, 4.6, max(abs(gp.x), abs(gp.z)));
@@ -279,8 +316,8 @@ fragment float4 raymarch_fragment(VertexOut in [[stage_in]],
 
     if (hit && (!groundCloser || t < tGround)) {
         float3 p = ro + rd * t;
-        float3 n = calcNormal(p, items, u.itemCount, strokePts);
-        float3 albedo = mapShade(p, items, u.itemCount, strokePts).rgb;
+        float3 n = calcNormal(p, ctx);
+        float3 albedo = mapShade(p, ctx).rgb;
         float3 l = normalize(float3(0.5, 0.8, 0.3));
         float diffuse = saturate(dot(n, l));
         float rim = pow(1.0 - saturate(dot(n, -rd)), 3.0);

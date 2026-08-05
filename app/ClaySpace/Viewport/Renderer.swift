@@ -11,8 +11,7 @@ final class Renderer {
     private let queue: MTLCommandQueue
     private let pipeline: MTLRenderPipelineState
 
-    /// Layout mirrors `Uniforms` in Shaders.metal: three float3 rows
-    /// (16-byte strides on both sides) plus a packed params vector.
+    /// Layout mirrors `Uniforms` in Shaders.metal (128 bytes).
     struct Uniforms {
         var position: SIMD3<Float>
         var right: SIMD3<Float>
@@ -20,13 +19,19 @@ final class Renderer {
         var forward: SIMD3<Float>
         var params: SIMD4<Float> // aspect, time, lens, orthoHalfHeight
         var itemCount: Int32
-        var pad: SIMD3<Float> = .zero
+        var bakedCount: Int32    // items below this index live in the cache
+        var pad: SIMD2<Float> = .zero
+        var gridOrigin: SIMD4<Float>    // xyz origin; w = cache enabled (0/1)
+        var gridInvExtent: SIMD4<Float> // xyz = 1/extent; w = normal epsilon
     }
 
     static let maxItems = 256
     private let itemBuffer: MTLBuffer
     private let strokePointBuffer: MTLBuffer
+    private let distanceTexture: MTLTexture
+    private let colorTexture: MTLTexture
     private var uploadedVersion = -1
+    private var uploadedCacheVersion = -1
 
     init?(device: MTLDevice, pixelFormat: MTLPixelFormat) {
         guard let queue = device.makeCommandQueue(),
@@ -40,24 +45,48 @@ final class Renderer {
         descriptor.fragmentFunction = fragmentFn
         descriptor.colorAttachments[0].pixelFormat = pixelFormat
 
+        let n = FieldCache.resolution
+        let distanceDesc = MTLTextureDescriptor()
+        distanceDesc.textureType = .type3D
+        distanceDesc.pixelFormat = .r16Float
+        distanceDesc.width = n
+        distanceDesc.height = n
+        distanceDesc.depth = n
+        distanceDesc.usage = .shaderRead
+        distanceDesc.storageMode = .shared
+        let colorDesc = MTLTextureDescriptor()
+        colorDesc.textureType = .type3D
+        colorDesc.pixelFormat = .rgba8Unorm
+        colorDesc.width = n
+        colorDesc.height = n
+        colorDesc.depth = n
+        colorDesc.usage = .shaderRead
+        colorDesc.storageMode = .shared
+
         guard let pipeline = try? device.makeRenderPipelineState(descriptor: descriptor),
               let itemBuffer = device.makeBuffer(
                   length: MemoryLayout<SceneItem>.stride * Self.maxItems,
                   options: .storageModeShared),
               let strokePointBuffer = device.makeBuffer(
                   length: MemoryLayout<SIMD4<Float>>.stride * ClayEngine.maxStrokePoints,
-                  options: .storageModeShared)
+                  options: .storageModeShared),
+              let distanceTexture = device.makeTexture(descriptor: distanceDesc),
+              let colorTexture = device.makeTexture(descriptor: colorDesc)
         else { return nil }
 
         self.queue = queue
         self.pipeline = pipeline
         self.itemBuffer = itemBuffer
         self.strokePointBuffer = strokePointBuffer
+        self.distanceTexture = distanceTexture
+        self.colorTexture = colorTexture
     }
 
     func draw(to drawable: CAMetalDrawable, time: Float, camera: OrbitCamera,
-              items: [SceneItem], strokePoints: [SIMD4<Float>], sceneVersion: Int) {
-        if sceneVersion != uploadedVersion {
+              engine: ClayEngine) {
+        let items = engine.items
+        let strokePoints = engine.strokePoints
+        if engine.version != uploadedVersion {
             let count = min(items.count, Self.maxItems)
             items.prefix(count).withUnsafeBytes { src in
                 itemBuffer.contents().copyMemory(from: src.baseAddress!, byteCount: src.count)
@@ -69,7 +98,23 @@ final class Renderer {
                                                             byteCount: src.count)
                 }
             }
-            uploadedVersion = sceneVersion
+            uploadedVersion = engine.version
+        }
+
+        if let cache = engine.fieldCache, engine.fieldCacheVersion != uploadedCacheVersion {
+            let n = FieldCache.resolution
+            let region = MTLRegionMake3D(0, 0, 0, n, n, n)
+            cache.distances.withUnsafeBytes { src in
+                distanceTexture.replace(region: region, mipmapLevel: 0, slice: 0,
+                                        withBytes: src.baseAddress!,
+                                        bytesPerRow: n * 2, bytesPerImage: n * n * 2)
+            }
+            cache.colors.withUnsafeBytes { src in
+                colorTexture.replace(region: region, mipmapLevel: 0, slice: 0,
+                                     withBytes: src.baseAddress!,
+                                     bytesPerRow: n * 4, bytesPerImage: n * n * 4)
+            }
+            uploadedCacheVersion = engine.fieldCacheVersion
         }
         let pass = MTLRenderPassDescriptor()
         pass.colorAttachments[0].texture = drawable.texture
@@ -84,19 +129,31 @@ final class Renderer {
         let width = Float(drawable.texture.width)
         let height = Float(max(drawable.texture.height, 1))
         let basis = camera.basis
+        let cache = engine.fieldCache
+        let cacheUsable = cache != nil && uploadedCacheVersion == engine.fieldCacheVersion
         var uniforms = Uniforms(
             position: camera.position,
             right: basis.right,
             up: basis.up,
             forward: basis.forward,
             params: SIMD4(width / height, time, camera.lens, camera.orthoHalfHeight),
-            itemCount: Int32(min(items.count, Self.maxItems))
+            itemCount: Int32(min(items.count, Self.maxItems)),
+            bakedCount: Int32(cacheUsable ? (cache?.bakedItemCount ?? 0) : 0),
+            gridOrigin: cacheUsable
+                ? SIMD4(cache!.origin.x, cache!.origin.y, cache!.origin.z, 1)
+                : SIMD4(0, 0, 0, 0),
+            gridInvExtent: cacheUsable
+                ? SIMD4(1 / cache!.extent.x, 1 / cache!.extent.y, 1 / cache!.extent.z,
+                        max(0.0007, cache!.voxelSize * 0.35))
+                : SIMD4(0, 0, 0, 0.0007)
         )
 
         encoder.setRenderPipelineState(pipeline)
         encoder.setFragmentBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 0)
         encoder.setFragmentBuffer(itemBuffer, offset: 0, index: 1)
         encoder.setFragmentBuffer(strokePointBuffer, offset: 0, index: 2)
+        encoder.setFragmentTexture(distanceTexture, index: 0)
+        encoder.setFragmentTexture(colorTexture, index: 1)
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
         encoder.endEncoding()
 

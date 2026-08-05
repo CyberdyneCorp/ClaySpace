@@ -22,6 +22,48 @@ struct SceneItem {
     var boundRadius: Float
 }
 
+/// Baked field cache (design D2, task 3.1 first stage): the document's SDF
+/// sampled onto a dense grid by ClayCore's CPU backend, rendered as a 3D
+/// texture at flat per-pixel cost. Items with index < bakedItemCount live in
+/// the cache; newer ones (the live stroke, post-bake edits) stay analytic.
+struct FieldCache {
+    static let resolution = 128
+
+    var origin: SIMD3<Float>
+    var extent: SIMD3<Float>
+    var bakedItemCount: Int
+    var distances: [Float16]  // resolution³, world-space signed distance
+    var colors: [UInt8]       // resolution³ × RGBA8
+
+    var voxelSize: Float {
+        max(extent.x, max(extent.y, extent.z)) / Float(Self.resolution)
+    }
+
+    /// CPU trilinear sample — mirrors the shader's sampler, including the
+    /// outside-the-grid conservative padding; used by tests.
+    func sample(at p: SIMD3<Float>) -> Float {
+        let n = Self.resolution
+        let rawUvw = (p - origin) / extent
+        let clamped = simd_clamp(rawUvw, SIMD3.zero, SIMD3(repeating: 1))
+        let outside = simd_length((rawUvw - clamped) * extent)
+        let uvw = clamped
+        let f = simd_clamp(uvw * Float(n) - 0.5, SIMD3.zero, SIMD3(repeating: Float(n - 1)))
+        let i0 = SIMD3<Int>(Int(f.x), Int(f.y), Int(f.z))
+        let i1 = simd_min(i0 &+ SIMD3(1, 1, 1), SIMD3(repeating: n - 1))
+        let t = f - SIMD3<Float>(Float(i0.x), Float(i0.y), Float(i0.z))
+        func d(_ x: Int, _ y: Int, _ z: Int) -> Float {
+            Float(distances[(z * n + y) * n + x])
+        }
+        let c00 = d(i0.x, i0.y, i0.z) * (1 - t.x) + d(i1.x, i0.y, i0.z) * t.x
+        let c10 = d(i0.x, i1.y, i0.z) * (1 - t.x) + d(i1.x, i1.y, i0.z) * t.x
+        let c01 = d(i0.x, i0.y, i1.z) * (1 - t.x) + d(i1.x, i0.y, i1.z) * t.x
+        let c11 = d(i0.x, i1.y, i1.z) * (1 - t.x) + d(i1.x, i1.y, i1.z) * t.x
+        let interior = (c00 * (1 - t.y) + c10 * t.y) * (1 - t.z)
+            + (c01 * (1 - t.y) + c11 * t.y) * t.z
+        return interior + outside
+    }
+}
+
 /// The document engine: wraps a `clay_document` (ClayCore C ABI). ClayCore is
 /// the source of truth — every edit goes through the ABI, undo is the
 /// document's own undo stack — while `items` mirrors the edit list for the
@@ -93,6 +135,7 @@ final class ClayEngine {
                      blendK: 0, color: Self.clayColor, recordMirror: true)
 
         _ = check(clay_document_enable_undo(doc))
+        scheduleBake(debounceMilliseconds: 10)
     }
 
     deinit {
@@ -145,6 +188,7 @@ final class ClayEngine {
             ))
             redoMirror.removeAll()
             version += 1
+            scheduleBake()
         }
         return true
     }
@@ -225,6 +269,7 @@ final class ClayEngine {
         guard let doc, activeStroke != nil else { return }
         _ = check(clay_document_end_undo_group(doc))
         activeStroke = nil
+        scheduleBake()
     }
 
     // MARK: Undo / redo (ClayCore's document undo stack)
@@ -245,6 +290,7 @@ final class ClayEngine {
             redoMirror.append((last, points))
         }
         version += 1
+        invalidateCacheIfNeeded()
         return true
     }
 
@@ -260,6 +306,7 @@ final class ClayEngine {
             items.append(restored.item)
         }
         version += 1
+        scheduleBake()
         return true
     }
 
@@ -267,6 +314,121 @@ final class ClayEngine {
     func boundContains(_ index: Int, point: SIMD3<Float>) -> Bool {
         guard items.indices.contains(index) else { return false }
         return simd_distance(point, items[index].boundCenter) <= items[index].boundRadius
+    }
+
+    // MARK: Field cache (baked rendering, design D2 / task 3.1 first stage)
+
+    private(set) var fieldCache: FieldCache?
+    private(set) var fieldCacheVersion = 0
+    private var bakeTask: Task<Void, Never>?
+
+    /// Debounced rebake after committed edits. The bake runs on a background
+    /// thread against an independently loaded snapshot of the document, so
+    /// the main thread (and ClayCore's live doc) is never touched.
+    func scheduleBake(debounceMilliseconds: Int = 200) {
+        bakeTask?.cancel()
+        let editVersion = version
+        bakeTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(debounceMilliseconds))
+            guard !Task.isCancelled else { return }
+            await self?.performBake(editVersion: editVersion)
+        }
+    }
+
+    /// Immediate bake — used by tests.
+    func bakeNow() async {
+        await performBake(editVersion: version)
+    }
+
+    private func performBake(editVersion: Int) async {
+        guard let doc, !isStroking else { return }
+        let path = FileManager.default.temporaryDirectory
+            .appendingPathComponent("clayspace-bake.clayspace").path
+        guard check(clay_document_save(doc, path)) else { return }
+        let itemCount = items.count
+        let bounds = sceneBounds()
+
+        let baked = await Task.detached(priority: .userInitiated) {
+            Self.bakeField(documentPath: path, boundsMin: bounds.0, boundsMax: bounds.1)
+        }.value
+
+        guard version == editVersion else {
+            scheduleBake() // edits landed mid-bake: this result is stale
+            return
+        }
+        guard var cache = baked else { return }
+        cache.bakedItemCount = itemCount
+        fieldCache = cache
+        fieldCacheVersion += 1
+        version += 1 // wake the renderer
+    }
+
+    /// Drops the cache when the edit list shrinks below the bake point
+    /// (undo of a baked item); rendering falls back to full analytic until
+    /// the scheduled rebake lands.
+    private func invalidateCacheIfNeeded() {
+        if let cache = fieldCache, items.count < cache.bakedItemCount {
+            fieldCache = nil
+            fieldCacheVersion += 1
+        }
+        scheduleBake()
+    }
+
+    private func sceneBounds() -> (SIMD3<Float>, SIMD3<Float>) {
+        guard !items.isEmpty else { return (SIMD3(repeating: -1), SIMD3(repeating: 1)) }
+        var mn = SIMD3<Float>(repeating: .greatestFiniteMagnitude)
+        var mx = -mn
+        for item in items {
+            mn = simd_min(mn, item.boundCenter - SIMD3(repeating: item.boundRadius))
+            mx = simd_max(mx, item.boundCenter + SIMD3(repeating: item.boundRadius))
+        }
+        return (mn, mx)
+    }
+
+    nonisolated private static func bakeField(documentPath: String,
+                                              boundsMin: SIMD3<Float>,
+                                              boundsMax: SIMD3<Float>) -> FieldCache? {
+        var loaded: OpaquePointer?
+        guard clay_document_load(documentPath, &loaded) == CLAY_OK, let bakeDoc = loaded
+        else { return nil }
+        defer { clay_document_destroy(bakeDoc) }
+
+        let n = FieldCache.resolution
+        let margin: Float = 0.25
+        let mn = boundsMin - SIMD3(repeating: margin)
+        let extent = (boundsMax + SIMD3(repeating: margin)) - mn
+
+        var distances = [Float16](repeating: 0, count: n * n * n)
+        var colors = [UInt8](repeating: 255, count: n * n * n * 4)
+        var slicePoints = [Float](repeating: 0, count: n * n * 3)
+        var sliceDistances = [Float](repeating: 0, count: n * n)
+        var sliceColors = [Float](repeating: 0, count: n * n * 3)
+
+        for z in 0..<n {
+            let wz = mn.z + extent.z * (Float(z) + 0.5) / Float(n)
+            var i = 0
+            for y in 0..<n {
+                let wy = mn.y + extent.y * (Float(y) + 0.5) / Float(n)
+                for x in 0..<n {
+                    slicePoints[i * 3 + 0] = mn.x + extent.x * (Float(x) + 0.5) / Float(n)
+                    slicePoints[i * 3 + 1] = wy
+                    slicePoints[i * 3 + 2] = wz
+                    i += 1
+                }
+            }
+            guard clay_eval_points(bakeDoc, nil, slicePoints, n * n,
+                                   &sliceDistances, &sliceColors) == CLAY_OK
+            else { return nil }
+            let base = z * n * n
+            for idx in 0..<(n * n) {
+                distances[base + idx] = Float16(max(-60000, min(60000, sliceDistances[idx])))
+                colors[(base + idx) * 4 + 0] = UInt8(max(0, min(255, sliceColors[idx * 3 + 0] * 255)))
+                colors[(base + idx) * 4 + 1] = UInt8(max(0, min(255, sliceColors[idx * 3 + 1] * 255)))
+                colors[(base + idx) * 4 + 2] = UInt8(max(0, min(255, sliceColors[idx * 3 + 2] * 255)))
+            }
+        }
+        return FieldCache(origin: mn, extent: extent, bakedItemCount: 0,
+                          distances: distances, colors: colors)
     }
 
     // MARK: Queries
