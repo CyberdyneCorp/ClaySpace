@@ -364,8 +364,65 @@ final class CameraAndInputTests: XCTestCase {
             XCTAssertEqual(scaleDist, layout.ringRadius, accuracy: 0.5,
                            "handles sit on the ring")
         }
+        // The gizmo follows the SELECTION, not the tool — an edit-list
+        // selection shows handles under sculpt/shape too.
         state.activate(.sculpt, announce: false)
-        XCTAssertNil(state.gizmoLayout, "gizmo is a select/move affordance")
+        XCTAssertNotNil(state.gizmoLayout, "selection keeps its handles under any tool")
+        state.selectedIndex = nil
+        XCTAssertNil(state.gizmoLayout, "no selection, no gizmo")
+    }
+
+    func testCenterHandleMovesSelectionUnderAnyTool() throws {
+        let state = ViewportState()
+        state.viewportSize = CGSize(width: 800, height: 600)
+        let index = try XCTUnwrap(selectSeededBall(state))
+        state.activate(.shape, announce: false) // NOT select/move
+        let layout = try XCTUnwrap(state.gizmoLayout)
+        let before = state.engine.items[index].position
+
+        state.pencilBegan(at: layout.center, pressure: 0.5)
+        state.pencilMoved(to: CGPoint(x: layout.center.x + 80, y: layout.center.y),
+                          pressure: 0.5)
+        let moved = state.engine.items[index].position
+        XCTAssertGreaterThan(simd_distance(moved, before), 0.2,
+                             "center handle drags the shape under the Shape tool")
+        state.pencilEnded(at: CGPoint(x: layout.center.x + 80, y: layout.center.y))
+        XCTAssertEqual(state.engine.items.count, 1, "no shape was placed — the handle won")
+
+        state.requestUndo()
+        XCTAssertEqual(simd_distance(state.engine.items[index].position, before), 0,
+                       accuracy: 1e-4, "the whole handle drag is one undo step")
+    }
+
+    func testShapePreviewFollowsThePressAndPlacesWhereItShows() throws {
+        let state = ViewportState()
+        state.viewportSize = CGSize(width: 800, height: 600)
+        state.activate(.shape, announce: false)
+        state.shapeKind = .torus
+        XCTAssertNil(state.shapePreview)
+
+        state.pencilBegan(at: CGPoint(x: 400, y: 300), pressure: 0.5)
+        let ghost = try XCTUnwrap(state.shapePreview, "preview appears on touch-down")
+        XCTAssertEqual(ghost.prim, Int32(CLAY_PRIM_TORUS.rawValue),
+                       "preview shows the picked kind")
+
+        // Dragging repositions the ghost; lift places where it shows.
+        state.pencilMoved(to: CGPoint(x: 480, y: 300), pressure: 0.7)
+        let dragged = try XCTUnwrap(state.shapePreview)
+        XCTAssertGreaterThan(simd_distance(dragged.position, ghost.position), 0.1)
+        let countBefore = state.engine.items.count
+        state.pencilEnded(at: CGPoint(x: 480, y: 300))
+        XCTAssertNil(state.shapePreview, "ghost clears on lift")
+        XCTAssertEqual(state.engine.items.count, countBefore + 1)
+        XCTAssertEqual(simd_distance(state.engine.items.last!.position, dragged.position),
+                       0, accuracy: 0.2, "placed where the ghost showed")
+
+        // A cancelled press places nothing and clears the ghost.
+        state.pencilBegan(at: CGPoint(x: 300, y: 300), pressure: 0.5)
+        XCTAssertNotNil(state.shapePreview)
+        state.pencilCancelled()
+        XCTAssertNil(state.shapePreview)
+        XCTAssertEqual(state.engine.items.count, countBefore + 1, "cancel placed nothing")
     }
 
     func testScaleHandleDragsUniformScaleAsOneUndoStep() throws {

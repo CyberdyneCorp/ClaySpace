@@ -6,7 +6,7 @@ import simd
 
 /// One SDF edit item mirrored for rendering. Layout must match `SceneItem`
 /// in Shaders.metal (112 bytes, float3 fields on 16-byte strides).
-struct SceneItem {
+struct SceneItem: Equatable {
     var position: SIMD3<Float>
     var scale: Float
     var rotation: SIMD4<Float> // quaternion x y z w

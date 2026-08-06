@@ -17,7 +17,7 @@ struct Uniforms {
     int mirrorAxes;       // layer mirror bits (CLAY_MIRROR_*)
     float mirrorK;        // Mirror Blend seam width
     int selectedIndex;    // highlighted item; -1 = none
-    float3 _pad3;
+    float3 previewInfo;   // x = pending-shape preview slot; -1 = none
     float4 gridOrigin;    // xyz cache origin; w = cache enabled (0/1)
     float4 gridInvExtent; // xyz = 1/extent; w = normal epsilon
     float4 gridScale;     // xyz = dims/maxResolution (texture sub-region)
@@ -676,6 +676,35 @@ fragment FragOut raymarch_fragment(VertexOut in [[stage_in]],
             float ds = sdItemMirrored(p, items[u.selectedIndex], ctx);
             float glow = 1.0 - smoothstep(0.0, 0.05, abs(ds));
             color = mix(color, float3(1.0, 0.62, 0.15), glow * 0.45);
+        }
+    }
+
+    // Pending-shape ghost (Shape tool press): march the preview item alone
+    // and tint its silhouette — solid where visible, faint where occluded —
+    // so kind, size, and landing spot read before committing on lift.
+    int previewSlot = int(u.previewInfo.x);
+    if (previewSlot >= 0) {
+        constant SceneItem &ghost = items[previewSlot];
+        float tg = 0.0;
+        bool ghostHit = false;
+        for (int i = 0; i < 48 && tg < 24.0; i++) {
+            float d = sdItem(ro + rd * tg, ghost, ctx.pts);
+            if (d < 0.0015 * max(tg, 1.0)) { ghostHit = true; break; }
+            tg += max(d * 0.95, 0.002);
+        }
+        if (ghostHit) {
+            bool frontDrawn = hit && (!groundCloser || t < tGround);
+            float tFront = frontDrawn ? t : (groundCloser ? tGround : 1e9);
+            float3 gn = normalize(float3(
+                sdItem(ro + rd * tg + float3(0.002, 0, 0), ghost, ctx.pts) -
+                sdItem(ro + rd * tg - float3(0.002, 0, 0), ghost, ctx.pts),
+                sdItem(ro + rd * tg + float3(0, 0.002, 0), ghost, ctx.pts) -
+                sdItem(ro + rd * tg - float3(0, 0.002, 0), ghost, ctx.pts),
+                sdItem(ro + rd * tg + float3(0, 0, 0.002), ghost, ctx.pts) -
+                sdItem(ro + rd * tg - float3(0, 0, 0.002), ghost, ctx.pts)));
+            float shade = 0.45 + 0.55 * saturate(dot(gn, l));
+            float strength = tg <= tFront ? 0.55 : 0.22; // occluded = fainter
+            color = mix(color, ghost.color * shade, strength);
         }
     }
 

@@ -251,6 +251,12 @@ struct ContentView: View {
                     .frame(width: 26, height: 26)
                     .background(Circle().fill(Color.orange))
                     .position(gizmo.rotateHandle)
+                Image(systemName: "arrow.up.and.down.and.arrow.left.and.right")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(.white)
+                    .frame(width: 24, height: 24)
+                    .background(Circle().fill(Color.orange.opacity(0.85)))
+                    .position(gizmo.center)
             }
             .allowsHitTesting(false)
         }

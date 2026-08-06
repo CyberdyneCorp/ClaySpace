@@ -97,12 +97,13 @@ final class ViewportState {
         var rotateHandle: CGPoint
     }
 
-    /// Screen-space gizmo over the selection (Select/Move tools, Smooth
-    /// mode). Display comes from ContentView; interaction routes through
-    /// the pencil sink so touches can never leak into sculpting.
+    /// Screen-space gizmo over the selection (Smooth mode, ANY tool — an
+    /// edit-list selection deserves handles too). Display comes from
+    /// ContentView; interaction routes through the pencil sink so touches
+    /// can never leak into sculpting.
     var gizmoLayout: GizmoLayout? {
         let items = engine.uiItems // registers observation for the overlay
-        guard mode == .sdf, activeTool == .select || activeTool == .move,
+        guard mode == .sdf,
               let index = selectedIndex, items.indices.contains(index),
               let center = screenPoint(for: items[index].boundCenter)
         else { return nil }
@@ -122,6 +123,8 @@ final class ViewportState {
         case scale(startScale: Float, startDistance: CGFloat, center: CGPoint)
         case rotate(startRotation: SIMD4<Float>, startAngle: CGFloat,
                     center: CGPoint, lastSnap: Int)
+        case translate(startPosition: SIMD3<Float>, startHit: SIMD3<Float>,
+                       plane: (point: SIMD3<Float>, normal: SIMD3<Float>))
     }
     fileprivate var gizmoDrag: GizmoDrag?
     /// 15° rotation latches (input-gestures spec: angle snap + haptics).
@@ -136,6 +139,9 @@ final class ViewportState {
     }
     /// Brush footprint under a hovering Pencil (M2+ iPads); nil = hidden.
     var hoverGhost: HoverGhost?
+    /// Pending-shape ghost while the Shape tool presses (rendered by the
+    /// raymarcher as a translucent silhouette of the real primitive).
+    var shapePreview: SceneItem?
     @ObservationIgnored fileprivate var lastHoverPoint: CGPoint?
     @ObservationIgnored fileprivate var lastHoverTool: Tool = .sculpt
     @ObservationIgnored fileprivate var lastHoverMode: EditorMode = .sdf
@@ -462,33 +468,47 @@ extension ViewportState: PencilToolSink {
             return
         }
 
-        // Shape tool places on lift (pencilEnded), sized by peak pressure.
-        if activeTool == .shape { return }
-
-        // Select/Move: gizmo handles first (scale/rotate sessions), then
-        // pick the item under the pencil for a one-undo-step move session;
-        // tapping empty space deselects.
-        if activeTool == .select || activeTool == .move {
-            if let layout = gizmoLayout, let index = selectedIndex {
-                let item = engine.items[index]
-                func near(_ handle: CGPoint) -> Bool {
-                    hypot(point.x - handle.x, point.y - handle.y) < 26
-                }
-                if near(layout.scaleHandle), engine.beginTransform(index: index) {
-                    gizmoDrag = .scale(startScale: item.scale == 0 ? 1 : item.scale,
-                                       startDistance: max(hypot(point.x - layout.center.x,
-                                                                point.y - layout.center.y), 10),
-                                       center: layout.center)
-                    return
-                }
-                if near(layout.rotateHandle), engine.beginTransform(index: index) {
-                    gizmoDrag = .rotate(startRotation: item.rotation,
-                                        startAngle: atan2(point.y - layout.center.y,
-                                                          point.x - layout.center.x),
-                                        center: layout.center, lastSnap: 0)
-                    return
-                }
+        // Gizmo handles outrank the active tool: an edit-list selection
+        // shows handles under any tool, and grabbing one means the handle,
+        // not a stroke. Center = move, ring right = scale, ring top = rotate.
+        if mode == .sdf, let layout = gizmoLayout, let index = selectedIndex {
+            let item = engine.items[index]
+            func near(_ handle: CGPoint) -> Bool {
+                hypot(point.x - handle.x, point.y - handle.y) < 26
             }
+            if near(layout.scaleHandle), engine.beginTransform(index: index) {
+                gizmoDrag = .scale(startScale: item.scale == 0 ? 1 : item.scale,
+                                   startDistance: max(hypot(point.x - layout.center.x,
+                                                            point.y - layout.center.y), 10),
+                                   center: layout.center)
+                return
+            }
+            if near(layout.rotateHandle), engine.beginTransform(index: index) {
+                gizmoDrag = .rotate(startRotation: item.rotation,
+                                    startAngle: atan2(point.y - layout.center.y,
+                                                      point.x - layout.center.x),
+                                    center: layout.center, lastSnap: 0)
+                return
+            }
+            if near(layout.center), let ray = ray(through: point),
+               engine.beginTransform(index: index) {
+                let plane = (point: item.position, normal: camera.basis.forward)
+                let hit = intersect(ray: ray, plane: plane) ?? item.position
+                gizmoDrag = .translate(startPosition: item.position,
+                                       startHit: hit, plane: plane)
+                return
+            }
+        }
+
+        // Shape tool: live preview from touch-down; places on lift.
+        if activeTool == .shape {
+            updateShapePreview(at: point)
+            return
+        }
+
+        // Select/Move: pick the item under the pencil for a one-undo-step
+        // move session; tapping empty space deselects.
+        if activeTool == .select || activeTool == .move {
             guard let ray = ray(through: point) else { return }
             if let picked = engine.pick(origin: ray.origin, direction: ray.direction) {
                 if selectedIndex != picked.index {
@@ -542,6 +562,10 @@ extension ViewportState: PencilToolSink {
 
     func pencilMoved(to point: CGPoint, pressure: Float, altitude: Float = .pi / 2) {
         pencilPeakPressure = max(pencilPeakPressure, pressure)
+        if mode == .sdf, activeTool == .shape, gizmoDrag == nil {
+            updateShapePreview(at: point)
+            return
+        }
 
         if mode == .voxel {
             voxelEdit(at: point, pressure: max(pressure, 0.1))
@@ -559,6 +583,18 @@ extension ViewportState: PencilToolSink {
                 let scale = min(max(startScale * Float(distance / startDistance), 0.2), 5)
                 engine.updateTransform(position: item.position,
                                        rotation: item.rotation, scale: scale)
+            case .translate(let startPosition, let startHit, let plane):
+                if activeTool == .move || activeTool == .select,
+                   let ray = ray(through: point),
+                   let picked = engine.pick(origin: ray.origin, direction: ray.direction),
+                   picked.index != index {
+                    engine.updateTransform(position: picked.position,
+                                           rotation: item.rotation, scale: item.scale)
+                } else if let ray = ray(through: point),
+                          let p = intersect(ray: ray, plane: plane) {
+                    engine.updateTransform(position: startPosition + (p - startHit),
+                                           rotation: item.rotation, scale: item.scale)
+                }
             case .rotate(let startRotation, let startAngle, let center, let lastSnap):
                 let angle = atan2(point.y - center.y, point.x - center.x)
                 var delta = -Float(angle - startAngle) // screen y points down
@@ -636,6 +672,7 @@ extension ViewportState: PencilToolSink {
         dragStartItemPosition = nil
         dragStartHit = nil
         gizmoDrag = nil
+        shapePreview = nil
         engine.endVoxelEdits() // commit a cancelled voxel drag's step
         if engine.isTransforming {
             engine.endTransform() // commit the drag so far
@@ -652,8 +689,10 @@ extension ViewportState: PencilToolSink {
             engine.endVoxelEdits()
             return
         }
-        if activeTool == .shape {
-            placeShape(at: start ?? point)
+        if activeTool == .shape, gizmoDrag == nil {
+            _ = start // the preview followed the pencil; place where it shows
+            placeShape(at: point)
+            shapePreview = nil
             return
         }
         if engine.isTransforming {
@@ -682,6 +721,31 @@ extension ViewportState: PencilToolSink {
         }
         strokePlane = nil
         lastStrokePoint = nil
+    }
+
+    /// Where a shape-tool press would land, or nil (carve ops off-surface).
+    fileprivate func shapeTarget(at point: CGPoint) -> SIMD3<Float>? {
+        guard let ray = ray(through: point) else { return nil }
+        let hit = engine.raycast(origin: ray.origin, direction: ray.direction)
+        if shapeOp == .add { return hit?.position ?? groundPoint(on: ray) }
+        return hit?.position
+    }
+
+    /// Live ghost of the pending shape while the pencil is down: kind,
+    /// size (grows with peak pressure), position under the tip.
+    fileprivate func updateShapePreview(at point: CGPoint) {
+        guard let target = shapeTarget(at: point) else { shapePreview = nil; return }
+        let size = 0.14 + pencilPeakPressure * 0.42
+        var params = SIMD4<Float>(repeating: 0)
+        for (i, value) in shapeKind.params(size: size).prefix(4).enumerated() {
+            params[i] = value
+        }
+        shapePreview = SceneItem(
+            position: target, scale: 1, rotation: SIMD4(0, 0, 0, 1),
+            params: params, color: activeColor, blendK: 0,
+            prim: Int32(shapeKind.clayPrim.rawValue), op: 0, blend: 0, rounding: 0,
+            boundCenter: target, boundRadius: size * 2.5 + 0.05,
+            mirrorFlag: 0, radialCount: 0, layerSlot: 0)
     }
 
     /// Tap-to-place (task 7.1): the tapped surface point (or ground for

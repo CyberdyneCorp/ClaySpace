@@ -23,7 +23,7 @@ final class Renderer {
         var mirrorAxes: Int32    // layer mirror bits (CLAY_MIRROR_*)
         var mirrorK: Float       // Mirror Blend seam width
         var selectedIndex: Int32 // highlighted item; -1 = none
-        var pad3: SIMD3<Float> = .zero
+        var previewInfo: SIMD3<Float> = SIMD3(-1, 0, 0) // x = preview slot
         var gridOrigin: SIMD4<Float>    // xyz origin; w = cache enabled (0/1)
         var gridInvExtent: SIMD4<Float> // xyz = 1/extent; w = normal epsilon
         var gridScale: SIMD4<Float>     // xyz = dims/maxResolution
@@ -169,7 +169,8 @@ final class Renderer {
     func draw(to drawable: CAMetalDrawable, time: Float, camera: OrbitCamera,
               engine: ClayEngine, selectedIndex: Int,
               lightDir: SIMD3<Float> = simd_normalize(SIMD3(0.5, 0.8, 0.3)),
-              fullQuality: Bool = true) {
+              fullQuality: Bool = true,
+              preview: SceneItem? = nil) {
         let items = engine.items
         let strokePoints = engine.strokePoints
         if engine.version != uploadedVersion {
@@ -204,6 +205,17 @@ final class Renderer {
         }
         uploadVoxelMesh(engine)
 
+        // Pending-shape ghost: one extra item past the live list; the
+        // shader marches it separately and tints its silhouette.
+        var previewSlot: Int32 = -1
+        let liveCount = min(items.count, Self.maxItems)
+        if var ghost = preview, liveCount < Self.maxItems {
+            previewSlot = Int32(liveCount)
+            itemBuffer.contents()
+                .advanced(by: MemoryLayout<SceneItem>.stride * liveCount)
+                .copyMemory(from: &ghost, byteCount: MemoryLayout<SceneItem>.stride)
+        }
+
         let pass = MTLRenderPassDescriptor()
         pass.colorAttachments[0].texture = drawable.texture
         pass.colorAttachments[0].loadAction = .clear
@@ -237,6 +249,7 @@ final class Renderer {
             mirrorAxes: engine.mirrorAxes,
             mirrorK: engine.mirrorK,
             selectedIndex: Int32(selectedIndex),
+            previewInfo: SIMD3(Float(previewSlot), 0, 0),
             gridOrigin: cacheUsable
                 ? SIMD4(cache!.origin.x, cache!.origin.y, cache!.origin.z, 1)
                 : SIMD4(0, 0, 0, 0),
