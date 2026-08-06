@@ -47,6 +47,21 @@ struct VertexOut {
     float2 uv;
 };
 
+// Shared depth convention for compositing the raymarch with raster passes.
+constant float kNear = 0.05;
+constant float kFar = 40.0;
+
+static float depthFor(float viewZ, bool ortho) {
+    float z = max(viewZ, kNear + 1e-4);
+    return ortho ? (z - kNear) / (kFar - kNear)
+                 : kFar * (z - kNear) / (z * (kFar - kNear));
+}
+
+struct FragOut {
+    float4 color [[color(0)]];
+    float depth [[depth(any)]];
+};
+
 vertex VertexOut fullscreen_vertex(uint vid [[vertex_id]]) {
     const float2 verts[3] = { float2(-1, -1), float2(3, -1), float2(-1, 3) };
     VertexOut out;
@@ -334,7 +349,7 @@ static float3 calcNormal(float3 p, FieldCtx ctx) {
                      k.xxx * mapDist(p + k.xxx * h, ctx));
 }
 
-fragment float4 raymarch_fragment(VertexOut in [[stage_in]],
+fragment FragOut raymarch_fragment(VertexOut in [[stage_in]],
                                   constant Uniforms &u [[buffer(0)]],
                                   constant SceneItem *items [[buffer(1)]],
                                   constant float4 *strokePts [[buffer(2)]],
@@ -407,5 +422,61 @@ fragment float4 raymarch_fragment(VertexOut in [[stage_in]],
         }
     }
 
+    // Depth of whatever we drew, for compositing with raster passes.
+    bool ortho = orthoHalfHeight > 0.0;
+    float depth = 1.0;
+    bool sceneWins = hit && (!groundCloser || t < tGround);
+    if (sceneWins) {
+        depth = depthFor(dot(ro + rd * t - u.position, u.forward), ortho);
+    } else if (groundCloser) {
+        depth = depthFor(dot(ro + rd * tGround - u.position, u.forward), ortho);
+    }
+    FragOut out;
+    out.color = float4(pow(color, 1.0 / 2.2), 1.0);
+    out.depth = depth;
+    return out;
+}
+
+// --- Voxel raster pass (greedy mesh), depth-composited -----------------------
+// Clip transform mirrors the raymarcher's ray generation exactly, so the two
+// passes agree on every pixel: ndc.x = lens*vx/(vz*aspect), ndc.y = lens*vy/vz
+// (ortho: divide by the half-height instead), z per depthFor.
+
+struct VoxelVSOut {
+    float4 position [[position]];
+    float3 normal;
+    float3 color;
+};
+
+vertex VoxelVSOut voxel_vertex(uint vid [[vertex_id]],
+                               const device float *positions [[buffer(0)]],
+                               const device float *normals [[buffer(1)]],
+                               const device float *colors [[buffer(2)]],
+                               constant Uniforms &u [[buffer(3)]]) {
+    float3 world = float3(positions[vid * 3], positions[vid * 3 + 1], positions[vid * 3 + 2]);
+    float3 v = world - u.position;
+    float vx = dot(v, u.right), vy = dot(v, u.up), vz = dot(v, u.forward);
+    const float aspect = u.params.x;
+    const float lens = u.params.z;
+    const float oh = u.params.w;
+
+    VoxelVSOut out;
+    if (oh > 0.0) {
+        out.position = float4(vx / (oh * aspect), vy / oh,
+                              (vz - kNear) / (kFar - kNear), 1.0);
+    } else {
+        float zc = kFar * (vz - kNear) / (kFar - kNear);
+        out.position = float4(lens * vx / aspect, lens * vy, zc, vz);
+    }
+    out.normal = float3(normals[vid * 3], normals[vid * 3 + 1], normals[vid * 3 + 2]);
+    out.color = float3(colors[vid * 3], colors[vid * 3 + 1], colors[vid * 3 + 2]);
+    return out;
+}
+
+fragment float4 voxel_fragment(VoxelVSOut in [[stage_in]]) {
+    float3 n = normalize(in.normal);
+    float3 l = normalize(float3(0.5, 0.8, 0.3));
+    float diffuse = saturate(dot(n, l));
+    float3 color = in.color * (0.45 + 0.55 * diffuse);
     return float4(pow(color, 1.0 / 2.2), 1.0);
 }

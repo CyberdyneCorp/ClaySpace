@@ -43,7 +43,11 @@ struct ContentView: View {
                     Spacer()
                     VStack(spacing: 8) {
                         PaletteBar(state: state)
-                        MirrorBar(state: state)
+                        if state.mode == .voxel {
+                            VoxelBar(state: state)
+                        } else {
+                            MirrorBar(state: state)
+                        }
                     }
                     .padding(.bottom, 16)
                     .onGeometryChange(for: CGRect.self) {
@@ -88,24 +92,37 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 0) {
                 Text("ClaySpace")
                     .font(.system(size: 19, weight: .semibold, design: .serif))
+                    .fixedSize()
                 Text(state.engine.isDirty ? "edited" : "saved")
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
                     .accessibilityIdentifier("saveStatus")
             }
-            Spacer()
-            Text(coreVersion)
-                .font(.system(size: 11, design: .monospaced))
-                .foregroundStyle(.secondary)
-            Button("Gestures") { showGestures = true }
-                .font(.system(size: 13))
-                .buttonStyle(.bordered)
-                .tint(.secondary)
-            Button("Export") { showExport = true }
-                .font(.system(size: 13))
-                .buttonStyle(.borderedProminent)
-                .tint(.orange)
-                .accessibilityIdentifier("exportButton")
+            Spacer(minLength: 8)
+            Picker("Mode", selection: Binding(
+                get: { state.mode },
+                set: { state.setMode($0) })) {
+                Text("Smooth").tag(ViewportState.EditorMode.sdf)
+                Text("Voxels").tag(ViewportState.EditorMode.voxel)
+            }
+            .pickerStyle(.segmented)
+            .frame(width: 150)
+            .accessibilityIdentifier("modeSwitch")
+            Spacer(minLength: 8)
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 8) {
+                    Text(coreVersion)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                    gesturesButton
+                    exportButton
+                }
+                HStack(spacing: 8) {
+                    gesturesButton
+                    exportButton
+                }
+                exportButton
+            }
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
@@ -113,6 +130,21 @@ struct ContentView: View {
         .onGeometryChange(for: CGRect.self) {
             $0.frame(in: .global)
         } action: { state.chromeRects["topBar"] = $0 }
+    }
+
+    private var gesturesButton: some View {
+        Button("Gestures") { showGestures = true }
+            .font(.system(size: 13))
+            .buttonStyle(.bordered)
+            .tint(.secondary)
+    }
+
+    private var exportButton: some View {
+        Button("Export") { showExport = true }
+            .font(.system(size: 13))
+            .buttonStyle(.borderedProminent)
+            .tint(.orange)
+            .accessibilityIdentifier("exportButton")
     }
 
     private var toastOverlay: some View {
@@ -143,6 +175,14 @@ struct ContentView: View {
                 Spacer()
                 Text("\(state.engine.items.count)")
                     .accessibilityIdentifier("shapeCount")
+            }
+            .font(.system(size: 12.5))
+            .foregroundStyle(.secondary)
+            HStack {
+                Text("Voxels")
+                Spacer()
+                Text("\(state.engine.voxelCount)")
+                    .accessibilityIdentifier("voxelCount")
             }
             .font(.system(size: 12.5))
             .foregroundStyle(.secondary)

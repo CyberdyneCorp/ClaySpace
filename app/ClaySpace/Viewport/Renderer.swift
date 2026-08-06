@@ -30,6 +30,7 @@ final class Renderer {
     }
 
     static let maxItems = 256
+    private let device: MTLDevice
     private let itemBuffer: MTLBuffer
     private let strokePointBuffer: MTLBuffer
     private let distanceTexture: MTLTexture
@@ -37,17 +38,46 @@ final class Renderer {
     private var uploadedVersion = -1
     private var uploadedCacheVersion = -1
 
+    // Voxel raster pass (greedy mesh) composited via a shared depth buffer.
+    private let voxelPipeline: MTLRenderPipelineState
+    private let raymarchDepthState: MTLDepthStencilState
+    private let voxelDepthState: MTLDepthStencilState
+    private var depthTexture: MTLTexture?
+    private var voxelPositionBuffer: MTLBuffer?
+    private var voxelNormalBuffer: MTLBuffer?
+    private var voxelColorBuffer: MTLBuffer?
+    private var voxelIndexBuffer: MTLBuffer?
+    private var voxelIndexCount = 0
+    private var uploadedVoxelVersion = -1
+
     init?(device: MTLDevice, pixelFormat: MTLPixelFormat) {
+        self.device = device
         guard let queue = device.makeCommandQueue(),
               let library = device.makeDefaultLibrary(),
               let vertexFn = library.makeFunction(name: "fullscreen_vertex"),
-              let fragmentFn = library.makeFunction(name: "raymarch_fragment")
+              let fragmentFn = library.makeFunction(name: "raymarch_fragment"),
+              let voxelVertexFn = library.makeFunction(name: "voxel_vertex"),
+              let voxelFragmentFn = library.makeFunction(name: "voxel_fragment")
         else { return nil }
 
         let descriptor = MTLRenderPipelineDescriptor()
         descriptor.vertexFunction = vertexFn
         descriptor.fragmentFunction = fragmentFn
         descriptor.colorAttachments[0].pixelFormat = pixelFormat
+        descriptor.depthAttachmentPixelFormat = .depth32Float
+
+        let voxelDescriptor = MTLRenderPipelineDescriptor()
+        voxelDescriptor.vertexFunction = voxelVertexFn
+        voxelDescriptor.fragmentFunction = voxelFragmentFn
+        voxelDescriptor.colorAttachments[0].pixelFormat = pixelFormat
+        voxelDescriptor.depthAttachmentPixelFormat = .depth32Float
+
+        let alwaysWrite = MTLDepthStencilDescriptor()
+        alwaysWrite.depthCompareFunction = .always
+        alwaysWrite.isDepthWriteEnabled = true
+        let lessWrite = MTLDepthStencilDescriptor()
+        lessWrite.depthCompareFunction = .less
+        lessWrite.isDepthWriteEnabled = true
 
         let n = FieldCache.maxResolution
         let distanceDesc = MTLTextureDescriptor()
@@ -68,6 +98,9 @@ final class Renderer {
         colorDesc.storageMode = .shared
 
         guard let pipeline = try? device.makeRenderPipelineState(descriptor: descriptor),
+              let voxelPipeline = try? device.makeRenderPipelineState(descriptor: voxelDescriptor),
+              let raymarchDepthState = device.makeDepthStencilState(descriptor: alwaysWrite),
+              let voxelDepthState = device.makeDepthStencilState(descriptor: lessWrite),
               let itemBuffer = device.makeBuffer(
                   length: MemoryLayout<SceneItem>.stride * Self.maxItems,
                   options: .storageModeShared),
@@ -80,10 +113,54 @@ final class Renderer {
 
         self.queue = queue
         self.pipeline = pipeline
+        self.voxelPipeline = voxelPipeline
+        self.raymarchDepthState = raymarchDepthState
+        self.voxelDepthState = voxelDepthState
         self.itemBuffer = itemBuffer
         self.strokePointBuffer = strokePointBuffer
         self.distanceTexture = distanceTexture
         self.colorTexture = colorTexture
+    }
+
+    private func uploadVoxelMesh(_ engine: ClayEngine) {
+        guard engine.voxelMeshVersion != uploadedVoxelVersion else { return }
+        uploadedVoxelVersion = engine.voxelMeshVersion
+        voxelIndexCount = engine.voxelIndices.count
+        guard voxelIndexCount > 0 else { return }
+        func buffer(_ floats: [Float], reusing existing: inout MTLBuffer?) {
+            let bytes = floats.count * 4
+            if existing == nil || existing!.length < bytes {
+                existing = device.makeBuffer(length: max(bytes, 1 << 14),
+                                             options: .storageModeShared)
+            }
+            floats.withUnsafeBytes {
+                existing!.contents().copyMemory(from: $0.baseAddress!, byteCount: bytes)
+            }
+        }
+        buffer(engine.voxelPositions, reusing: &voxelPositionBuffer)
+        buffer(engine.voxelNormals, reusing: &voxelNormalBuffer)
+        buffer(engine.voxelColors, reusing: &voxelColorBuffer)
+        let indexBytes = engine.voxelIndices.count * 4
+        if voxelIndexBuffer == nil || voxelIndexBuffer!.length < indexBytes {
+            voxelIndexBuffer = device.makeBuffer(length: max(indexBytes, 1 << 14),
+                                                options: .storageModeShared)
+        }
+        engine.voxelIndices.withUnsafeBytes {
+            voxelIndexBuffer!.contents().copyMemory(from: $0.baseAddress!,
+                                                    byteCount: indexBytes)
+        }
+    }
+
+    private func ensureDepthTexture(width: Int, height: Int) -> MTLTexture? {
+        if let depth = depthTexture, depth.width == width, depth.height == height {
+            return depth
+        }
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .depth32Float, width: width, height: height, mipmapped: false)
+        descriptor.usage = .renderTarget
+        descriptor.storageMode = .private
+        depthTexture = device.makeTexture(descriptor: descriptor)
+        return depthTexture
     }
 
     func draw(to drawable: CAMetalDrawable, time: Float, camera: OrbitCamera,
@@ -120,11 +197,20 @@ final class Renderer {
             }
             uploadedCacheVersion = engine.fieldCacheVersion
         }
+        uploadVoxelMesh(engine)
+
         let pass = MTLRenderPassDescriptor()
         pass.colorAttachments[0].texture = drawable.texture
         pass.colorAttachments[0].loadAction = .clear
         pass.colorAttachments[0].storeAction = .store
         pass.colorAttachments[0].clearColor = MTLClearColor(red: 0.86, green: 0.85, blue: 0.84, alpha: 1)
+        if let depth = ensureDepthTexture(width: drawable.texture.width,
+                                          height: drawable.texture.height) {
+            pass.depthAttachment.texture = depth
+            pass.depthAttachment.loadAction = .clear
+            pass.depthAttachment.storeAction = .dontCare
+            pass.depthAttachment.clearDepth = 1.0
+        }
 
         guard let commands = queue.makeCommandBuffer(),
               let encoder = commands.makeRenderCommandEncoder(descriptor: pass)
@@ -161,12 +247,27 @@ final class Renderer {
         )
 
         encoder.setRenderPipelineState(pipeline)
+        encoder.setDepthStencilState(raymarchDepthState)
         encoder.setFragmentBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 0)
         encoder.setFragmentBuffer(itemBuffer, offset: 0, index: 1)
         encoder.setFragmentBuffer(strokePointBuffer, offset: 0, index: 2)
         encoder.setFragmentTexture(distanceTexture, index: 0)
         encoder.setFragmentTexture(colorTexture, index: 1)
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+
+        if voxelIndexCount > 0,
+           let positions = voxelPositionBuffer, let normals = voxelNormalBuffer,
+           let colors = voxelColorBuffer, let indices = voxelIndexBuffer {
+            encoder.setRenderPipelineState(voxelPipeline)
+            encoder.setDepthStencilState(voxelDepthState)
+            encoder.setVertexBuffer(positions, offset: 0, index: 0)
+            encoder.setVertexBuffer(normals, offset: 0, index: 1)
+            encoder.setVertexBuffer(colors, offset: 0, index: 2)
+            encoder.setVertexBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 3)
+            encoder.drawIndexedPrimitives(type: .triangle, indexCount: voxelIndexCount,
+                                          indexType: .uint32, indexBuffer: indices,
+                                          indexBufferOffset: 0)
+        }
         encoder.endEncoding()
 
         commands.present(drawable)

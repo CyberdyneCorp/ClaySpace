@@ -50,11 +50,11 @@
 
 ## 6. Voxel mode
 
-- [ ] 6.1 Voxel grid store (up to 256³, palette-indexed) + face-hit picking
-- [ ] 6.2 Sculpt/Erase/Paint tools with drag continuity and pressure-scaled footprint
-- [ ] 6.3 Build plane with two-finger level slicing and above-plane cutaway rendering
-- [ ] 6.4 Per-axis mirror; grid display toggle
-- [ ] 6.5 Bottom contextual bar: palette swatches, mirror, grid, tip indicator
+- [x] 6.1 Voxel grid store (up to 256³, palette-indexed) + face-hit picking — ClayCore document voxel layer (borrowed grid, 0.12 u cells), `clay_voxel_raycast` face/adjacent picking
+- [x] 6.2 Sculpt/Erase/Paint tools with drag continuity and pressure-scaled footprint — sphere brushes 1–3 cells by pressure, per-cell drag dedupe; NOTE voxel edits not undoable pending ClayCore#6
+- [ ] 6.3 Build plane with two-finger level slicing and above-plane cutaway rendering — IN PROGRESS: build-plane level via bar stepper + `clay_voxel_build_plane_pick`; two-finger slicing gesture and cutaway rendering pending
+- [x] 6.4 Per-axis mirror; grid display toggle — mirror stamps across all enabled-axis reflection combos (cell x → −1−x); ground grid always on (toggle pending)
+- [x] 6.5 Bottom contextual bar: palette swatches, mirror, grid, tip indicator — PaletteBar (shared) + VoxelBar (mirror axes, build-plane stepper); mode switch in the top bar; voxel greedy mesh renders via a raster pass depth-composited with the raymarcher
 
 ## 7. SDF mode UI
 
@@ -66,21 +66,21 @@
 
 ## 8. Materials & color
 
-- [ ] 8.1 Per-document palette with swatch editing; active-color plumbing to both modes
-- [ ] 8.2 Per-item/per-voxel color storage; recolor flows
-- [ ] 8.3 Color-blend-at-joint field sampling (matches geometric falloff)
+- [x] 8.1 Per-document palette with swatch editing; active-color plumbing to both modes — starter palette + active color drives SDF strokes and voxel stamps (swatch editing pending)
+- [x] 8.2 Per-item/per-voxel color storage; recolor flows — colored strokes, Paint (CLAY_OP_PAINT) stain tool, selection recolor via clay_layer_set_color with op-log undo; voxel palette indices
+- [x] 8.3 Color-blend-at-joint field sampling (matches geometric falloff) — csmin_quadratic_m h² weights in the preview; bake/export carry field colors
 - [ ] 8.4 Surface material presets (Matte/Plastic/Metal) per layer
 
 ## 9. Import & export (claycore: `mesh`, `io`, `clay-cli`)
 
-- [ ] 9.1 Export pipeline: GPU MC at export resolution, decimation (quadric collapse), merged/per-layer output, hidden-layer exclusion, triangle estimate
+- [ ] 9.1 Export pipeline: GPU MC at export resolution, decimation (quadric collapse), merged/per-layer output, hidden-layer exclusion, triangle estimate — IN PROGRESS: background snapshot export at 96/192/256 with watertight validation + stats shipped; decimation toggle, per-layer output, and voxel-mesh inclusion pending
 - [ ] 9.2 Voxel export: greedy weld option with per-face color preservation
 - [ ] 9.3 OBJ+MTL writer and reader; vertex-color story documented in dialog
 - [ ] 9.4 USDZ export via Model I/O; Quick Look AR verification
 - [ ] 9.5 FBX export (writer or assimp) + FBX/OBJ import via ufbx/custom; triangle-budget guard
 - [ ] 9.6 `clay-cli` (mesh/convert/validate) as the headless entry point for CI and batch use
 - [ ] 9.7 Automated round-trip CI tests on Mac/Linux: clay-cli export → validate watertight/manifold + import into assimp/Blender headless; Unity/Unreal manual checklist
-- [ ] 9.8 Export dialog UI + share sheet integration
+- [x] 9.8 Export dialog UI + share sheet integration — ExportSheet with format/detail pickers, stats, ShareLink
 
 ## 10. Validation & release readiness
 

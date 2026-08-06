@@ -676,6 +676,162 @@ final class ClayEngine {
         return (mn, mx)
     }
 
+    // MARK: Voxel mode (voxel-editing spec; tasks 6.1–6.4 engine side)
+
+    /// Borrowed grid handle (document-owned; edits are what saves write).
+    private var voxelGrid: OpaquePointer?
+    private var voxelLayer: clay_layer_id = 0
+    /// World units per voxel cell.
+    static let voxelSize: Float = 0.12
+    /// Greedy mesh of the grid, rebuilt after edits (world-space floats).
+    private(set) var voxelPositions: [Float] = []
+    private(set) var voxelNormals: [Float] = []
+    private(set) var voxelColors: [Float] = []
+    private(set) var voxelIndices: [UInt32] = []
+    private(set) var voxelMeshVersion = 0
+    private var paletteIndexByColor: [String: Int32] = [:]
+
+    var hasVoxels: Bool { !voxelIndices.isEmpty }
+
+    /// Creates or re-borrows the document's voxel layer.
+    @discardableResult
+    func ensureVoxelLayer() -> Bool {
+        guard voxelGrid == nil else { return true }
+        guard let doc else { return false }
+        var layerId: clay_layer_id = 0
+        var grid: OpaquePointer?
+        if clay_document_voxel_layer(doc, "Voxels", &layerId, &grid) == CLAY_OK, grid != nil {
+            voxelLayer = layerId
+            voxelGrid = grid
+            rebuildVoxelMesh()
+            return true
+        }
+        guard check(clay_document_add_voxel_layer(doc, "Voxels", Self.voxelSize,
+                                                  &layerId, &grid)), grid != nil
+        else { return false }
+        voxelLayer = layerId
+        voxelGrid = grid
+        return true
+    }
+
+    private func paletteIndex(for color: SIMD3<Float>) -> Int32 {
+        let key = "\(Int(color.x * 255)),\(Int(color.y * 255)),\(Int(color.z * 255))"
+        if let cached = paletteIndexByColor[key] { return cached }
+        var index: Int32 = 0
+        guard let voxelGrid,
+              clay_voxel_palette_add(voxelGrid, [color.x, color.y, color.z], &index) == CLAY_OK
+        else { return 1 }
+        paletteIndexByColor[key] = index
+        return index
+    }
+
+    private func voxelBrush(size: Int32) -> clay_brush_params {
+        var brush = clay_brush_params()
+        brush.struct_size = UInt32(MemoryLayout<clay_brush_params>.size)
+        brush.size = size
+        brush.shape = Int32(CLAY_BRUSH_SHAPE_SPHERE.rawValue)
+        brush.falloff = Int32(CLAY_BRUSH_FALLOFF_CONSTANT.rawValue)
+        brush.strength = 1
+        brush.seed = 7
+        return brush
+    }
+
+    /// All reflection combinations of the enabled mirror axes
+    /// (clay_mirror semantics: cell x reflects to -1-x).
+    private func mirrorCells(of cell: SIMD3<Int32>) -> [SIMD3<Int32>] {
+        var cells: [SIMD3<Int32>] = [cell]
+        for axis in 0..<3 where (mirrorAxes & (1 << axis)) != 0 {
+            for existing in cells {
+                var reflected = existing
+                reflected[axis] = -1 - existing[axis]
+                if !cells.contains(where: { $0 == reflected }) { cells.append(reflected) }
+            }
+        }
+        return cells
+    }
+
+    enum VoxelEdit { case place, erase, paint }
+
+    /// Stamps a brush (and its mirror reflections). NOTE: voxel edits are
+    /// outside ClayCore's undo command vocabulary — not undoable.
+    func voxelStamp(_ edit: VoxelEdit, at cell: SIMD3<Int32>,
+                    brushSize: Int32, color: SIMD3<Float>) {
+        guard ensureVoxelLayer(), let voxelGrid else { return }
+        var brush = voxelBrush(size: brushSize)
+        let index = paletteIndex(for: color)
+        for target in mirrorCells(of: cell) {
+            let cellArray: [Int32] = [target.x, target.y, target.z]
+            switch edit {
+            case .place: _ = clay_voxel_set_brush(voxelGrid, cellArray, &brush, index)
+            case .erase: _ = clay_voxel_erase_brush(voxelGrid, cellArray, &brush)
+            case .paint: _ = clay_voxel_paint_brush(voxelGrid, cellArray, &brush, index)
+            }
+        }
+        rebuildVoxelMesh()
+        version += 1
+        scheduleAutosave()
+    }
+
+    /// Ray → first occupied cell, its entry face's neighbor (where a placed
+    /// voxel goes), or the build-plane cell when the ray hits nothing.
+    func voxelPick(origin: SIMD3<Float>, direction: SIMD3<Float>,
+                   buildPlane: Int32) -> (hit: SIMD3<Int32>, adjacent: SIMD3<Int32>)? {
+        guard ensureVoxelLayer(), let voxelGrid else { return nil }
+        var hit: Int32 = 0
+        var cell = [Int32](repeating: 0, count: 3)
+        var face: Int32 = 0
+        var adjacent = [Int32](repeating: 0, count: 3)
+        var t: Float = 0
+        let o: [Float] = [origin.x, origin.y, origin.z]
+        let d: [Float] = [direction.x, direction.y, direction.z]
+        if clay_voxel_raycast(voxelGrid, o, d, &hit, &cell, &face, &adjacent, &t) == CLAY_OK,
+           hit == 1 {
+            return (SIMD3(cell[0], cell[1], cell[2]),
+                    SIMD3(adjacent[0], adjacent[1], adjacent[2]))
+        }
+        if clay_voxel_build_plane_pick(voxelGrid, o, d, buildPlane, &hit, &cell) == CLAY_OK,
+           hit == 1 {
+            let c = SIMD3(cell[0], cell[1], cell[2])
+            return (c, c)
+        }
+        return nil
+    }
+
+    var voxelCount: Int {
+        guard let voxelGrid else { return 0 }
+        var count: size_t = 0
+        _ = clay_voxel_occupied_count(voxelGrid, &count)
+        return count
+    }
+
+    private func rebuildVoxelMesh() {
+        guard let voxelGrid else { return }
+        var mesh: OpaquePointer?
+        guard clay_voxel_mesh(voxelGrid, &mesh) == CLAY_OK, let mesh else {
+            voxelPositions = []; voxelNormals = []; voxelColors = []; voxelIndices = []
+            voxelMeshVersion += 1
+            return
+        }
+        defer { clay_mesh_destroy(mesh) }
+        let vertexCount = clay_mesh_vertex_count(mesh)
+        let indexCount = clay_mesh_index_count(mesh)
+        if vertexCount == 0 || indexCount == 0 {
+            voxelPositions = []; voxelNormals = []; voxelColors = []; voxelIndices = []
+        } else {
+            voxelPositions = Array(UnsafeBufferPointer(start: clay_mesh_positions(mesh),
+                                                       count: vertexCount * 3))
+            voxelNormals = clay_mesh_normals(mesh).map {
+                Array(UnsafeBufferPointer(start: $0, count: vertexCount * 3))
+            } ?? [Float](repeating: 0, count: vertexCount * 3)
+            voxelColors = clay_mesh_colors(mesh).map {
+                Array(UnsafeBufferPointer(start: $0, count: vertexCount * 3))
+            } ?? [Float](repeating: 0.8, count: vertexCount * 3)
+            voxelIndices = Array(UnsafeBufferPointer(start: clay_mesh_indices(mesh),
+                                                     count: indexCount))
+        }
+        voxelMeshVersion += 1
+    }
+
     // MARK: Color (materials-color spec; tasks 8.1/8.2)
 
     /// Recolors an item (undoable SetColorCmd in ClayCore).
@@ -898,6 +1054,20 @@ final class ClayEngine {
         fieldCache = nil
         fieldCacheVersion += 1
         _ = check(clay_document_enable_undo(newDoc))
+        voxelGrid = nil
+        voxelLayer = 0
+        paletteIndexByColor.removeAll()
+        var voxLayerId: clay_layer_id = 0
+        var voxGrid: OpaquePointer?
+        if clay_document_voxel_layer(newDoc, "Voxels", &voxLayerId, &voxGrid) == CLAY_OK,
+           voxGrid != nil {
+            voxelLayer = voxLayerId
+            voxelGrid = voxGrid
+            rebuildVoxelMesh()
+        } else {
+            voxelPositions = []; voxelNormals = []; voxelColors = []; voxelIndices = []
+            voxelMeshVersion += 1
+        }
         version += 1
         lastSavedVersion = version
         lastSavedAt = Date()

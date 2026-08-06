@@ -102,6 +102,66 @@ final class ClayEngineTests: XCTestCase {
                           cache.voxelSize * 2, "trilinear surface within two voxels")
     }
 
+    func testVoxelPlaceEraseMirrorAndMeshing() {
+        let engine = ClayEngine()
+        XCTAssertTrue(engine.ensureVoxelLayer())
+
+        // Place with mirror X: brush stamps land on both sides.
+        engine.setMirror(axes: 1)
+        engine.voxelStamp(.place, at: SIMD3(6, 0, 6), brushSize: 1,
+                          color: SIMD3(1, 0.27, 0.56))
+        XCTAssertEqual(engine.voxelCount, 2, "cell and its X reflection")
+        XCTAssertTrue(engine.hasVoxels)
+        XCTAssertGreaterThan(engine.voxelIndices.count, 0, "greedy mesh built")
+        XCTAssertEqual(engine.voxelPositions.count % 3, 0)
+
+        // Bigger brush stamps a ball of cells.
+        engine.setMirror(axes: 0)
+        engine.voxelStamp(.place, at: SIMD3(20, 4, 20), brushSize: 3,
+                          color: SIMD3(0.93, 0.73, 0))
+        XCTAssertGreaterThan(engine.voxelCount, 6)
+
+        // Pick: a vertical ray hits the stamped column; placing goes on top.
+        let world = Float(20) * ClayEngine.voxelSize + ClayEngine.voxelSize / 2
+        let pick = engine.voxelPick(origin: SIMD3(world, 10, world),
+                                    direction: SIMD3(0, -1, 0), buildPlane: 0)
+        XCTAssertNotNil(pick)
+        XCTAssertEqual(pick!.adjacent.y, pick!.hit.y + 1, "build on the entered face")
+
+        // Build-plane pick where the ray misses everything.
+        let miss = engine.voxelPick(origin: SIMD3(50, 10, 50),
+                                    direction: SIMD3(0, -1, 0), buildPlane: 2)
+        XCTAssertEqual(miss?.hit.y, 2, "falls back to the requested plane")
+
+        // Erase empties what place made.
+        let before = engine.voxelCount
+        engine.voxelStamp(.erase, at: SIMD3(20, 4, 20), brushSize: 3,
+                          color: SIMD3(0, 0, 0))
+        XCTAssertLessThan(engine.voxelCount, before)
+    }
+
+    func testVoxelsSurviveSaveLoad() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("vox_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let docURL = dir.appendingPathComponent("v.clayspace")
+        let mirrorURL = dir.appendingPathComponent("v.claymirror")
+
+        let first = ClayEngine()
+        XCTAssertTrue(first.ensureVoxelLayer())
+        first.voxelStamp(.place, at: SIMD3(3, 1, 3), brushSize: 2,
+                         color: SIMD3(0.22, 0.65, 0.81))
+        let savedCount = first.voxelCount
+        XCTAssertGreaterThan(savedCount, 0)
+        XCTAssertTrue(first.saveDocument(documentURL: docURL, mirrorURL: mirrorURL))
+
+        let second = ClayEngine()
+        XCTAssertTrue(second.loadDocument(documentURL: docURL, mirrorURL: mirrorURL))
+        XCTAssertEqual(second.voxelCount, savedCount, "voxel grid rides the document")
+        XCTAssertTrue(second.hasVoxels, "greedy mesh rebuilt on load")
+    }
+
     func testPaintStrokeStainsColorWithoutChangingGeometry() throws {
         let engine = ClayEngine()
         let front = SIMD3<Float>(0, 0.8, 0.8) // base ball surface point

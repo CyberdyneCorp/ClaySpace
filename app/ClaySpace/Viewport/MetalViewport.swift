@@ -54,6 +54,7 @@ final class MetalViewportView: UIView {
     private var lastDrawnVersion = -1
     private var lastDrawnSize = CGSize.zero
     private var lastDrawnSelection = -2
+    private var lastDrawnVoxelVersion = -1
 
     /// Last observed Pencil barrel-roll angle (Pencil Pro), radians.
     private var lastRollAngle: Float?
@@ -292,6 +293,7 @@ final class MetalViewportView: UIView {
         guard camera != lastDrawnCamera
                 || version != lastDrawnVersion
                 || selection != lastDrawnSelection
+                || state.engine.voxelMeshVersion != lastDrawnVoxelVersion
                 || metalLayer.drawableSize != lastDrawnSize else { return }
 
         guard let drawable = metalLayer.nextDrawable() else { return }
@@ -299,6 +301,7 @@ final class MetalViewportView: UIView {
         lastDrawnVersion = version
         lastDrawnSize = metalLayer.drawableSize
         lastDrawnSelection = selection
+        lastDrawnVoxelVersion = state.engine.voxelMeshVersion
         renderer?.draw(to: drawable,
                        time: Float(CACurrentMediaTime() - startTime),
                        camera: camera,

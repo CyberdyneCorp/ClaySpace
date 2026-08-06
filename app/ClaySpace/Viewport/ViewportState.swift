@@ -31,6 +31,25 @@ final class ViewportState {
         chromeRects.values.contains { $0.contains(windowPoint) }
     }
 
+    /// Dual authoring modes sharing camera, palette, and gestures.
+    enum EditorMode { case sdf, voxel }
+    var mode: EditorMode = .sdf
+    /// Build-plane level for voxel placement when the ray hits nothing.
+    var buildPlane: Int32 = 0
+    fileprivate var lastVoxelCell: SIMD3<Int32>?
+
+    func setMode(_ newMode: EditorMode) {
+        guard newMode != mode else { return }
+        mode = newMode
+        if newMode == .voxel {
+            engine.ensureVoxelLayer()
+            selectedIndex = nil
+            showToast("Voxels")
+        } else {
+            showToast("Smooth shapes")
+        }
+    }
+
     /// Selected item's mirror index (Select/Move tools); nil = none.
     var selectedIndex: Int?
 
@@ -238,6 +257,10 @@ final class ViewportState {
     /// tool-rail buttons, radial menu). Ignored while a stroke is live —
     /// its undo group is still open.
     func requestUndo() {
+        if mode == .voxel {
+            showToast("Voxel edits aren't undoable yet")
+            return
+        }
         guard !engine.isStroking, !engine.isTransforming else { return }
         showToast(engine.undo() ? "Undo" : "Nothing to undo")
         if let index = selectedIndex, !engine.items.indices.contains(index) {
@@ -305,9 +328,33 @@ extension ViewportState: PencilToolSink {
         0.07 + pressure * 0.28
     }
 
+    fileprivate func voxelEdit(at point: CGPoint, pressure: Float) {
+        guard activeTool == .sculpt || activeTool == .erase || activeTool == .paint,
+              let ray = ray(through: point),
+              let pick = engine.voxelPick(origin: ray.origin, direction: ray.direction,
+                                          buildPlane: buildPlane) else { return }
+        let cell = activeTool == .sculpt ? pick.adjacent : pick.hit
+        if cell == lastVoxelCell { return }
+        lastVoxelCell = cell
+        let brushSize = Int32(max(1, min(3, 1 + Int(pressure * 2.4))))
+        let edit: ClayEngine.VoxelEdit =
+            activeTool == .erase ? .erase : (activeTool == .paint ? .paint : .place)
+        engine.voxelStamp(edit, at: cell, brushSize: brushSize, color: activeColor)
+    }
+
     func pencilBegan(at point: CGPoint, pressure: Float) {
         pencilStart = point
         pencilPeakPressure = max(pressure, 0.1)
+
+        if mode == .voxel {
+            if activeTool == .select || activeTool == .move {
+                showToast("Select works in Smooth mode")
+                return
+            }
+            lastVoxelCell = nil
+            voxelEdit(at: point, pressure: max(pressure, 0.1))
+            return
+        }
 
         // Select/Move: pick the item under the pencil and open a
         // one-undo-step move session; tapping empty space deselects.
@@ -366,6 +413,11 @@ extension ViewportState: PencilToolSink {
     func pencilMoved(to point: CGPoint, pressure: Float) {
         pencilPeakPressure = max(pencilPeakPressure, pressure)
 
+        if mode == .voxel {
+            voxelEdit(at: point, pressure: max(pressure, 0.1))
+            return
+        }
+
         // Move session: drag the selected item on the view-parallel plane.
         if engine.isTransforming,
            let index = selectedIndex,
@@ -414,6 +466,10 @@ extension ViewportState: PencilToolSink {
 
     func pencilEnded(at point: CGPoint) {
         pencilStart = nil
+        if mode == .voxel {
+            lastVoxelCell = nil
+            return
+        }
         if engine.isTransforming {
             engine.endTransform()
             dragStartItemPosition = nil

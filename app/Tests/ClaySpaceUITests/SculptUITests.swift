@@ -61,6 +61,34 @@ final class SculptUITests: XCTestCase {
     }
 
     @MainActor
+    func testVoxelModePlacesCubes() throws {
+        try XCTSkipUnless(isSimulator, "finger-tap shim is simulator-only")
+        let app = launch()
+        XCTAssertTrue(app.staticTexts["shapeCount"].waitForExistence(timeout: 10))
+        app.buttons["Voxels"].tap()
+
+        let voxels = app.staticTexts["voxelCount"]
+        XCTAssertTrue(voxels.waitForExistence(timeout: 5))
+        XCTAssertEqual(voxels.label, "0")
+
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.16, dy: 0.75)).tap()
+        XCTAssertTrue(waitForNonZero(voxels, timeout: 5), "tap stamped voxels")
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.2, dy: 0.7)).tap()
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.24, dy: 0.72)).tap()
+        XCTAssertTrue(app.staticTexts["ClaySpace"].exists, "raster pass renders, app alive")
+        Thread.sleep(forTimeInterval: 2.6) // let autosave persist the grid
+    }
+
+    private func waitForNonZero(_ element: XCUIElement, timeout: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if let value = Int(element.label), value > 0 { return true }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+        }
+        return false
+    }
+
+    @MainActor
     func testExportFlowProducesAShareableMesh() throws {
         let app = launch()
         XCTAssertTrue(app.staticTexts["shapeCount"].waitForExistence(timeout: 10))
