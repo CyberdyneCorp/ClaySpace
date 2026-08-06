@@ -237,6 +237,57 @@ final class ClayEngineTests: XCTestCase {
         }
     }
 
+    func testMixedSceneExportCarriesVoxelsWhereTheWriterCan() async throws {
+        let engine = ClayEngine()
+        // SDF-only baseline, then add blocks and re-export.
+        let beforeMaybe = await engine.exportMesh(format: .obj, resolution: 96)
+        let before = try XCTUnwrap(beforeMaybe)
+        defer { try? FileManager.default.removeItem(at: before.url) }
+        XCTAssertTrue(before.voxelsIncluded, "no voxels — nothing to miss")
+
+        for x in Int32(8)...10 {
+            engine.voxelStamp(.place, at: SIMD3(x, 0, 8), brushSize: 1,
+                              color: SIMD3(1, 0.27, 0.56))
+        }
+
+        // OBJ/PLY/USDZ merge the voxel mesh in.
+        let objMaybe = await engine.exportMesh(format: .obj, resolution: 96)
+        let obj = try XCTUnwrap(objMaybe)
+        defer { try? FileManager.default.removeItem(at: obj.url) }
+        XCTAssertTrue(obj.voxelsIncluded)
+        XCTAssertGreaterThan(obj.vertexCount, before.vertexCount,
+                             "blocks added vertices to the OBJ")
+        let objText = try String(contentsOf: obj.url, encoding: .utf8)
+        XCTAssertTrue(objText.contains("v "), "app-side writer produced vertices")
+
+        let plyMaybe = await engine.exportMesh(format: .ply, resolution: 96)
+        let ply = try XCTUnwrap(plyMaybe)
+        defer { try? FileManager.default.removeItem(at: ply.url) }
+        let plyText = try String(contentsOf: ply.url, encoding: .utf8)
+        XCTAssertTrue(plyText.hasPrefix("ply"), "valid PLY header")
+        XCTAssertTrue(plyText.contains("element vertex \(ply.vertexCount)"),
+                      "header count matches the merged mesh")
+        XCTAssertTrue(plyText.contains("property uchar red"), "colors carried")
+
+        let usdzMaybe = await engine.exportMesh(format: .usdz, resolution: 96)
+        let usdz = try XCTUnwrap(usdzMaybe)
+        defer { try? FileManager.default.removeItem(at: usdz.url) }
+        XCTAssertTrue(usdz.voxelsIncluded)
+        XCTAssertEqual(usdz.vertexCount, obj.vertexCount,
+                       "same merged mesh across our writers")
+
+        // FBX can't carry the blocks — the result says so honestly.
+        let fbxMaybe = await engine.exportMesh(format: .fbx, resolution: 96)
+        let fbx = try XCTUnwrap(fbxMaybe)
+        defer { try? FileManager.default.removeItem(at: fbx.url) }
+        XCTAssertFalse(fbx.voxelsIncluded, "FBX ships SDF-only and reports it")
+        XCTAssertEqual(fbx.vertexCount, before.vertexCount)
+
+        // The merged OBJ still round-trips through the importer.
+        let stats = engine.importOBJ(at: obj.url, color: ClayEngine.clayColor)
+        XCTAssertEqual(stats?.triangles, obj.triangleCount)
+    }
+
     func testNewOpenDeleteDocumentRoundTrip() {
         let engine = ClayEngine()
         let suffix = UUID().uuidString.prefix(6)

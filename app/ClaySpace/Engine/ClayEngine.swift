@@ -1339,6 +1339,121 @@ final class ClayEngine {
         var triangleCount: Int
         var watertight: Bool
         var manifold: Bool
+        /// False only when the document HAS voxels but the format's writer
+        /// (ClayCore's FBX/GLB) cannot carry them.
+        var voxelsIncluded: Bool
+    }
+
+    /// Plain mesh arrays for app-side writers and merging.
+    private struct MeshArrays {
+        var positions: [Float] = []
+        var normals: [Float] = []
+        var colors: [Float] = []
+        var indices: [UInt32] = []
+        var vertexCount: Int { positions.count / 3 }
+    }
+
+    nonisolated private static func meshArrays(from mesh: OpaquePointer) -> MeshArrays {
+        var out = MeshArrays()
+        let vertexCount = clay_mesh_vertex_count(mesh)
+        let indexCount = clay_mesh_index_count(mesh)
+        guard vertexCount > 0, indexCount > 0,
+              let positions = clay_mesh_positions(mesh),
+              let indices = clay_mesh_indices(mesh) else { return out }
+        out.positions = Array(UnsafeBufferPointer(start: positions, count: vertexCount * 3))
+        if let normals = clay_mesh_normals(mesh) {
+            out.normals = Array(UnsafeBufferPointer(start: normals, count: vertexCount * 3))
+        }
+        if let colors = clay_mesh_colors(mesh) {
+            out.colors = Array(UnsafeBufferPointer(start: colors, count: vertexCount * 3))
+        }
+        out.indices = Array(UnsafeBufferPointer(start: indices, count: indexCount))
+        return out
+    }
+
+    nonisolated private static func merge(_ a: MeshArrays, _ b: MeshArrays) -> MeshArrays {
+        var out = a
+        // Align optional attributes: pad the side that lacks them.
+        func pad(_ array: inout [Float], to count: Int, fill: Float) {
+            if array.isEmpty && count > 0 { array = [Float](repeating: fill, count: count) }
+        }
+        var second = b
+        if !a.colors.isEmpty || !b.colors.isEmpty {
+            pad(&out.colors, to: a.positions.count, fill: 0.8)
+            pad(&second.colors, to: b.positions.count, fill: 0.8)
+        }
+        if !a.normals.isEmpty || !b.normals.isEmpty {
+            pad(&out.normals, to: a.positions.count, fill: 0)
+            pad(&second.normals, to: b.positions.count, fill: 0)
+        }
+        let base = UInt32(out.vertexCount)
+        out.positions += second.positions
+        out.normals += second.normals
+        out.colors += second.colors
+        out.indices += second.indices.map { $0 + base }
+        return out
+    }
+
+    nonisolated private static func writeOBJ(_ m: MeshArrays, to url: URL) throws {
+        var lines: [String] = ["# ClaySpace export"]
+        lines.reserveCapacity(m.vertexCount * 2 + m.indices.count / 3 + 2)
+        let colored = m.colors.count == m.positions.count
+        for i in 0..<m.vertexCount {
+            let p = (m.positions[i * 3], m.positions[i * 3 + 1], m.positions[i * 3 + 2])
+            if colored {
+                // "v x y z r g b" — the widely-read vertex-color extension.
+                let c = (m.colors[i * 3], m.colors[i * 3 + 1], m.colors[i * 3 + 2])
+                lines.append("v \(p.0) \(p.1) \(p.2) \(c.0) \(c.1) \(c.2)")
+            } else {
+                lines.append("v \(p.0) \(p.1) \(p.2)")
+            }
+        }
+        let hasNormals = m.normals.count == m.positions.count
+        if hasNormals {
+            for i in 0..<m.vertexCount {
+                lines.append("vn \(m.normals[i * 3]) \(m.normals[i * 3 + 1]) \(m.normals[i * 3 + 2])")
+            }
+        }
+        for t in stride(from: 0, to: m.indices.count, by: 3) {
+            let (a, b, c) = (m.indices[t] + 1, m.indices[t + 1] + 1, m.indices[t + 2] + 1)
+            lines.append(hasNormals ? "f \(a)//\(a) \(b)//\(b) \(c)//\(c)"
+                                    : "f \(a) \(b) \(c)")
+        }
+        try lines.joined(separator: "\n").write(to: url, atomically: true, encoding: .utf8)
+    }
+
+    nonisolated private static func writePLY(_ m: MeshArrays, to url: URL) throws {
+        let colored = m.colors.count == m.positions.count
+        let hasNormals = m.normals.count == m.positions.count
+        var header = ["ply", "format ascii 1.0",
+                      "element vertex \(m.vertexCount)",
+                      "property float x", "property float y", "property float z"]
+        if hasNormals {
+            header += ["property float nx", "property float ny", "property float nz"]
+        }
+        if colored {
+            header += ["property uchar red", "property uchar green", "property uchar blue"]
+        }
+        header += ["element face \(m.indices.count / 3)",
+                   "property list uchar int vertex_indices", "end_header"]
+        var lines = header
+        lines.reserveCapacity(header.count + m.vertexCount + m.indices.count / 3)
+        for i in 0..<m.vertexCount {
+            var line = "\(m.positions[i * 3]) \(m.positions[i * 3 + 1]) \(m.positions[i * 3 + 2])"
+            if hasNormals {
+                line += " \(m.normals[i * 3]) \(m.normals[i * 3 + 1]) \(m.normals[i * 3 + 2])"
+            }
+            if colored {
+                line += " \(Int(min(max(m.colors[i * 3], 0), 1) * 255))"
+                    + " \(Int(min(max(m.colors[i * 3 + 1], 0), 1) * 255))"
+                    + " \(Int(min(max(m.colors[i * 3 + 2], 0), 1) * 255))"
+            }
+            lines.append(line)
+        }
+        for t in stride(from: 0, to: m.indices.count, by: 3) {
+            lines.append("3 \(m.indices[t]) \(m.indices[t + 1]) \(m.indices[t + 2])")
+        }
+        try lines.joined(separator: "\n").write(to: url, atomically: true, encoding: .utf8)
     }
 
     /// Meshes and saves the document on a background thread (independent
@@ -1371,57 +1486,89 @@ final class ClayEngine {
         var params = clay_mesh_params()
         params.struct_size = UInt32(MemoryLayout<clay_mesh_params>.size)
         params.resolution = resolution
-        var mesh: OpaquePointer?
-        guard clay_document_mesh(doc, &params, &mesh) == CLAY_OK, mesh != nil
+        var meshPtr: OpaquePointer?
+        guard clay_document_mesh(doc, &params, &meshPtr) == CLAY_OK, let sdfMesh = meshPtr
         else { return nil }
-        defer { clay_mesh_destroy(mesh) }
+        defer { clay_mesh_destroy(sdfMesh) }
 
         var watertight: Int32 = 0, manifold: Int32 = 0
-        _ = clay_mesh_validate(mesh, &watertight, &manifold)
-        if url.pathExtension == "usdz" {
-            // ClayCore has no USD writer; Model I/O takes it from here
-            // (task 9.4 — AR Quick Look).
-            guard writeUSDZ(mesh: mesh!, to: url) else { return nil }
-        } else {
-            guard clay_mesh_save(mesh, url.path) == CLAY_OK else { return nil }
+        _ = clay_mesh_validate(sdfMesh, &watertight, &manifold)
+
+        // clay_document_mesh covers SDF content only; the voxel layer
+        // meshes separately (greedy quads) and merges app-side where the
+        // writer is ours.
+        var voxel: MeshArrays?
+        var voxelLayerId: clay_layer_id = 0
+        var grid: OpaquePointer?
+        if clay_document_voxel_layer(doc, "Voxels", &voxelLayerId, &grid) == CLAY_OK,
+           grid != nil {
+            var voxelMeshPtr: OpaquePointer?
+            if clay_voxel_mesh(grid, &voxelMeshPtr) == CLAY_OK, let voxelMesh = voxelMeshPtr {
+                defer { clay_mesh_destroy(voxelMesh) }
+                if clay_mesh_vertex_count(voxelMesh) > 0 {
+                    voxel = meshArrays(from: voxelMesh)
+                }
+            }
+        }
+
+        let format = ExportFormat(rawValue: url.pathExtension) ?? .obj
+        var merged = meshArrays(from: sdfMesh)
+        var voxelsIncluded = true
+        switch format {
+        case .obj, .ply, .usdz:
+            if let voxel { merged = merge(merged, voxel) }
+            do {
+                switch format {
+                case .obj: try writeOBJ(merged, to: url)
+                case .ply: try writePLY(merged, to: url)
+                default:
+                    guard writeUSDZ(arrays: merged, to: url) else { return nil }
+                }
+            } catch { return nil }
+        case .fbx, .glb:
+            // ClayCore's writers take a clay_mesh and the ABI has no way to
+            // construct one from arrays — blocks stay out (noted in the UI).
+            voxelsIncluded = voxel == nil
+            guard clay_mesh_save(sdfMesh, url.path) == CLAY_OK else { return nil }
         }
 
         return ExportResult(url: url,
-                            vertexCount: clay_mesh_vertex_count(mesh),
-                            triangleCount: clay_mesh_index_count(mesh) / 3,
+                            vertexCount: voxelsIncluded ? merged.vertexCount
+                                                        : clay_mesh_vertex_count(sdfMesh),
+                            triangleCount: voxelsIncluded ? merged.indices.count / 3
+                                                          : clay_mesh_index_count(sdfMesh) / 3,
                             watertight: watertight == 1,
-                            manifold: manifold == 1)
+                            manifold: manifold == 1,
+                            voxelsIncluded: voxelsIncluded)
     }
 
-    /// USDZ via Model I/O (task 9.4): positions/normals/colors from the
-    /// ClayCore mesh into an MDLMesh, exported for AR Quick Look.
-    nonisolated private static func writeUSDZ(mesh: OpaquePointer, to url: URL) -> Bool {
-        let vertexCount = clay_mesh_vertex_count(mesh)
-        let indexCount = clay_mesh_index_count(mesh)
-        guard vertexCount > 0, indexCount > 0,
-              let positions = clay_mesh_positions(mesh),
-              let indices = clay_mesh_indices(mesh) else { return false }
+    /// USDZ via Model I/O (task 9.4): the merged arrays become an MDLMesh,
+    /// exported for AR Quick Look.
+    nonisolated private static func writeUSDZ(arrays: MeshArrays, to url: URL) -> Bool {
+        let vertexCount = arrays.vertexCount
+        let indexCount = arrays.indices.count
+        guard vertexCount > 0, indexCount > 0 else { return false }
 
         let allocator = MDLMeshBufferDataAllocator()
         let descriptor = MDLVertexDescriptor()
         var buffers: [MDLMeshBuffer] = []
 
-        func addAttribute(_ name: String, _ floats: UnsafePointer<Float>) {
-            let data = Data(bytes: floats, count: vertexCount * 3 * 4)
+        func addAttribute(_ name: String, _ floats: [Float]) {
+            let data = floats.withUnsafeBufferPointer { Data(buffer: $0) }
             descriptor.attributes[buffers.count] = MDLVertexAttribute(
                 name: name, format: .float3, offset: 0, bufferIndex: buffers.count)
             descriptor.layouts[buffers.count] = MDLVertexBufferLayout(stride: 12)
             buffers.append(allocator.newBuffer(with: data, type: .vertex))
         }
-        addAttribute(MDLVertexAttributePosition, positions)
-        if let normals = clay_mesh_normals(mesh) {
-            addAttribute(MDLVertexAttributeNormal, normals)
+        addAttribute(MDLVertexAttributePosition, arrays.positions)
+        if arrays.normals.count == arrays.positions.count {
+            addAttribute(MDLVertexAttributeNormal, arrays.normals)
         }
-        if let colors = clay_mesh_colors(mesh) {
-            addAttribute(MDLVertexAttributeColor, colors)
+        if arrays.colors.count == arrays.positions.count {
+            addAttribute(MDLVertexAttributeColor, arrays.colors)
         }
 
-        let indexData = Data(bytes: indices, count: indexCount * 4)
+        let indexData = arrays.indices.withUnsafeBufferPointer { Data(buffer: $0) }
         let submesh = MDLSubmesh(
             indexBuffer: allocator.newBuffer(with: indexData, type: .index),
             indexCount: indexCount, indexType: .uInt32, geometryType: .triangles,

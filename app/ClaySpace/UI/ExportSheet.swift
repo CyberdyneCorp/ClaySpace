@@ -57,6 +57,11 @@ struct ExportSheet: View {
                     Label(result.watertight ? "Watertight" : "Not watertight",
                           systemImage: result.watertight ? "checkmark.seal" : "exclamationmark.triangle")
                         .foregroundStyle(result.watertight ? .green : .orange)
+                    if !result.voxelsIncluded {
+                        Label("Voxel blocks not included — FBX/GLB writers can't carry them; use OBJ, PLY, or USDZ",
+                              systemImage: "cube.transparent")
+                            .foregroundStyle(.orange)
+                    }
                 }
                 .font(.system(size: 13))
                 .accessibilityIdentifier("exportStats")
