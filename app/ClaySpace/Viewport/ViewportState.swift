@@ -199,12 +199,13 @@ final class ViewportState {
                        plane: (point: SIMD3<Float>, normal: SIMD3<Float>))
         case axisTranslate(axis: SIMD3<Float>, startPosition: SIMD3<Float>,
                            screenDir: CGPoint, pixelsPerUnit: CGFloat,
-                           startScalar: CGFloat)
+                           startScalar: CGFloat, anchor: CGPoint)
         case axisRotate(axis: SIMD3<Float>, startRotation: SIMD4<Float>,
                         pivot: SIMD3<Float>, u: SIMD3<Float>, w: SIMD3<Float>,
                         startAngle: Float, lastSnap: Int)
         case axisScale(colorIndex: Int, startParams: SIMD4<Float>,
-                       startScale: Float, screenDir: CGPoint, startScalar: CGFloat)
+                       startScale: Float, screenDir: CGPoint,
+                       startScalar: CGFloat, anchor: CGPoint)
     }
     fileprivate var gizmoDrag: GizmoDrag?
     /// 15° rotation latches (input-gestures spec: angle snap + haptics).
@@ -568,7 +569,8 @@ extension ViewportState: PencilToolSink {
                                                startPosition: item.position,
                                                screenDir: axis.screenDir,
                                                pixelsPerUnit: axis.pixelsPerUnit,
-                                               startScalar: scalar(along: axis.screenDir))
+                                               startScalar: scalar(along: axis.screenDir),
+                                               anchor: layout.center)
                     return
                 }
                 if layout.mode == .scale {
@@ -580,7 +582,8 @@ extension ViewportState: PencilToolSink {
                                                startParams: item.params,
                                                startScale: item.scale == 0 ? 1 : item.scale,
                                                screenDir: axis.screenDir,
-                                               startScalar: scalar(along: axis.screenDir))
+                                               startScalar: scalar(along: axis.screenDir),
+                                               anchor: layout.center)
                         return
                     }
                     if engine.beginTransform(index: index) {
@@ -733,9 +736,8 @@ extension ViewportState: PencilToolSink {
             }
             switch drag {
             case .axisTranslate(let axis, let startPosition, let screenDir,
-                                let pixelsPerUnit, let startScalar):
-                guard let layout = gizmoLayout else { break }
-                let delta = scalar(along: screenDir, center: layout.center) - startScalar
+                                let pixelsPerUnit, let startScalar, let anchor):
+                let delta = scalar(along: screenDir, center: anchor) - startScalar
                 engine.updateTransform(position: startPosition
                                         + axis * Float(delta / pixelsPerUnit),
                                        rotation: item.rotation, scale: item.scale)
@@ -768,9 +770,8 @@ extension ViewportState: PencilToolSink {
                                                        combined.imag.z, combined.real),
                                        scale: item.scale)
             case .axisScale(let colorIndex, let startParams, _,
-                            let screenDir, let startScalar):
-                guard let layout = gizmoLayout else { break }
-                let delta = scalar(along: screenDir, center: layout.center) - startScalar
+                            let screenDir, let startScalar, let anchor):
+                let delta = scalar(along: screenDir, center: anchor) - startScalar
                 let factor = Float(max(0.1, 1 + delta / 120))
                 engine.updateParamEdit(
                     params: Self.scaledParams(prim: item.prim, start: startParams,

@@ -330,11 +330,14 @@ struct ContentView: View {
             }
             .padding(3)
             .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 7))
-            .position(x: gizmo.center.x,
-                      y: max(gizmo.center.y - gizmo.ringRadius - 40, 90))
+            // Measure BEFORE .position: the position wrapper fills the whole
+            // ZStack, and registering THAT frame as chrome turned the entire
+            // viewport into a touch-swallowing dead zone (device-found bug).
             .onGeometryChange(for: CGRect.self) {
                 $0.frame(in: .global)
             } action: { state.chromeRects["gizmoMode"] = $0 }
+            .position(x: gizmo.center.x,
+                      y: max(gizmo.center.y - gizmo.ringRadius - 40, 90))
             .onDisappear { state.chromeRects["gizmoMode"] = nil }
         }
     }

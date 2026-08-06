@@ -127,6 +127,37 @@ final class SculptUITests: XCTestCase {
     }
 
     @MainActor
+    func testViewportStaysLiveWhileGizmoAndModePickerAreShowing() throws {
+        // Device-found regression: the gizmo mode picker registered a
+        // FULL-SCREEN chrome rect (the .position wrapper's frame), so any
+        // active selection swallowed every viewport touch. This walks the
+        // real touch router with a selection + picker on screen.
+        try XCTSkipUnless(isSimulator, "finger-tap shim is simulator-only")
+        let app = launch()
+        let count = app.staticTexts["shapeCount"]
+        XCTAssertTrue(count.waitForExistence(timeout: 10))
+
+        // Select the seeded ball → gizmo + mode picker appear.
+        app.buttons["Select"].tap()
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.42, dy: 0.5)).tap()
+        XCTAssertTrue(app.buttons["Gizmo move"].waitForExistence(timeout: 4),
+                      "selection shows the mode picker")
+
+        // With the picker on screen, the viewport must still take edits:
+        // switch to Sculpt and tap — a shape must land.
+        app.buttons["Sculpt"].tap()
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.62, dy: 0.68)).tap()
+        XCTAssertTrue(count.wait(for: \.label, toEqual: "2", timeout: 5),
+                      "viewport touches must not be swallowed while the gizmo shows")
+
+        // The picker itself still works as chrome.
+        app.buttons["Gizmo scale"].tap()
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.25, dy: 0.3)).tap()
+        XCTAssertTrue(count.wait(for: \.label, toEqual: "3", timeout: 5),
+                      "mode switch is chrome; the next viewport tap still sculpts")
+    }
+
+    @MainActor
     func testTapOnViewportAddsAShape() throws {
         try XCTSkipUnless(isSimulator, "finger-tap sculpt shim is simulator-only")
         let app = launch()
