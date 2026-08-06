@@ -27,6 +27,13 @@ final class ViewportState {
         chromeRects.values.contains { $0.contains(windowPoint) }
     }
 
+    /// Selected item's mirror index (Select/Move tools); nil = none.
+    var selectedIndex: Int?
+
+    // Transform-drag session state.
+    fileprivate var dragStartItemPosition: SIMD3<Float>?
+    fileprivate var dragStartHit: SIMD3<Float>?
+
     // Pencil stroke/tap tracking (PencilToolSink extension; stored here
     // because extensions cannot add storage).
     fileprivate var pencilStart: CGPoint?
@@ -83,10 +90,20 @@ final class ViewportState {
         closeRadialMenu()
     }
 
-    /// Pencil Pro barrel roll. Applied to the selected item's rotation once
-    /// selection exists (sdf-sculpting spec); plumbing only until then.
+    /// Pencil Pro barrel roll: rotates the selected item about the view
+    /// axis while the pencil holds it (input-gestures spec).
     func pencilBarrelRolled(delta: Float) {
-        _ = delta
+        guard engine.isTransforming, let index = selectedIndex,
+              engine.items.indices.contains(index) else { return }
+        let item = engine.items[index]
+        let current = simd_quatf(ix: item.rotation.x, iy: item.rotation.y,
+                                 iz: item.rotation.z, r: item.rotation.w)
+        let spin = simd_quatf(angle: delta, axis: camera.basis.forward)
+        let combined = (spin * current).normalized
+        engine.updateTransform(position: item.position,
+                               rotation: SIMD4(combined.imag.x, combined.imag.y,
+                                               combined.imag.z, combined.real),
+                               scale: item.scale)
     }
 
     // MARK: Camera bookmarks, presets & animated recall (task 4.4)
@@ -191,12 +208,15 @@ final class ViewportState {
     /// tool-rail buttons, radial menu). Ignored while a stroke is live —
     /// its undo group is still open.
     func requestUndo() {
-        guard !engine.isStroking else { return }
+        guard !engine.isStroking, !engine.isTransforming else { return }
         showToast(engine.undo() ? "Undo" : "Nothing to undo")
+        if let index = selectedIndex, !engine.items.indices.contains(index) {
+            selectedIndex = nil
+        }
     }
 
     func requestRedo() {
-        guard !engine.isStroking else { return }
+        guard !engine.isStroking, !engine.isTransforming else { return }
         showToast(engine.redo() ? "Redo" : "Nothing to redo")
     }
 
@@ -259,6 +279,27 @@ extension ViewportState: PencilToolSink {
         pencilStart = point
         pencilPeakPressure = max(pressure, 0.1)
 
+        // Select/Move: pick the item under the pencil and open a
+        // one-undo-step move session; tapping empty space deselects.
+        if activeTool == .select || activeTool == .move {
+            guard let ray = ray(through: point) else { return }
+            if let picked = engine.pick(origin: ray.origin, direction: ray.direction) {
+                if selectedIndex != picked.index {
+                    selectedIndex = picked.index
+                    showToast("Selected shape \(picked.index)")
+                }
+                if engine.beginTransform(index: picked.index) {
+                    dragStartItemPosition = engine.items[picked.index].position
+                    dragStartHit = picked.position
+                    strokePlane = (picked.position, camera.basis.forward)
+                }
+            } else if selectedIndex != nil {
+                selectedIndex = nil
+                showToast("Deselected")
+            }
+            return
+        }
+
         // Sculpt/Erase begin a stroke immediately — a tap is just a
         // one-point stroke, so the preview responds on touch-down.
         guard activeTool == .sculpt || activeTool == .erase,
@@ -289,6 +330,22 @@ extension ViewportState: PencilToolSink {
 
     func pencilMoved(to point: CGPoint, pressure: Float) {
         pencilPeakPressure = max(pencilPeakPressure, pressure)
+
+        // Move session: drag the selected item on the view-parallel plane.
+        if engine.isTransforming,
+           let index = selectedIndex,
+           let startPos = dragStartItemPosition,
+           let startHit = dragStartHit,
+           let plane = strokePlane,
+           let ray = ray(through: point),
+           let p = intersect(ray: ray, plane: plane) {
+            let item = engine.items[index]
+            engine.updateTransform(position: startPos + (p - startHit),
+                                   rotation: item.rotation,
+                                   scale: item.scale)
+            return
+        }
+
         guard engine.isStroking,
               let plane = strokePlane,
               let last = lastStrokePoint,
@@ -311,23 +368,36 @@ extension ViewportState: PencilToolSink {
         pencilStart = nil
         strokePlane = nil
         lastStrokePoint = nil
-        engine.endStroke()
+        dragStartItemPosition = nil
+        dragStartHit = nil
+        if engine.isTransforming {
+            engine.endTransform() // commit the drag so far
+        } else {
+            engine.endStroke()
+        }
     }
 
     func pencilEnded(at point: CGPoint) {
         pencilStart = nil
+        if engine.isTransforming {
+            engine.endTransform()
+            dragStartItemPosition = nil
+            dragStartHit = nil
+            strokePlane = nil
+            return
+        }
         if engine.isStroking {
             engine.endStroke()
             strokePlane = nil
             lastStrokePoint = nil
             return
         }
-        // Non-stroke tools: tap actions (placeholders until their tasks).
+        // Non-stroke tools: tap feedback (paint still pending its task).
         switch activeTool {
         case .erase where strokePlane == nil:
             showToast("Nothing to carve there")
-        case .paint, .select, .move:
-            showToast("\(activeTool.title) lands with a later task")
+        case .paint:
+            showToast("Paint lands with a later task")
         default:
             break
         }

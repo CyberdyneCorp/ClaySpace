@@ -22,6 +22,8 @@ final class Renderer {
         var bakedCount: Int32    // items below this index live in the cache
         var mirrorAxes: Int32    // layer mirror bits (CLAY_MIRROR_*)
         var mirrorK: Float       // Mirror Blend seam width
+        var selectedIndex: Int32 // highlighted item; -1 = none
+        var pad3: SIMD3<Float> = .zero
         var gridOrigin: SIMD4<Float>    // xyz origin; w = cache enabled (0/1)
         var gridInvExtent: SIMD4<Float> // xyz = 1/extent; w = normal epsilon
         var gridScale: SIMD4<Float>     // xyz = dims/maxResolution
@@ -85,7 +87,7 @@ final class Renderer {
     }
 
     func draw(to drawable: CAMetalDrawable, time: Float, camera: OrbitCamera,
-              engine: ClayEngine) {
+              engine: ClayEngine, selectedIndex: Int) {
         let items = engine.items
         let strokePoints = engine.strokePoints
         if engine.version != uploadedVersion {
@@ -143,6 +145,7 @@ final class Renderer {
             bakedCount: Int32(cacheUsable ? (cache?.bakedItemCount ?? 0) : 0),
             mirrorAxes: engine.mirrorAxes,
             mirrorK: engine.mirrorK,
+            selectedIndex: Int32(selectedIndex),
             gridOrigin: cacheUsable
                 ? SIMD4(cache!.origin.x, cache!.origin.y, cache!.origin.z, 1)
                 : SIMD4(0, 0, 0, 0),

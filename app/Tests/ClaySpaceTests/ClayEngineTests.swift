@@ -102,6 +102,68 @@ final class ClayEngineTests: XCTestCase {
                           cache.voxelSize * 2, "trilinear surface within two voxels")
     }
 
+    func testPickMoveUndoRoundTrip() throws {
+        let engine = ClayEngine()
+        // A blob clear of the base ball.
+        engine.beginStroke(at: SIMD3(1.4, 0.8, 0), radius: 0.2,
+                           op: CLAY_OP_ADD, blendK: 0.02, color: ClayEngine.clayColor)
+        engine.endStroke()
+
+        // Attributed pick finds it (vertical ray clears the base ball).
+        let picked = try XCTUnwrap(engine.pick(origin: SIMD3(1.4, 3, 0),
+                                               direction: SIMD3(0, -1, 0)))
+        XCTAssertEqual(picked.index, 1)
+
+        // One drag session = one undo step moving it +0.8 in z. A stroke's
+        // points are local payload, so position is a translation offset.
+        XCTAssertTrue(engine.beginTransform(index: 1))
+        engine.updateTransform(position: SIMD3(0, 0, 0.4),
+                               rotation: SIMD4(0, 0, 0, 1), scale: 1)
+        engine.updateTransform(position: SIMD3(0, 0, 0.8),
+                               rotation: SIMD4(0, 0, 0, 1), scale: 1)
+        engine.endTransform()
+
+        XCTAssertNil(engine.raycast(origin: SIMD3(1.4, 3, 0), direction: SIMD3(0, -1, 0)),
+                     "old position vacated")
+        XCTAssertNotNil(engine.raycast(origin: SIMD3(1.4, 3, 0.8), direction: SIMD3(0, -1, 0)),
+                        "new position occupied — document really moved")
+        XCTAssertEqual(engine.items[1].position.z, 0.8, accuracy: 1e-5, "mirror follows")
+
+        // Undo restores the transform (not an item removal), keeping counts.
+        XCTAssertTrue(engine.undo())
+        XCTAssertEqual(engine.items.count, 2)
+        XCTAssertEqual(engine.items[1].position.z, 0, accuracy: 1e-5)
+        XCTAssertNotNil(engine.raycast(origin: SIMD3(1.4, 3, 0), direction: SIMD3(0, -1, 0)),
+                        "document back at the old position")
+
+        // Redo re-applies; a following undo of the ADD still works (mixed log).
+        XCTAssertTrue(engine.redo())
+        XCTAssertEqual(engine.items[1].position.z, 0.8, accuracy: 1e-5)
+        XCTAssertTrue(engine.undo()) // transform
+        XCTAssertTrue(engine.undo()) // add
+        XCTAssertEqual(engine.items.count, 1)
+        XCTAssertTrue(engine.strokePoints.isEmpty)
+    }
+
+    func testTransformRotationMovesTheChain() throws {
+        let engine = ClayEngine()
+        engine.beginStroke(at: SIMD3(1.2, 0.8, 0), radius: 0.15,
+                           op: CLAY_OP_ADD, blendK: 0.02, color: ClayEngine.clayColor)
+        engine.appendStrokePoint(SIMD3(1.8, 0.8, 0), radius: 0.15)
+        engine.endStroke()
+
+        // Rotate 180° about world Y around the item origin (identity pivot):
+        // the arm at +x should now answer at -x.
+        XCTAssertTrue(engine.beginTransform(index: 1))
+        engine.updateTransform(position: .zero,
+                               rotation: SIMD4(0, 1, 0, 0), // 180° about Y
+                               scale: 1)
+        engine.endTransform()
+        XCTAssertNotNil(engine.raycast(origin: SIMD3(-1.8, 3, 0), direction: SIMD3(0, -1, 0)),
+                        "rotated chain occupies the mirrored side")
+        XCTAssertNil(engine.raycast(origin: SIMD3(1.8, 3, 0), direction: SIMD3(0, -1, 0)))
+    }
+
     func testMirroredStrokeExistsOnBothSides() async throws {
         let engine = ClayEngine()
         engine.setMirror(axes: 1) // X

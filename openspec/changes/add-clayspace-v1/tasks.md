@@ -60,7 +60,7 @@
 
 - [ ] 7.1 Primitive placement (tap-to-place, pressure-sized) + kind picker
 - [ ] 7.2 Bottom contextual bar: kind, op, blend profile + radius slider
-- [ ] 7.3 Touch transform gizmo (move/rotate/scale) with surface snapping (position / position+normal) and angle snap haptics; wire `pencilBarrelRolled` deltas to the selected item's view-axis rotation (5.4 plumbing)
+- [ ] 7.3 Touch transform gizmo (move/rotate/scale) with surface snapping (position / position+normal) and angle snap haptics; wire `pencilBarrelRolled` deltas to the selected item's view-axis rotation (5.4 plumbing) — IN PROGRESS: attributed picking (Select/Move tools), orange selection glow, drag-to-move as one grouped undo step, and barrel-roll rotation shipped; visible gizmo handles, scale, surface snapping, and snap haptics pending
 - [ ] 7.4 Edit-list inspector panel: reorder, group/ungroup, per-item op/blend/color editing
 - [ ] 7.5 Stroke editing UI (select stroke, adjust radius/color/blend post-hoc)
 

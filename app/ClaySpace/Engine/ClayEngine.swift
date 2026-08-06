@@ -108,9 +108,45 @@ final class ClayEngine {
 
     /// Tight per-item AABBs (bake-grid bounds; tighter than the spheres).
     private(set) var itemAABBs: [(min: SIMD3<Float>, max: SIMD3<Float>)] = []
-    private var redoMirror: [(item: SceneItem, points: [SIMD4<Float>],
-                              aabb: (min: SIMD3<Float>, max: SIMD3<Float>))] = []
+    /// ClayCore node ids parallel to `items` — the handle for editing and
+    /// attributed picking.
+    private(set) var nodeIDs: [clay_node_id] = []
+    /// Item-local bounding sphere (relative to the item's origin, unscaled),
+    /// so world bounds can be recomputed after transforms.
+    private var localBounds: [(center: SIMD3<Float>, radius: Float)] = []
+
+    /// A snapshot of everything a transform changes, for undo mirroring.
+    struct Placement {
+        var position: SIMD3<Float>
+        var rotation: SIMD4<Float>
+        var scale: Float
+        var boundCenter: SIMD3<Float>
+        var boundRadius: Float
+        var aabbMin: SIMD3<Float>
+        var aabbMax: SIMD3<Float>
+    }
+
+    /// One entry per ClayCore undo step, so mixed histories (adds and
+    /// transforms) keep the render mirror in sync through undo/redo.
+    private enum UndoKind {
+        case add
+        case transform(index: Int, before: Placement, after: Placement)
+    }
+    private enum RedoOp {
+        case add(item: SceneItem, points: [SIMD4<Float>],
+                 aabb: (min: SIMD3<Float>, max: SIMD3<Float>),
+                 node: clay_node_id, localBound: (center: SIMD3<Float>, radius: Float))
+        case transform(index: Int, before: Placement, after: Placement)
+    }
+    private var undoLog: [UndoKind] = []
+    private var redoOps: [RedoOp] = []
     private var activeStroke: clay_node_id?
+
+    // Transform session (one undo group per drag).
+    private var transformIndex: Int?
+    private var transformBefore: Placement?
+    private var transformMoved = false
+    var isTransforming: Bool { transformIndex != nil }
     // Running AABB + max point radius of the live stroke, for its bound.
     private var strokeMin = SIMD3<Float>.zero
     private var strokeMax = SIMD3<Float>.zero
@@ -252,7 +288,10 @@ final class ClayEngine {
             ))
             itemAABBs.append((position - SIMD3(repeating: bound),
                               position + SIMD3(repeating: bound)))
-            redoMirror.removeAll()
+            nodeIDs.append(node)
+            localBounds.append((SIMD3.zero, bound))
+            undoLog.append(.add)
+            redoOps.removeAll()
             version += 1
             scheduleBake()
         }
@@ -317,7 +356,10 @@ final class ClayEngine {
                     max: position + SIMD3(repeating: pad))
         if radialCount >= 2 { aabb = Self.ringAABB(aabb) }
         itemAABBs.append(aabb)
-        redoMirror.removeAll()
+        nodeIDs.append(node)
+        localBounds.append((bound.0, bound.1)) // stroke origin is identity
+        undoLog.append(.add)
+        redoOps.removeAll()
         version += 1
         return true
     }
@@ -348,6 +390,7 @@ final class ClayEngine {
         items[items.count - 1].boundCenter = bound.0
         items[items.count - 1].boundRadius = bound.1
         itemAABBs[itemAABBs.count - 1] = aabb
+        localBounds[localBounds.count - 1] = (bound.0, bound.1)
         version += 1
     }
 
@@ -368,21 +411,40 @@ final class ClayEngine {
 
     // MARK: Undo / redo (ClayCore's document undo stack)
 
-    /// Returns whether something was undone. Not available mid-stroke.
+    private func apply(_ placement: Placement, to index: Int) {
+        guard items.indices.contains(index) else { return }
+        items[index].position = placement.position
+        items[index].rotation = placement.rotation
+        items[index].scale = placement.scale
+        items[index].boundCenter = placement.boundCenter
+        items[index].boundRadius = placement.boundRadius
+        itemAABBs[index] = (placement.aabbMin, placement.aabbMax)
+    }
+
+    /// Returns whether something was undone. Not available mid-stroke/drag.
     func undo() -> Bool {
-        guard let doc, activeStroke == nil else { return false }
+        guard let doc, activeStroke == nil, transformIndex == nil else { return false }
         var undone: Int32 = 0
         guard check(clay_document_undo(doc, &undone)), undone != 0 else { return false }
-        if let last = items.popLast() {
-            var points: [SIMD4<Float>] = []
-            if last.prim == Self.strokePrim {
-                // A stroke's points are the pool's tail (LIFO invariant).
-                let count = Int(last.params.y)
-                points = Array(strokePoints.suffix(count))
-                strokePoints.removeLast(count)
+        switch undoLog.popLast() {
+        case .transform(let index, let before, let after):
+            apply(before, to: index)
+            redoOps.append(.transform(index: index, before: before, after: after))
+        case .add, .none: // .none: history predating the log — treat as add
+            if let last = items.popLast() {
+                var points: [SIMD4<Float>] = []
+                if last.prim == Self.strokePrim {
+                    // A stroke's points are the pool's tail (LIFO invariant).
+                    let count = Int(last.params.y)
+                    points = Array(strokePoints.suffix(count))
+                    strokePoints.removeLast(count)
+                }
+                let aabb = itemAABBs.popLast() ?? (SIMD3.zero, SIMD3.zero)
+                let node = nodeIDs.popLast() ?? 0
+                let local = localBounds.popLast() ?? (SIMD3.zero, 0)
+                redoOps.append(.add(item: last, points: points, aabb: aabb,
+                                    node: node, localBound: local))
             }
-            let aabb = itemAABBs.popLast() ?? (SIMD3.zero, SIMD3.zero)
-            redoMirror.append((last, points, aabb))
         }
         version += 1
         invalidateCacheIfNeeded()
@@ -390,20 +452,126 @@ final class ClayEngine {
     }
 
     func redo() -> Bool {
-        guard let doc, activeStroke == nil else { return false }
+        guard let doc, activeStroke == nil, transformIndex == nil else { return false }
         var redone: Int32 = 0
         guard check(clay_document_redo(doc, &redone)), redone != 0 else { return false }
-        if var restored = redoMirror.popLast() {
-            if restored.item.prim == Self.strokePrim {
-                restored.item.params.x = Float(strokePoints.count)
-                strokePoints.append(contentsOf: restored.points)
+        switch redoOps.popLast() {
+        case .add(var item, let points, let aabb, let node, let local):
+            if item.prim == Self.strokePrim {
+                item.params.x = Float(strokePoints.count)
+                strokePoints.append(contentsOf: points)
             }
-            items.append(restored.item)
-            itemAABBs.append(restored.aabb)
+            items.append(item)
+            itemAABBs.append(aabb)
+            nodeIDs.append(node)
+            localBounds.append(local)
+            undoLog.append(.add)
+        case .transform(let index, let before, let after):
+            apply(after, to: index)
+            undoLog.append(.transform(index: index, before: before, after: after))
+        case .none:
+            break
         }
         version += 1
         scheduleBake()
         return true
+    }
+
+    // MARK: Selection & transform (task 7.3 core)
+
+    /// Attributed pick: which item owns the surface under the ray.
+    /// Returns the mirror index and the hit position.
+    func pick(origin: SIMD3<Float>, direction: SIMD3<Float>) -> (index: Int, position: SIMD3<Float>)? {
+        guard let doc else { return nil }
+        var hit: Int32 = 0
+        var t: Float = 0
+        var pos = [Float](repeating: 0, count: 3)
+        var nor = [Float](repeating: 0, count: 3)
+        var hitLayer: clay_layer_id = 0
+        var hitNode: clay_node_id = 0
+        guard clay_raycast_attributed(doc, [origin.x, origin.y, origin.z],
+                                      [direction.x, direction.y, direction.z],
+                                      &hit, &t, &pos, &nor, &hitLayer, &hitNode) == CLAY_OK,
+              hit != 0, hitNode != 0,
+              let index = nodeIDs.firstIndex(of: hitNode) else { return nil }
+        return (index, SIMD3(pos[0], pos[1], pos[2]))
+    }
+
+    private func placement(of index: Int) -> Placement {
+        Placement(position: items[index].position,
+                  rotation: items[index].rotation,
+                  scale: items[index].scale,
+                  boundCenter: items[index].boundCenter,
+                  boundRadius: items[index].boundRadius,
+                  aabbMin: itemAABBs[index].min,
+                  aabbMax: itemAABBs[index].max)
+    }
+
+    /// Opens a one-undo-step transform session (drag). Editing a baked item
+    /// invalidates the cache: rendering falls back to analytic until the
+    /// end-of-drag rebake.
+    @discardableResult
+    func beginTransform(index: Int) -> Bool {
+        guard let doc, items.indices.contains(index),
+              activeStroke == nil, transformIndex == nil else { return false }
+        _ = check(clay_document_begin_undo_group(doc))
+        transformIndex = index
+        transformBefore = placement(of: index)
+        transformMoved = false
+        if let cache = fieldCache, index < cache.bakedItemCount {
+            fieldCache = nil
+            fieldCacheVersion += 1
+        }
+        return true
+    }
+
+    /// Live update within the session: absolute position/rotation/scale.
+    func updateTransform(position: SIMD3<Float>, rotation: SIMD4<Float>, scale: Float) {
+        guard let doc, let index = transformIndex else { return }
+        let q = simd_quatf(ix: rotation.x, iy: rotation.y, iz: rotation.z, r: rotation.w)
+        var axis = q.axis
+        let angle = q.angle
+        if !axis.x.isFinite || simd_length_squared(axis) < 1e-9 { axis = SIMD3(0, 1, 0) }
+        guard check(clay_layer_set_transform(doc, layer, nodeIDs[index],
+                                             [position.x, position.y, position.z],
+                                             [axis.x, axis.y, axis.z],
+                                             angle.isFinite ? angle : 0,
+                                             max(scale, 0.01))) else { return }
+        transformMoved = true
+        items[index].position = position
+        items[index].rotation = rotation
+        items[index].scale = scale
+
+        // Recompute world bounds from the item-local sphere.
+        let local = localBounds[index]
+        let worldCenter = position + q.act(local.center * scale)
+        let worldRadius = local.radius * max(scale, 1)
+        var bound = (worldCenter, worldRadius)
+        var aabb = (min: worldCenter - SIMD3(repeating: worldRadius),
+                    max: worldCenter + SIMD3(repeating: worldRadius))
+        if items[index].radialCount >= 2 {
+            bound = Self.ringBound(center: bound.0, radius: bound.1)
+            aabb = Self.ringAABB(aabb)
+        }
+        items[index].boundCenter = bound.0
+        items[index].boundRadius = bound.1
+        itemAABBs[index] = aabb
+        version += 1
+    }
+
+    /// Closes the session; a drag that moved logs as ONE undo step.
+    func endTransform() {
+        guard let doc, let index = transformIndex else { return }
+        _ = check(clay_document_end_undo_group(doc))
+        if transformMoved, let before = transformBefore {
+            undoLog.append(.transform(index: index, before: before,
+                                      after: placement(of: index)))
+            redoOps.removeAll()
+            scheduleBake()
+        }
+        transformIndex = nil
+        transformBefore = nil
+        transformMoved = false
     }
 
     /// Whether an item's bound could ever be reached — used by tests.
@@ -437,7 +605,7 @@ final class ClayEngine {
     }
 
     private func performBake(editVersion: Int) async {
-        guard let doc, !isStroking else { return }
+        guard let doc, !isStroking, !isTransforming else { return }
         let path = FileManager.default.temporaryDirectory
             .appendingPathComponent("clayspace-bake.clayspace").path
         guard check(clay_document_save(doc, path)) else { return }

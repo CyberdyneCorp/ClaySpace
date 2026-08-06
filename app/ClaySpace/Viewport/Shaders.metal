@@ -16,6 +16,8 @@ struct Uniforms {
     int bakedCount;       // items below this index live in the field cache
     int mirrorAxes;       // layer mirror bits (CLAY_MIRROR_*)
     float mirrorK;        // Mirror Blend seam width
+    int selectedIndex;    // highlighted item; -1 = none
+    float3 _pad3;
     float4 gridOrigin;    // xyz cache origin; w = cache enabled (0/1)
     float4 gridInvExtent; // xyz = 1/extent; w = normal epsilon
     float4 gridScale;     // xyz = dims/maxResolution (texture sub-region)
@@ -389,6 +391,14 @@ fragment float4 raymarch_fragment(VertexOut in [[stage_in]],
         float diffuse = saturate(dot(n, l));
         float rim = pow(1.0 - saturate(dot(n, -rd)), 3.0);
         color = albedo * (0.35 + 0.65 * diffuse) + rim * 0.18;
+
+        // Selection highlight: warm glow where the selected item's own
+        // field owns the surface (fades over its blend reach).
+        if (u.selectedIndex >= 0 && u.selectedIndex < u.itemCount) {
+            float ds = sdItemMirrored(p, items[u.selectedIndex], ctx);
+            float glow = 1.0 - smoothstep(0.0, 0.05, abs(ds));
+            color = mix(color, float3(1.0, 0.62, 0.15), glow * 0.45);
+        }
     }
 
     return float4(pow(color, 1.0 / 2.2), 1.0);
