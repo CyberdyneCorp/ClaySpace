@@ -85,8 +85,17 @@ struct ContentView: View {
             }
         }
         .onOpenURL { url in
-            // A .clayspace tapped in Files (or shared to the app).
-            if state.engine.openExternalDocument(at: url) {
+            // A .clayspace or .obj handed over from Files/share sheet.
+            if url.pathExtension.lowercased() == "obj" {
+                if let stats = state.engine.importOBJ(at: url, color: state.activeColor) {
+                    state.setMode(.voxel)
+                    state.showToast(stats.truncated
+                        ? "Imported \(stats.cells) blocks (mesh too dense — truncated)"
+                        : "Imported \(url.lastPathComponent): \(stats.cells) blocks")
+                } else {
+                    state.showToast("Couldn't import \(url.lastPathComponent)")
+                }
+            } else if state.engine.openExternalDocument(at: url) {
                 state.showToast("Opened \(state.engine.documentName)")
             } else {
                 state.showToast("Couldn't open \(url.lastPathComponent)")

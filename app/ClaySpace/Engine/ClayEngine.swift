@@ -1120,6 +1120,103 @@ final class ClayEngine {
         scheduleAutosave()
     }
 
+    // MARK: OBJ import (task 9.3 reader half — mesh→SDF blocked on ClayCore#5)
+
+    struct OBJImportStats {
+        var triangles: Int
+        var cells: Int
+        var truncated: Bool
+    }
+
+    /// Imports an OBJ as voxels: parse (v/f with fans and negative
+    /// indices), fit into the build area resting on the ground, sample
+    /// every triangle's surface at half-cell spacing, set the covered
+    /// cells, and rebuild the mesh once. Voxel edits are not undoable
+    /// (ClayCore#6), and this inherits that.
+    func importOBJ(at url: URL, color: SIMD3<Float>) -> OBJImportStats? {
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        guard let text = try? String(contentsOf: url, encoding: .utf8) else {
+            lastError = "unreadable OBJ"
+            return nil
+        }
+
+        var vertices: [SIMD3<Float>] = []
+        var triangles: [(Int, Int, Int)] = []
+        for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
+            let parts = line.split(separator: " ", omittingEmptySubsequences: true)
+            guard let head = parts.first else { continue }
+            if head == "v", parts.count >= 4,
+               let x = Float(parts[1]), let y = Float(parts[2]), let z = Float(parts[3]) {
+                vertices.append(SIMD3(x, y, z))
+            } else if head == "f", parts.count >= 4 {
+                // f v[/vt[/vn]]… — 1-based; negative indices count back.
+                func index(of s: Substring) -> Int? {
+                    guard let first = s.split(separator: "/").first,
+                          let raw = Int(first) else { return nil }
+                    let resolved = raw > 0 ? raw - 1 : vertices.count + raw
+                    return vertices.indices.contains(resolved) ? resolved : nil
+                }
+                let ids = parts.dropFirst().compactMap(index(of:))
+                guard ids.count >= 3 else { continue }
+                for i in 1..<(ids.count - 1) {
+                    triangles.append((ids[0], ids[i], ids[i + 1]))
+                }
+            }
+        }
+        guard !triangles.isEmpty else {
+            lastError = "no triangles in OBJ"
+            return nil
+        }
+
+        // Fit: uniform scale to ~4.2 world units, resting on the ground.
+        var mn = SIMD3<Float>(repeating: .greatestFiniteMagnitude)
+        var mx = -mn
+        for v in vertices { mn = simd_min(mn, v); mx = simd_max(mx, v) }
+        let extent = mx - mn
+        let largest = Swift.max(extent.x, Swift.max(extent.y, Swift.max(extent.z, 1e-6)))
+        let scale = 4.2 / largest
+        let center = (mn + mx) * 0.5
+        func toWorld(_ v: SIMD3<Float>) -> SIMD3<Float> {
+            SIMD3((v.x - center.x) * scale,
+                  (v.y - mn.y) * scale + Self.voxelSize * 0.5,
+                  (v.z - center.z) * scale)
+        }
+
+        guard ensureVoxelLayer(), let voxelGrid else { return nil }
+        let cellCap = 200_000
+        var truncated = false
+        var cells = Set<SIMD3<Int32>>()
+        let step = Self.voxelSize * 0.5
+        outer: for (a, b, c) in triangles {
+            let pa = toWorld(vertices[a])
+            let ab = toWorld(vertices[b]) - pa
+            let ac = toWorld(vertices[c]) - pa
+            let n = min(Swift.max(Int(Swift.max(simd_length(ab), simd_length(ac)) / step), 1), 512)
+            for i in 0...n {
+                for j in 0...(n - i) {
+                    let p = pa + ab * (Float(i) / Float(n)) + ac * (Float(j) / Float(n))
+                    cells.insert(SIMD3(Int32(floorf(p.x / Self.voxelSize)),
+                                       Int32(floorf(p.y / Self.voxelSize)),
+                                       Int32(floorf(p.z / Self.voxelSize))))
+                    if cells.count > cellCap { truncated = true; break outer }
+                }
+            }
+        }
+
+        var brush = voxelBrush(size: 1)
+        let paletteId = paletteIndex(for: color)
+        for cell in cells {
+            _ = clay_voxel_set_brush(voxelGrid, [cell.x, cell.y, cell.z],
+                                     &brush, paletteId)
+        }
+        rebuildVoxelMesh()
+        version += 1
+        scheduleAutosave()
+        return OBJImportStats(triangles: triangles.count, cells: cells.count,
+                              truncated: truncated)
+    }
+
     /// Ray → first occupied cell, its entry face's neighbor (where a placed
     /// voxel goes), or the build-plane cell when the ray hits nothing.
     func voxelPick(origin: SIMD3<Float>, direction: SIMD3<Float>,

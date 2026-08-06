@@ -18,6 +18,16 @@
 				<string>com.cyberdyne.clayspace.sculpt</string>
 			</array>
 		</dict>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Wavefront OBJ</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>public.geometry-definition-format</string>
+			</array>
+		</dict>
 	</array>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
@@ -65,6 +75,27 @@
 				<key>public.filename-extension</key>
 				<array>
 					<string>clayspace</string>
+				</array>
+			</dict>
+		</dict>
+	</array>
+	<key>UTImportedTypeDeclarations</key>
+	<array>
+		<dict>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+				<string>public.3d-content</string>
+			</array>
+			<key>UTTypeDescription</key>
+			<string>Wavefront OBJ</string>
+			<key>UTTypeIdentifier</key>
+			<string>public.geometry-definition-format</string>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>obj</string>
 				</array>
 			</dict>
 		</dict>

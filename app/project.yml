@@ -56,10 +56,19 @@ targets:
             UTTypeConformsTo: [com.apple.package, public.content]
             UTTypeTagSpecification:
               public.filename-extension: [clayspace]
+        UTImportedTypeDeclarations:
+          - UTTypeIdentifier: public.geometry-definition-format
+            UTTypeDescription: Wavefront OBJ
+            UTTypeConformsTo: [public.data, public.3d-content]
+            UTTypeTagSpecification:
+              public.filename-extension: [obj]
         CFBundleDocumentTypes:
           - CFBundleTypeName: ClaySpace Sculpt
             LSItemContentTypes: [com.cyberdyne.clayspace.sculpt]
             LSHandlerRank: Owner
+          - CFBundleTypeName: Wavefront OBJ
+            LSItemContentTypes: [public.geometry-definition-format]
+            LSHandlerRank: Alternate
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.cyberdyne.clayspace

@@ -520,6 +520,69 @@ final class ClayEngineTests: XCTestCase {
                           2.4, "undo restores the carve order")
     }
 
+    func testImportOBJVoxelizesFansAndNegativeIndices() throws {
+        // A unit cube written with quads and one negative-index face:
+        // exercises fan triangulation and relative indexing.
+        let obj = """
+        # test cube
+        v 0 0 0
+        v 1 0 0
+        v 1 1 0
+        v 0 1 0
+        v 0 0 1
+        v 1 0 1
+        v 1 1 1
+        v 0 1 1
+        f 1 2 3 4
+        f 5 6 7 8
+        f 1 2 6 5
+        f 2 3 7 6
+        f 3 4 8 7
+        f -8 -5 -1 -4
+        """
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cube_\(UUID().uuidString).obj")
+        try obj.write(to: url, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let engine = ClayEngine()
+        let stats = engine.importOBJ(at: url, color: ClayEngine.clayColor)
+        XCTAssertNotNil(stats)
+        XCTAssertEqual(stats?.triangles, 12, "six quads fan into twelve triangles")
+        XCTAssertEqual(stats?.truncated, false)
+        XCTAssertGreaterThan(engine.voxelCount, 400,
+                             "a 4.2-unit cube shell is thousands of cells")
+
+        // The top face sits at the fit height: 4.2 units above the ground
+        // rest offset. A vertical pick must land there.
+        let pick = engine.voxelPick(origin: SIMD3(0, 8, 0),
+                                    direction: SIMD3(0, -1, 0), buildPlane: 0)
+        XCTAssertNotNil(pick, "import produced a pickable surface")
+        let topY = (Float(pick?.hit.y ?? 0) + 0.5) * ClayEngine.voxelSize
+        XCTAssertEqual(topY, 4.2 + ClayEngine.voxelSize * 0.5, accuracy: 0.15)
+
+        // Garbage and empty files refuse cleanly.
+        let junk = FileManager.default.temporaryDirectory
+            .appendingPathComponent("junk_\(UUID().uuidString).obj")
+        try "not an obj at all".write(to: junk, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: junk) }
+        XCTAssertNil(engine.importOBJ(at: junk, color: ClayEngine.clayColor))
+    }
+
+    func testExportedOBJReimportsAsVoxels() async throws {
+        // Full 9.3 circle: the writer's output feeds the reader.
+        let engine = ClayEngine()
+        let result = await engine.exportMesh(format: .obj, resolution: 96)
+        let export = try XCTUnwrap(result, "seeded ball exports")
+        defer { try? FileManager.default.removeItem(at: export.url) }
+
+        let stats = engine.importOBJ(at: export.url, color: ClayEngine.clayColor)
+        XCTAssertEqual(stats?.triangles, export.triangleCount,
+                       "reader sees every triangle the writer wrote")
+        XCTAssertGreaterThan(engine.voxelCount, 1000,
+                             "the ball's shell voxelized")
+    }
+
     func testMaterialPresetPersistsAndOldSidecarsStillLoad() throws {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("mat_\(UUID().uuidString)")
