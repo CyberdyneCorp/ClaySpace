@@ -34,15 +34,37 @@ targets:
     dependencies:
       - package: claycore
         product: claycore
+    # Explicit Info.plist: file sharing + open-in-place expose Documents in
+    # the Files app; the .clayspace package UTI makes each sculpt read as a
+    # single document there.
+    info:
+      path: ClaySpace/Info.plist
+      properties:
+        CFBundleDisplayName: ClaySpace
+        UILaunchScreen: {}
+        UIStatusBarHidden: true
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
+        UTExportedTypeDeclarations:
+          - UTTypeIdentifier: com.cyberdyne.clayspace.sculpt
+            UTTypeDescription: ClaySpace Sculpt
+            UTTypeConformsTo: [com.apple.package, public.content]
+            UTTypeTagSpecification:
+              public.filename-extension: [clayspace]
+        CFBundleDocumentTypes:
+          - CFBundleTypeName: ClaySpace Sculpt
+            LSItemContentTypes: [com.cyberdyne.clayspace.sculpt]
+            LSHandlerRank: Owner
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.cyberdyne.clayspace
         TARGETED_DEVICE_FAMILY: "2"          # iPad only
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
-        GENERATE_INFOPLIST_FILE: YES
-        INFOPLIST_KEY_UILaunchScreen_Generation: YES
-        INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad: "UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown"
-        INFOPLIST_KEY_UIStatusBarHidden: YES
 
   ClaySpaceTests:
     type: bundle.unit-test

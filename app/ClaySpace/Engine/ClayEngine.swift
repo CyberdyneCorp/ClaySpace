@@ -948,11 +948,41 @@ final class ClayEngine {
     static var documentsDirectory: URL {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
     }
+    /// A sculpt is a PACKAGE directory (Files shows it as one document):
+    /// <name>.clayspace/{scene.clay, mirror.bin}.
     static func documentURL(named name: String) -> URL {
         documentsDirectory.appendingPathComponent("\(name).clayspace")
     }
     static func mirrorURL(named name: String) -> URL {
         documentsDirectory.appendingPathComponent("\(name).claymirror")
+    }
+    static func innerDocument(of package: URL) -> URL {
+        package.appendingPathComponent("scene.clay")
+    }
+    static func innerMirror(of package: URL) -> URL {
+        package.appendingPathComponent("mirror.bin")
+    }
+
+    /// Converts a legacy flat .clayspace file (+ sibling .claymirror) into
+    /// the package layout in place.
+    static func migrateFlatIfNeeded(at package: URL) {
+        let fm = FileManager.default
+        var isDirectory: ObjCBool = false
+        guard fm.fileExists(atPath: package.path, isDirectory: &isDirectory),
+              !isDirectory.boolValue else { return }
+        let holding = documentsDirectory.appendingPathComponent(UUID().uuidString)
+        do {
+            try fm.moveItem(at: package, to: holding)
+            try fm.createDirectory(at: package, withIntermediateDirectories: true)
+            try fm.moveItem(at: holding, to: innerDocument(of: package))
+            let legacyMirror = package.deletingPathExtension()
+                .appendingPathExtension("claymirror")
+            if fm.fileExists(atPath: legacyMirror.path) {
+                try fm.moveItem(at: legacyMirror, to: innerMirror(of: package))
+            }
+        } catch {
+            try? fm.moveItem(at: holding, to: package) // best-effort restore
+        }
     }
     private static let lastDocumentKey = "lastDocumentName"
 
@@ -998,12 +1028,19 @@ final class ClayEngine {
     /// undo group must not hit disk).
     @discardableResult
     func saveDocument(documentURL: URL? = nil, mirrorURL: URL? = nil) -> Bool {
-        let documentURL = documentURL ?? Self.documentURL(named: documentName)
-        let mirrorURL = mirrorURL ?? Self.mirrorURL(named: documentName)
+        let package = documentURL ?? Self.documentURL(named: documentName)
         guard let doc, !isStroking, !isTransforming else { return false }
-        guard check(clay_document_save(doc, documentURL.path)) else { return false }
         do {
-            try mirrorData().write(to: mirrorURL, options: .atomic)
+            try FileManager.default.createDirectory(at: package,
+                                                    withIntermediateDirectories: true)
+        } catch {
+            lastError = error.localizedDescription
+            return false
+        }
+        guard check(clay_document_save(doc, Self.innerDocument(of: package).path))
+        else { return false }
+        do {
+            try mirrorData().write(to: Self.innerMirror(of: package), options: .atomic)
         } catch {
             lastError = error.localizedDescription
             return false
@@ -1017,10 +1054,20 @@ final class ClayEngine {
     /// Undo history starts fresh at the load point (in-session semantics).
     @discardableResult
     func loadDocument(documentURL: URL, mirrorURL: URL) -> Bool {
+        Self.migrateFlatIfNeeded(at: documentURL)
+        var docPath = documentURL
+        var mirrorPath = mirrorURL
+        var isDirectory: ObjCBool = false
+        if FileManager.default.fileExists(atPath: documentURL.path,
+                                          isDirectory: &isDirectory),
+           isDirectory.boolValue {
+            docPath = Self.innerDocument(of: documentURL)
+            mirrorPath = Self.innerMirror(of: documentURL)
+        }
         var loaded: OpaquePointer?
-        guard clay_document_load(documentURL.path, &loaded) == CLAY_OK,
+        guard clay_document_load(docPath.path, &loaded) == CLAY_OK,
               let newDoc = loaded,
-              let data = try? Data(contentsOf: mirrorURL) else {
+              let data = try? Data(contentsOf: mirrorPath) else {
             if let stale = loaded { clay_document_destroy(stale) }
             return false
         }
@@ -1110,6 +1157,9 @@ final class ClayEngine {
         let urls = (try? fm.contentsOfDirectory(at: documentsDirectory,
                                                 includingPropertiesForKeys: [.contentModificationDateKey]))
             ?? []
+        for url in urls where url.pathExtension == "clayspace" {
+            migrateFlatIfNeeded(at: url)
+        }
         return urls.filter { $0.pathExtension == "clayspace" }
             .map { url in
                 let date = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?
@@ -1196,7 +1246,7 @@ final class ClayEngine {
     func deleteDocument(named name: String) -> Bool {
         guard name != documentName else { return false }
         try? FileManager.default.removeItem(at: Self.documentURL(named: name))
-        try? FileManager.default.removeItem(at: Self.mirrorURL(named: name))
+        try? FileManager.default.removeItem(at: Self.mirrorURL(named: name)) // legacy stray
         return true
     }
 
