@@ -220,6 +220,7 @@ final class ClayEngine {
         case layerRemove(slot: Int, info: SdfLayer, rows: [LayerRow])
         case layerVisibility(slot: Int, before: Bool, after: Bool)
         case voxelStep // grid diff lives in ClayCore's journal (ABI 0.20)
+        case reparam(index: Int, before: SIMD4<Float>, after: SIMD4<Float>)
     }
     private enum RedoOp {
         case add(item: SceneItem, points: [SIMD4<Float>],
@@ -236,6 +237,7 @@ final class ClayEngine {
         case layerRemove(slot: Int)
         case layerVisibility(slot: Int, before: Bool, after: Bool)
         case voxelStep
+        case reparam(index: Int, before: SIMD4<Float>, after: SIMD4<Float>)
     }
     private var undoLog: [UndoKind] = []
     private var redoOps: [RedoOp] = []
@@ -640,7 +642,8 @@ final class ClayEngine {
 
     /// Returns whether something was undone. Not available mid-stroke/drag.
     func undo() -> Bool {
-        guard let doc, activeStroke == nil, transformIndex == nil else { return false }
+        guard let doc, activeStroke == nil, transformIndex == nil,
+              paramSessionIndex == nil else { return false }
         var undone: Int32 = 0
         guard check(clay_document_undo(doc, &undone)), undone != 0 else { return false }
         switch undoLog.popLast() {
@@ -689,6 +692,9 @@ final class ClayEngine {
         case .voxelStep:
             rebuildVoxelMesh() // ClayCore's journal reverted the cells
             redoOps.append(.voxelStep)
+        case .reparam(let index, let before, let after):
+            replayParamsMirror(before, at: index)
+            redoOps.append(.reparam(index: index, before: before, after: after))
         case .add, .none: // .none: history predating the log — treat as add
             if let last = items.popLast() {
                 var points: [SIMD4<Float>] = []
@@ -712,7 +718,8 @@ final class ClayEngine {
     }
 
     func redo() -> Bool {
-        guard let doc, activeStroke == nil, transformIndex == nil else { return false }
+        guard let doc, activeStroke == nil, transformIndex == nil,
+              paramSessionIndex == nil else { return false }
         var redone: Int32 = 0
         guard check(clay_document_redo(doc, &redone)), redone != 0 else { return false }
         switch redoOps.popLast() {
@@ -771,6 +778,9 @@ final class ClayEngine {
         case .voxelStep:
             rebuildVoxelMesh()
             undoLog.append(.voxelStep)
+        case .reparam(let index, let before, let after):
+            replayParamsMirror(after, at: index)
+            undoLog.append(.reparam(index: index, before: before, after: after))
         case .none:
             break
         }
@@ -905,6 +915,92 @@ final class ClayEngine {
         transformIndex = nil
         transformBefore = nil
         transformMoved = false
+    }
+
+    // MARK: Primitive parameter editing (per-axis scale, task 7.3 follow-up)
+
+    /// clay_prim parameter counts for the kinds the app authors.
+    static func paramCount(forPrim prim: Int32) -> Int {
+        switch clay_prim(UInt32(max(prim, 0))) {
+        case CLAY_PRIM_SPHERE: 1
+        case CLAY_PRIM_BOX: 3
+        case CLAY_PRIM_ROUND_BOX: 4
+        case CLAY_PRIM_CAPPED_CYLINDER: 2
+        case CLAY_PRIM_CAPPED_CONE: 3
+        case CLAY_PRIM_TORUS: 2
+        case CLAY_PRIM_ROUND_CONE: 3
+        case CLAY_PRIM_ELLIPSOID: 3
+        case CLAY_PRIM_HEX_PRISM: 2
+        default: 0
+        }
+    }
+
+    private var paramSessionIndex: Int?
+    private var paramSessionBefore: SIMD4<Float>?
+    private var paramSessionChanged = false
+    var isEditingParams: Bool { paramSessionIndex != nil }
+
+    /// Opens a one-undo-step parameter drag on a primitive (not strokes).
+    @discardableResult
+    func beginParamEdit(index: Int) -> Bool {
+        guard let doc, items.indices.contains(index),
+              activeStroke == nil, transformIndex == nil, paramSessionIndex == nil,
+              Self.paramCount(forPrim: items[index].prim) > 0 else { return false }
+        _ = check(clay_document_begin_undo_group(doc))
+        paramSessionIndex = index
+        paramSessionBefore = items[index].params
+        paramSessionChanged = false
+        dropCacheIfCovers(index)
+        return true
+    }
+
+    /// Live update within the session (absolute parameter values).
+    func updateParamEdit(params: [Float]) {
+        guard let doc, let index = paramSessionIndex else { return }
+        let count = Self.paramCount(forPrim: items[index].prim)
+        guard params.count >= count else { return }
+        let clamped = params.prefix(count).map { max($0, 0.02) }
+        guard check(clay_layer_set_prim(doc, layerId(of: index), nodeIDs[index],
+                                        items[index].prim, clamped, count)) else { return }
+        for (i, value) in clamped.prefix(4).enumerated() { items[index].params[i] = value }
+        paramSessionChanged = true
+        let support = Self.blendSupport(clay_blend(UInt32(max(items[index].blend, 0))),
+                                        items[index].blendK)
+        let radius = Self.geometricRadius(prim: clay_prim(UInt32(max(items[index].prim, 0))),
+                                          params: Array(clamped)) + support + 0.02
+        localBounds[index] = (SIMD3.zero, radius)
+        refreshWorldBound(index)
+        commit()
+    }
+
+    /// Closes the session; a drag that changed anything logs ONE undo step.
+    func endParamEdit() {
+        guard let doc, let index = paramSessionIndex else { return }
+        _ = check(clay_document_end_undo_group(doc))
+        if paramSessionChanged, let before = paramSessionBefore {
+            undoLog.append(.reparam(index: index, before: before,
+                                    after: items[index].params))
+            redoOps.removeAll()
+            scheduleBake()
+        }
+        paramSessionIndex = nil
+        paramSessionBefore = nil
+        paramSessionChanged = false
+    }
+
+    /// Mirror-only param replay for undo/redo (doc side already rewound).
+    private func replayParamsMirror(_ params: SIMD4<Float>, at index: Int) {
+        guard items.indices.contains(index) else { return }
+        items[index].params = params
+        let count = Self.paramCount(forPrim: items[index].prim)
+        let support = Self.blendSupport(clay_blend(UInt32(max(items[index].blend, 0))),
+                                        items[index].blendK)
+        let flat = (0..<max(count, 1)).map { params[min($0, 3)] }
+        let radius = Self.geometricRadius(prim: clay_prim(UInt32(max(items[index].prim, 0))),
+                                          params: flat) + support + 0.02
+        localBounds[index] = (SIMD3.zero, radius)
+        refreshWorldBound(index)
+        dropCacheIfCovers(index)
     }
 
     /// Whether an item's bound could ever be reached — used by tests.
@@ -2088,7 +2184,7 @@ final class ClayEngine {
     @discardableResult
     func saveDocument(documentURL: URL? = nil, mirrorURL: URL? = nil) -> Bool {
         let package = documentURL ?? Self.documentURL(named: documentName)
-        guard let doc, !isStroking, !isTransforming else { return false }
+        guard let doc, !isStroking, !isTransforming, !isEditingParams else { return false }
         do {
             try FileManager.default.createDirectory(at: package,
                                                     withIntermediateDirectories: true)

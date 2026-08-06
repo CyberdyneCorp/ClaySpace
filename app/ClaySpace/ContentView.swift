@@ -28,6 +28,7 @@ struct ContentView: View {
                     .ignoresSafeArea()
                 hoverGhostOverlay
                 gizmoOverlay
+                gizmoModePicker
                 topBar
                 toastOverlay
                 VStack {
@@ -226,39 +227,115 @@ struct ContentView: View {
         }
     }
 
-    /// Transform gizmo (task 7.3): ring + scale/rotate handles over the
-    /// selection. Display only — interaction routes through the pencil
-    /// sink, so it never swallows or leaks touches.
+    /// Transform gizmo (task 7.3): Unity-style local-axis handles over the
+    /// selection — Move (arrows), Rotate (rings), Scale (cubes + uniform).
+    /// Display only — interaction routes through the pencil sink; the mode
+    /// picker is real chrome, registered so taps never leak into sculpting.
+    private static let axisColors: [Color] = [
+        Color(red: 0.91, green: 0.30, blue: 0.32),  // X
+        Color(red: 0.38, green: 0.78, blue: 0.34),  // Y
+        Color(red: 0.32, green: 0.53, blue: 0.92)   // Z
+    ]
+
     @ViewBuilder
     private var gizmoOverlay: some View {
         if let gizmo = state.gizmoLayout {
             ZStack(alignment: .topLeading) {
                 Color.clear
                 Circle()
-                    .strokeBorder(Color.orange.opacity(0.55),
-                                  style: StrokeStyle(lineWidth: 1.2, dash: [5, 4]))
+                    .strokeBorder(Color.orange.opacity(0.35),
+                                  style: StrokeStyle(lineWidth: 1, dash: [5, 4]))
                     .frame(width: gizmo.ringRadius * 2, height: gizmo.ringRadius * 2)
                     .position(gizmo.center)
-                Image(systemName: "arrow.up.left.and.arrow.down.right")
-                    .font(.system(size: 11, weight: .bold))
-                    .foregroundStyle(.white)
-                    .frame(width: 26, height: 26)
-                    .background(Circle().fill(Color.orange))
-                    .position(gizmo.scaleHandle)
-                Image(systemName: "arrow.trianglehead.2.clockwise.rotate.90")
-                    .font(.system(size: 11, weight: .bold))
-                    .foregroundStyle(.white)
-                    .frame(width: 26, height: 26)
-                    .background(Circle().fill(Color.orange))
-                    .position(gizmo.rotateHandle)
-                Image(systemName: "arrow.up.and.down.and.arrow.left.and.right")
-                    .font(.system(size: 10, weight: .bold))
-                    .foregroundStyle(.white)
-                    .frame(width: 24, height: 24)
-                    .background(Circle().fill(Color.orange.opacity(0.85)))
+
+                ForEach(Array(gizmo.rings.enumerated()), id: \.offset) { ringIndex, ring in
+                    Path { path in
+                        guard let first = ring.first else { return }
+                        path.move(to: first)
+                        for sample in ring.dropFirst() { path.addLine(to: sample) }
+                    }
+                    .stroke(Self.axisColors[min(ringIndex, 2)].opacity(0.85),
+                            lineWidth: 2.5)
+                }
+
+                ForEach(Array(gizmo.axes.enumerated()), id: \.offset) { _, axis in
+                    let tint = Self.axisColors[axis.colorIndex]
+                    Path { path in
+                        path.move(to: axis.base)
+                        path.addLine(to: axis.tip)
+                    }
+                    .stroke(tint.opacity(0.9), lineWidth: 2.5)
+                    Group {
+                        if gizmo.mode == .scale {
+                            RoundedRectangle(cornerRadius: 3).fill(tint)
+                                .frame(width: 14, height: 14)
+                        } else {
+                            Image(systemName: "arrowtriangle.up.fill")
+                                .font(.system(size: 12, weight: .bold))
+                                .foregroundStyle(tint)
+                                .rotationEffect(.radians(
+                                    Double(atan2(axis.screenDir.y, axis.screenDir.x)) + .pi / 2))
+                        }
+                    }
+                    .position(axis.tip)
+                }
+
+                if let handle = gizmo.scaleHandle {
+                    Image(systemName: "arrow.down.left.and.arrow.up.right")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(.white)
+                        .frame(width: 26, height: 26)
+                        .background(Circle().fill(Color.orange))
+                        .position(handle)
+                }
+                if let handle = gizmo.rotateHandle {
+                    Image(systemName: "arrow.trianglehead.2.clockwise.rotate.90")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(.white)
+                        .frame(width: 26, height: 26)
+                        .background(Circle().fill(Color.orange))
+                        .position(handle)
+                }
+                Circle()
+                    .fill(Color.orange.opacity(0.85))
+                    .frame(width: 16, height: 16)
+                    .overlay(Circle().strokeBorder(.white, lineWidth: 1.5))
                     .position(gizmo.center)
             }
             .allowsHitTesting(false)
+        }
+    }
+
+    /// Floating Move | Rotate | Scale picker above the gizmo — interactive
+    /// chrome, registered in chromeRects like every other bar.
+    @ViewBuilder
+    private var gizmoModePicker: some View {
+        if let gizmo = state.gizmoLayout {
+            HStack(spacing: 2) {
+                ForEach(ViewportState.GizmoMode.allCases) { pickerMode in
+                    let active = state.gizmoMode == pickerMode
+                    Button {
+                        state.gizmoMode = pickerMode
+                    } label: {
+                        Image(systemName: pickerMode.symbol)
+                            .font(.system(size: 12, weight: .semibold))
+                            .frame(width: 30, height: 26)
+                            .foregroundStyle(active ? .white : .primary)
+                            .background(
+                                RoundedRectangle(cornerRadius: 5)
+                                    .fill(active ? Color.orange : .clear))
+                    }
+                    .accessibilityLabel("Gizmo \(pickerMode.rawValue)")
+                }
+            }
+            .padding(3)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 7))
+            .position(x: gizmo.center.x,
+                      y: max(gizmo.center.y - gizmo.ringRadius - 40, 90))
+            .onGeometryChange(for: CGRect.self) {
+                $0.frame(in: .global)
+            } action: { state.chromeRects["gizmoMode"] = $0 }
+            .onDisappear { state.chromeRects["gizmoMode"] = nil }
         }
     }
 

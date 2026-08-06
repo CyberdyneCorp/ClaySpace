@@ -90,11 +90,41 @@ final class ViewportState {
 
     // MARK: Transform gizmo (task 7.3)
 
+    /// Unity-style transform modes (task 7.3 follow-up): the floating
+    /// picker above the gizmo switches what the peripheral handles do.
+    /// The center dot always moves on the view plane.
+    enum GizmoMode: String, CaseIterable, Identifiable {
+        case move, rotate, scale
+        var id: String { rawValue }
+        var symbol: String {
+            switch self {
+            case .move: "arrow.up.and.down.and.arrow.left.and.right"
+            case .rotate: "arrow.trianglehead.2.clockwise.rotate.90"
+            case .scale: "arrow.down.left.and.arrow.up.right"
+            }
+        }
+    }
+    var gizmoMode: GizmoMode = .move
+
+    /// One local axis of the selection, projected: handles live at `tip`;
+    /// drags convert screen motion back to world via screenDir/pixelsPerUnit.
+    struct GizmoAxis: Equatable {
+        var world: SIMD3<Float>   // unit axis in world space (item-local X/Y/Z)
+        var base: CGPoint
+        var tip: CGPoint
+        var screenDir: CGPoint    // normalized tip-base direction
+        var pixelsPerUnit: CGFloat
+        var colorIndex: Int       // 0 = X, 1 = Y, 2 = Z
+    }
+
     struct GizmoLayout: Equatable {
         var center: CGPoint
         var ringRadius: CGFloat
-        var scaleHandle: CGPoint
-        var rotateHandle: CGPoint
+        var mode: GizmoMode
+        var axes: [GizmoAxis]     // move + scale modes
+        var rings: [[CGPoint]]    // rotate mode: projected local-axis rings
+        var scaleHandle: CGPoint? // scale mode: uniform handle on the ring
+        var rotateHandle: CGPoint? // rotate mode: view-axis handle on top
     }
 
     /// Screen-space gizmo over the selection (Smooth mode, ANY tool — an
@@ -107,16 +137,58 @@ final class ViewportState {
               let index = selectedIndex, items.indices.contains(index),
               let center = screenPoint(for: items[index].boundCenter)
         else { return nil }
-        let edge = screenPoint(for: items[index].boundCenter
-                               + camera.basis.right * items[index].boundRadius)
+        let item = items[index]
+        let edge = screenPoint(for: item.boundCenter
+                               + camera.basis.right * item.boundRadius)
         let projected = edge.map { hypot($0.x - center.x, $0.y - center.y) } ?? 60
         let ring = min(max(projected + 14, 44), 170)
         func onRing(_ angle: CGFloat) -> CGPoint {
             CGPoint(x: center.x + cos(angle) * ring, y: center.y + sin(angle) * ring)
         }
-        return GizmoLayout(center: center, ringRadius: ring,
-                           scaleHandle: onRing(.pi / 5),      // lower right
-                           rotateHandle: onRing(-.pi / 2))    // top
+
+        // Local frame: the item's rotation applied to the world axes.
+        let q = simd_quatf(ix: item.rotation.x, iy: item.rotation.y,
+                           iz: item.rotation.z, r: item.rotation.w)
+        let worldAxes = [q.act(SIMD3<Float>(1, 0, 0)), q.act(SIMD3(0, 1, 0)),
+                         q.act(SIMD3(0, 0, 1))]
+        let reach = max(item.boundRadius * 1.35, 0.35)
+
+        var axes: [GizmoAxis] = []
+        var rings: [[CGPoint]] = []
+        switch gizmoMode {
+        case .move, .scale:
+            for (colorIndex, axis) in worldAxes.enumerated() {
+                guard let tip = screenPoint(for: item.boundCenter + axis * reach)
+                else { continue }
+                let dx = tip.x - center.x, dy = tip.y - center.y
+                let length = max(hypot(dx, dy), 1)
+                guard length > 24 else { continue } // axis into the camera
+                axes.append(GizmoAxis(world: axis, base: center, tip: tip,
+                                      screenDir: CGPoint(x: dx / length, y: dy / length),
+                                      pixelsPerUnit: length / CGFloat(reach),
+                                      colorIndex: colorIndex))
+            }
+        case .rotate:
+            for axis in worldAxes {
+                // The circle of radius reach around the center, ⊥ axis.
+                let u = simd_normalize(simd_cross(axis, abs(axis.y) < 0.9
+                                                  ? SIMD3(0, 1, 0) : SIMD3(1, 0, 0)))
+                let w = simd_cross(axis, u)
+                var points: [CGPoint] = []
+                for step in 0...48 {
+                    let a = Float(step) / 48 * 2 * .pi
+                    if let sp = screenPoint(for: item.boundCenter
+                                            + (u * cos(a) + w * sin(a)) * reach) {
+                        points.append(sp)
+                    }
+                }
+                rings.append(points)
+            }
+        }
+        return GizmoLayout(center: center, ringRadius: ring, mode: gizmoMode,
+                           axes: axes, rings: rings,
+                           scaleHandle: gizmoMode == .scale ? onRing(.pi / 5) : nil,
+                           rotateHandle: gizmoMode == .rotate ? onRing(-.pi / 2) : nil)
     }
 
     fileprivate enum GizmoDrag {
@@ -125,6 +197,14 @@ final class ViewportState {
                     center: CGPoint, lastSnap: Int)
         case translate(startPosition: SIMD3<Float>, startHit: SIMD3<Float>,
                        plane: (point: SIMD3<Float>, normal: SIMD3<Float>))
+        case axisTranslate(axis: SIMD3<Float>, startPosition: SIMD3<Float>,
+                           screenDir: CGPoint, pixelsPerUnit: CGFloat,
+                           startScalar: CGFloat)
+        case axisRotate(axis: SIMD3<Float>, startRotation: SIMD4<Float>,
+                        pivot: SIMD3<Float>, u: SIMD3<Float>, w: SIMD3<Float>,
+                        startAngle: Float, lastSnap: Int)
+        case axisScale(colorIndex: Int, startParams: SIMD4<Float>,
+                       startScale: Float, screenDir: CGPoint, startScalar: CGFloat)
     }
     fileprivate var gizmoDrag: GizmoDrag?
     /// 15° rotation latches (input-gestures spec: angle snap + haptics).
@@ -473,9 +553,80 @@ extension ViewportState: PencilToolSink {
         // not a stroke. Center = move, ring right = scale, ring top = rotate.
         if mode == .sdf, let layout = gizmoLayout, let index = selectedIndex {
             let item = engine.items[index]
-            func near(_ handle: CGPoint) -> Bool {
-                hypot(point.x - handle.x, point.y - handle.y) < 26
+            func near(_ handle: CGPoint?) -> Bool {
+                guard let handle else { return false }
+                return hypot(point.x - handle.x, point.y - handle.y) < 26
             }
+            func scalar(along dir: CGPoint) -> CGFloat {
+                (point.x - layout.center.x) * dir.x + (point.y - layout.center.y) * dir.y
+            }
+
+            // Axis handles (arrow / cube tips) — move and scale modes.
+            for axis in layout.axes where near(axis.tip) {
+                if layout.mode == .move, engine.beginTransform(index: index) {
+                    gizmoDrag = .axisTranslate(axis: axis.world,
+                                               startPosition: item.position,
+                                               screenDir: axis.screenDir,
+                                               pixelsPerUnit: axis.pixelsPerUnit,
+                                               startScalar: scalar(along: axis.screenDir))
+                    return
+                }
+                if layout.mode == .scale {
+                    // Primitives edit their params per axis; strokes fall
+                    // back to uniform transform scale.
+                    if ClayEngine.paramCount(forPrim: item.prim) > 0,
+                       engine.beginParamEdit(index: index) {
+                        gizmoDrag = .axisScale(colorIndex: axis.colorIndex,
+                                               startParams: item.params,
+                                               startScale: item.scale == 0 ? 1 : item.scale,
+                                               screenDir: axis.screenDir,
+                                               startScalar: scalar(along: axis.screenDir))
+                        return
+                    }
+                    if engine.beginTransform(index: index) {
+                        gizmoDrag = .scale(startScale: item.scale == 0 ? 1 : item.scale,
+                                           startDistance: max(hypot(point.x - layout.center.x,
+                                                                    point.y - layout.center.y), 10),
+                                           center: layout.center)
+                        return
+                    }
+                }
+            }
+
+            // Rotation rings: nearest polyline within 16 pt wins.
+            if layout.mode == .rotate {
+                var best: (ring: Int, distance: CGFloat)?
+                for (ringIndex, ring) in layout.rings.enumerated() {
+                    for sample in ring {
+                        let d = hypot(point.x - sample.x, point.y - sample.y)
+                        if best == nil || d < best!.distance {
+                            best = (ringIndex, d)
+                        }
+                    }
+                }
+                if let best, best.distance < 16, best.ring < 3,
+                   engine.beginTransform(index: index) {
+                    let q = simd_quatf(ix: item.rotation.x, iy: item.rotation.y,
+                                       iz: item.rotation.z, r: item.rotation.w)
+                    let axis = q.act([SIMD3<Float>(1, 0, 0), SIMD3(0, 1, 0),
+                                      SIMD3(0, 0, 1)][best.ring])
+                    let u = simd_normalize(simd_cross(axis, abs(axis.y) < 0.9
+                                                      ? SIMD3(0, 1, 0) : SIMD3(1, 0, 0)))
+                    let w = simd_cross(axis, u)
+                    let pivot = item.position
+                    var startAngle: Float = 0
+                    if let ray = ray(through: point),
+                       let hit = intersect(ray: ray, plane: (pivot, axis)) {
+                        let v = hit - pivot
+                        startAngle = atan2(simd_dot(v, w), simd_dot(v, u))
+                    }
+                    gizmoDrag = .axisRotate(axis: axis, startRotation: item.rotation,
+                                            pivot: pivot, u: u, w: w,
+                                            startAngle: startAngle, lastSnap: 0)
+                    return
+                }
+            }
+
             if near(layout.scaleHandle), engine.beginTransform(index: index) {
                 gizmoDrag = .scale(startScale: item.scale == 0 ? 1 : item.scale,
                                    startDistance: max(hypot(point.x - layout.center.x,
@@ -577,7 +728,53 @@ extension ViewportState: PencilToolSink {
         if let drag = gizmoDrag, let index = selectedIndex,
            engine.items.indices.contains(index) {
             let item = engine.items[index]
+            func scalar(along dir: CGPoint, center: CGPoint) -> CGFloat {
+                (point.x - center.x) * dir.x + (point.y - center.y) * dir.y
+            }
             switch drag {
+            case .axisTranslate(let axis, let startPosition, let screenDir,
+                                let pixelsPerUnit, let startScalar):
+                guard let layout = gizmoLayout else { break }
+                let delta = scalar(along: screenDir, center: layout.center) - startScalar
+                engine.updateTransform(position: startPosition
+                                        + axis * Float(delta / pixelsPerUnit),
+                                       rotation: item.rotation, scale: item.scale)
+            case .axisRotate(let axis, let startRotation, let pivot,
+                             let u, let w, let startAngle, let lastSnap):
+                guard let ray = ray(through: point),
+                      let hit = intersect(ray: ray, plane: (pivot, axis)) else { break }
+                let v = hit - pivot
+                var delta = atan2(simd_dot(v, w), simd_dot(v, u)) - startAngle
+                if delta > .pi { delta -= 2 * .pi }
+                if delta < -.pi { delta += 2 * .pi }
+                let steps = delta / Self.rotationSnapStep
+                let nearest = steps.rounded()
+                if abs(steps - nearest) < 0.22 {
+                    delta = nearest * Self.rotationSnapStep
+                    if Int(nearest) != lastSnap {
+                        emitHaptic(.alignment, at: point)
+                        gizmoDrag = .axisRotate(axis: axis, startRotation: startRotation,
+                                                pivot: pivot, u: u, w: w,
+                                                startAngle: startAngle,
+                                                lastSnap: Int(nearest))
+                    }
+                }
+                let start = simd_quatf(ix: startRotation.x, iy: startRotation.y,
+                                       iz: startRotation.z, r: startRotation.w)
+                let spin = simd_quatf(angle: delta, axis: axis)
+                let combined = (spin * start).normalized
+                engine.updateTransform(position: item.position,
+                                       rotation: SIMD4(combined.imag.x, combined.imag.y,
+                                                       combined.imag.z, combined.real),
+                                       scale: item.scale)
+            case .axisScale(let colorIndex, let startParams, _,
+                            let screenDir, let startScalar):
+                guard let layout = gizmoLayout else { break }
+                let delta = scalar(along: screenDir, center: layout.center) - startScalar
+                let factor = Float(max(0.1, 1 + delta / 120))
+                engine.updateParamEdit(
+                    params: Self.scaledParams(prim: item.prim, start: startParams,
+                                              axis: colorIndex, factor: factor))
             case .scale(let startScale, let startDistance, let center):
                 let distance = max(hypot(point.x - center.x, point.y - center.y), 10)
                 let scale = min(max(startScale * Float(distance / startDistance), 0.2), 5)
@@ -674,6 +871,9 @@ extension ViewportState: PencilToolSink {
         gizmoDrag = nil
         shapePreview = nil
         engine.endVoxelEdits() // commit a cancelled voxel drag's step
+        if engine.isEditingParams {
+            engine.endParamEdit() // commit the drag so far
+        }
         if engine.isTransforming {
             engine.endTransform() // commit the drag so far
         } else {
@@ -693,6 +893,12 @@ extension ViewportState: PencilToolSink {
             _ = start // the preview followed the pencil; place where it shows
             placeShape(at: point)
             shapePreview = nil
+            return
+        }
+        if engine.isEditingParams {
+            engine.endParamEdit()
+            emitHaptic(.completed, at: point)
+            gizmoDrag = nil
             return
         }
         if engine.isTransforming {
@@ -721,6 +927,28 @@ extension ViewportState: PencilToolSink {
         }
         strokePlane = nil
         lastStrokePoint = nil
+    }
+
+    /// Per-axis parameter scaling: which clay_prim params a local axis
+    /// drives, per kind. Kinds with radial symmetry share X/Z.
+    static func scaledParams(prim: Int32, start: SIMD4<Float>,
+                             axis: Int, factor: Float) -> [Float] {
+        var p = [start.x, start.y, start.z, start.w]
+        func scale(_ indices: [Int]) {
+            for i in indices { p[i] = start[i] * factor }
+        }
+        switch clay_prim(UInt32(max(prim, 0))) {
+        case CLAY_PRIM_SPHERE: scale([0])
+        case CLAY_PRIM_BOX, CLAY_PRIM_ROUND_BOX, CLAY_PRIM_ELLIPSOID:
+            scale([axis])
+        case CLAY_PRIM_CAPPED_CYLINDER: scale(axis == 1 ? [1] : [0]) // r h
+        case CLAY_PRIM_CAPPED_CONE: scale(axis == 1 ? [0] : [1, 2])  // h r1 r2
+        case CLAY_PRIM_TORUS: scale(axis == 1 ? [1] : [0])           // R r
+        case CLAY_PRIM_ROUND_CONE: scale(axis == 1 ? [2] : [0, 1])   // r1 r2 h
+        case CLAY_PRIM_HEX_PRISM: scale(axis == 2 ? [1] : [0])       // hx hy
+        default: break
+        }
+        return Array(p.prefix(max(ClayEngine.paramCount(forPrim: prim), 1)))
     }
 
     /// Where a shape-tool press would land, or nil (carve ops off-surface).

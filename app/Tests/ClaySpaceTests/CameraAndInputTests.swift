@@ -350,26 +350,119 @@ final class CameraAndInputTests: XCTestCase {
         return state.selectedIndex
     }
 
-    func testGizmoLayoutFollowsSelectionAndTool() {
+    func testGizmoLayoutFollowsSelectionToolAndMode() {
         let state = ViewportState()
         state.viewportSize = CGSize(width: 800, height: 600)
         XCTAssertNil(state.gizmoLayout, "no selection, no gizmo")
 
         XCTAssertNotNil(selectSeededBall(state))
-        let layout = state.gizmoLayout
-        XCTAssertNotNil(layout, "selection + select tool shows the gizmo")
-        if let layout {
-            let scaleDist = hypot(layout.scaleHandle.x - layout.center.x,
-                                  layout.scaleHandle.y - layout.center.y)
-            XCTAssertEqual(scaleDist, layout.ringRadius, accuracy: 0.5,
-                           "handles sit on the ring")
-        }
+        // Move mode (default): axis arrows, no ring handles.
+        var layout = state.gizmoLayout
+        XCTAssertEqual(layout?.mode, .move)
+        XCTAssertGreaterThanOrEqual(layout?.axes.count ?? 0, 2,
+                                    "local axes projected (one may face the camera)")
+        XCTAssertNil(layout?.scaleHandle)
+        XCTAssertNil(layout?.rotateHandle)
+
+        state.gizmoMode = .rotate
+        layout = state.gizmoLayout
+        XCTAssertEqual(layout?.rings.count, 3, "three local-axis rings")
+        XCTAssertNotNil(layout?.rotateHandle)
+
+        state.gizmoMode = .scale
+        layout = state.gizmoLayout
+        XCTAssertNotNil(layout?.scaleHandle)
+        XCTAssertGreaterThanOrEqual(layout?.axes.count ?? 0, 2, "per-axis cubes")
+
         // The gizmo follows the SELECTION, not the tool — an edit-list
         // selection shows handles under sculpt/shape too.
         state.activate(.sculpt, announce: false)
         XCTAssertNotNil(state.gizmoLayout, "selection keeps its handles under any tool")
         state.selectedIndex = nil
         XCTAssertNil(state.gizmoLayout, "no selection, no gizmo")
+    }
+
+    func testAxisArrowTranslatesAlongThatAxisOnly() throws {
+        let state = ViewportState()
+        state.viewportSize = CGSize(width: 800, height: 600)
+        let index = try XCTUnwrap(selectSeededBall(state))
+        let layout = try XCTUnwrap(state.gizmoLayout)
+        let yAxis = try XCTUnwrap(layout.axes.first { $0.colorIndex == 1 })
+        let before = state.engine.items[index].position
+
+        state.pencilBegan(at: yAxis.tip, pressure: 0.5)
+        let dragged = CGPoint(x: yAxis.tip.x + yAxis.screenDir.x * 60,
+                              y: yAxis.tip.y + yAxis.screenDir.y * 60)
+        state.pencilMoved(to: dragged, pressure: 0.5)
+        let after = state.engine.items[index].position
+        XCTAssertGreaterThan(abs(after.y - before.y), 0.15, "moved along local Y")
+        XCTAssertEqual(after.x, before.x, accuracy: 0.02, "X untouched")
+        XCTAssertEqual(after.z, before.z, accuracy: 0.02, "Z untouched")
+        state.pencilEnded(at: dragged)
+
+        state.requestUndo()
+        XCTAssertEqual(simd_distance(state.engine.items[index].position, before), 0,
+                       accuracy: 1e-4, "axis drag is one undo step")
+    }
+
+    func testRotationRingSpinsAboutItsLocalAxis() throws {
+        let state = ViewportState()
+        state.viewportSize = CGSize(width: 800, height: 600)
+        let index = try XCTUnwrap(selectSeededBall(state))
+        state.gizmoMode = .rotate
+        let layout = try XCTUnwrap(state.gizmoLayout)
+        let ring = layout.rings[1] // local Y
+        let grab = try XCTUnwrap(ring.first)
+        let along = ring[min(6, ring.count - 1)]
+
+        state.pencilBegan(at: grab, pressure: 0.5)
+        state.pencilMoved(to: along, pressure: 0.5)
+        let rotation = state.engine.items[index].rotation
+        let quat = simd_quatf(ix: rotation.x, iy: rotation.y, iz: rotation.z, r: rotation.w)
+        XCTAssertGreaterThan(abs(quat.angle), 0.05, "the ring drag rotated")
+        XCTAssertGreaterThan(abs(simd_dot(quat.axis, SIMD3(0, 1, 0))), 0.95,
+                             "about the ring's own axis")
+        state.pencilEnded(at: along)
+    }
+
+    func testPerAxisScaleEditsPrimitiveParams() throws {
+        let state = ViewportState()
+        state.viewportSize = CGSize(width: 800, height: 600)
+        // A box floats beside the seed; pick it with Select.
+        _ = state.engine.addPrimitive(CLAY_PRIM_ROUND_BOX,
+                                      params: [0.3, 0.3, 0.3, 0.05],
+                                      at: SIMD3(1.4, 1.0, 0), op: CLAY_OP_ADD,
+                                      blendK: 0, color: ClayEngine.clayColor)
+        state.activate(.select, announce: false)
+        let over = try XCTUnwrap(state.screenPoint(for: SIMD3(1.4, 1.0, 0.3)))
+        state.pencilBegan(at: over, pressure: 0.5)
+        state.pencilEnded(at: over)
+        let index = try XCTUnwrap(state.selectedIndex)
+        XCTAssertEqual(state.engine.items[index].prim,
+                       Int32(CLAY_PRIM_ROUND_BOX.rawValue))
+
+        state.gizmoMode = .scale
+        let layout = try XCTUnwrap(state.gizmoLayout)
+        let yAxis = try XCTUnwrap(layout.axes.first { $0.colorIndex == 1 })
+        let before = state.engine.items[index].params
+
+        state.pencilBegan(at: yAxis.tip, pressure: 0.5)
+        let outward = CGPoint(x: yAxis.tip.x + yAxis.screenDir.x * 90,
+                              y: yAxis.tip.y + yAxis.screenDir.y * 90)
+        state.pencilMoved(to: outward, pressure: 0.5)
+        let during = state.engine.items[index].params
+        XCTAssertGreaterThan(during.y, before.y * 1.2, "Y extent grew")
+        XCTAssertEqual(during.x, before.x, accuracy: 1e-4, "X extent untouched")
+        XCTAssertEqual(during.w, before.w, accuracy: 1e-4, "corner radius untouched")
+        state.pencilEnded(at: outward)
+
+        // One undo step returns the params (and the bound with them).
+        state.requestUndo()
+        let restored = state.engine.items[index].params
+        XCTAssertEqual(restored.y, before.y, accuracy: 1e-4)
+        state.requestRedo()
+        XCTAssertEqual(state.engine.items[index].params.y, during.y, accuracy: 1e-4,
+                       "redo replays the resize")
     }
 
     func testCenterHandleMovesSelectionUnderAnyTool() throws {
@@ -429,12 +522,14 @@ final class CameraAndInputTests: XCTestCase {
         let state = ViewportState()
         state.viewportSize = CGSize(width: 800, height: 600)
         let index = try XCTUnwrap(selectSeededBall(state))
+        state.gizmoMode = .scale
         let layout = try XCTUnwrap(state.gizmoLayout)
+        let scaleHandle = try XCTUnwrap(layout.scaleHandle)
 
-        state.pencilBegan(at: layout.scaleHandle, pressure: 0.5)
+        state.pencilBegan(at: scaleHandle, pressure: 0.5)
         let outward = CGPoint(
-            x: layout.center.x + (layout.scaleHandle.x - layout.center.x) * 1.5,
-            y: layout.center.y + (layout.scaleHandle.y - layout.center.y) * 1.5)
+            x: layout.center.x + (scaleHandle.x - layout.center.x) * 1.5,
+            y: layout.center.y + (scaleHandle.y - layout.center.y) * 1.5)
         state.pencilMoved(to: outward, pressure: 0.5)
         XCTAssertEqual(state.engine.items[index].scale, 1.5, accuracy: 0.05,
                        "ring-distance ratio drives uniform scale")
@@ -457,8 +552,9 @@ final class CameraAndInputTests: XCTestCase {
 
         let index = try XCTUnwrap(selectSeededBall(state))
         haptics = []
+        state.gizmoMode = .rotate
         let layout = try XCTUnwrap(state.gizmoLayout)
-        state.pencilBegan(at: layout.rotateHandle, pressure: 0.5)
+        state.pencilBegan(at: try XCTUnwrap(layout.rotateHandle), pressure: 0.5)
 
         // 14° around the ring: inside the snap window, latches to 15°.
         let angle = CGFloat(-Double.pi / 2 + 14 * Double.pi / 180)
