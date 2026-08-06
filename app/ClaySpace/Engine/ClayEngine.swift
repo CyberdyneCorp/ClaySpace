@@ -101,7 +101,7 @@ final class ClayEngine {
     private(set) var sdfLayers: [SdfLayer] = []
     private(set) var activeLayerSlot = 0
     /// Owning layer slot per mirror item, parallel to `items`.
-    private(set) var itemLayers: [Int32] = []
+    @ObservationIgnored private(set) var itemLayers: [Int32] = []
 
     /// Bit i set = slot i visible (shader visibility mask).
     var layerVisibilityMask: UInt32 {
@@ -126,26 +126,41 @@ final class ClayEngine {
     }
 
     /// Render mirror of the SDF edit list, in document order.
-    private(set) var items: [SceneItem] = []
+    @ObservationIgnored private(set) var items: [SceneItem] = []
     /// Stroke point pool (xyz, radius) referenced by stroke items via
     /// params = (firstIndex, count, chainBlendK, –). Points of the most
     /// recently added stroke are always at the tail, so LIFO undo can trim.
-    private(set) var strokePoints: [SIMD4<Float>] = []
+    @ObservationIgnored private(set) var strokePoints: [SIMD4<Float>] = []
     /// Bumped on every scene change; the renderer re-uploads on change.
-    private(set) var version: Int = 0
+    @ObservationIgnored private(set) var version: Int = 0
+
+    /// Observable commit counter for SwiftUI. The hot mirror above is
+    /// @ObservationIgnored so a 120 Hz stroke append cannot invalidate
+    /// every view per point (the renderer polls `version` directly);
+    /// views read through the ui* accessors, which register on this and
+    /// bump once per committed edit.
+    private(set) var uiVersion = 0
+    private func commit() {
+        version += 1
+        uiVersion += 1
+    }
+
+    /// UI-facing reads: registering on uiVersion, returning hot storage.
+    var uiItems: [SceneItem] { _ = uiVersion; return items }
+    var uiItemCount: Int { _ = uiVersion; return items.count }
 
     static let strokePrim = Int32(CLAY_PRIM_STROKE.rawValue)
     static let maxPointsPerStroke = 64
     static let maxStrokePoints = 4096
 
     /// Tight per-item AABBs (bake-grid bounds; tighter than the spheres).
-    private(set) var itemAABBs: [(min: SIMD3<Float>, max: SIMD3<Float>)] = []
+    @ObservationIgnored private(set) var itemAABBs: [(min: SIMD3<Float>, max: SIMD3<Float>)] = []
     /// ClayCore node ids parallel to `items` — the handle for editing and
     /// attributed picking.
-    private(set) var nodeIDs: [clay_node_id] = []
+    @ObservationIgnored private(set) var nodeIDs: [clay_node_id] = []
     /// Item-local bounding sphere (relative to the item's origin, unscaled),
     /// so world bounds can be recomputed after transforms.
-    private var localBounds: [(center: SIMD3<Float>, radius: Float)] = []
+    @ObservationIgnored private var localBounds: [(center: SIMD3<Float>, radius: Float)] = []
 
     /// A snapshot of everything a transform changes, for undo mirroring.
     struct Placement {
@@ -291,7 +306,7 @@ final class ClayEngine {
         if sdfLayers.indices.contains(activeLayerSlot) {
             sdfLayers[activeLayerSlot].radialCount = radialCount
         }
-        version += 1
+        commit()
     }
 
     /// Circumscribe an AABB's ring sweep about the world Y axis.
@@ -341,7 +356,7 @@ final class ClayEngine {
     func setMaterialPreset(_ preset: MaterialPreset) {
         guard preset != materialPreset else { return }
         materialPreset = preset
-        version += 1 // redraw + autosave ride the version bump
+        commit() // redraw + autosave ride the version bump
         scheduleAutosave()
     }
 
@@ -359,7 +374,7 @@ final class ClayEngine {
         if sdfLayers.indices.contains(activeLayerSlot) {
             sdfLayers[activeLayerSlot].mirrorAxes = axes
         }
-        version += 1
+        commit()
         scheduleBake()
     }
 
@@ -465,7 +480,7 @@ final class ClayEngine {
             itemLayers.append(Int32(activeLayerSlot))
             undoLog.append(.add)
             redoOps.removeAll()
-            version += 1
+            commit()
             scheduleBake()
         }
         return true
@@ -561,7 +576,7 @@ final class ClayEngine {
         itemLayers.append(Int32(activeLayerSlot))
         undoLog.append(.add)
         redoOps.removeAll()
-        version += 1
+        commit()
         return true
     }
 
@@ -592,13 +607,14 @@ final class ClayEngine {
         items[items.count - 1].boundRadius = bound.1
         itemAABBs[itemAABBs.count - 1] = aabb
         localBounds[localBounds.count - 1] = (bound.0, bound.1)
-        version += 1
+        version += 1 // per-point: renderer only, no UI churn
     }
 
     func endStroke() {
         guard let doc, activeStroke != nil else { return }
         _ = check(clay_document_end_undo_group(doc))
         activeStroke = nil
+        commit() // the UI sees the finished stroke (appends were render-only)
         scheduleBake()
     }
 
@@ -690,7 +706,7 @@ final class ClayEngine {
                                     node: node, localBound: local, slot: slot))
             }
         }
-        version += 1
+        commit()
         invalidateCacheIfNeeded()
         return true
     }
@@ -758,7 +774,7 @@ final class ClayEngine {
         case .none:
             break
         }
-        version += 1
+        commit()
         scheduleBake()
         return true
     }
@@ -873,7 +889,7 @@ final class ClayEngine {
         items[index].boundCenter = bound.0
         items[index].boundRadius = bound.1
         itemAABBs[index] = aabb
-        version += 1
+        commit()
     }
 
     /// Closes the session; a drag that moved logs as ONE undo step.
@@ -942,7 +958,7 @@ final class ClayEngine {
                                             style.blendK, style.rounding))
         else { return false }
         replayStyleMirror(style, at: index)
-        version += 1
+        commit()
         return true
     }
 
@@ -990,7 +1006,7 @@ final class ClayEngine {
                                                  flat, count, nil, nil, nil, 0, 0.001))
         else { return false }
         replayRadiiMirror(radii, at: index)
-        version += 1
+        commit()
         return true
     }
 
@@ -1029,7 +1045,7 @@ final class ClayEngine {
         undoLog.append(entry)
         redoOps.removeAll()
         dropCacheIfCovers(index)
-        version += 1
+        commit()
         scheduleBake()
         return true
     }
@@ -1077,7 +1093,7 @@ final class ClayEngine {
         layer = sdfLayers[slot].id
         mirrorAxes = sdfLayers[slot].mirrorAxes
         radialCount = sdfLayers[slot].radialCount
-        version += 1
+        commit()
     }
 
     /// Show/hide a layer — an undoable document command; the bake follows
@@ -1095,7 +1111,7 @@ final class ClayEngine {
         redoOps.removeAll()
         fieldCache = nil
         fieldCacheVersion += 1
-        version += 1
+        commit()
         scheduleBake()
         return true
     }
@@ -1143,7 +1159,7 @@ final class ClayEngine {
         }
         fieldCache = nil
         fieldCacheVersion += 1
-        version += 1
+        commit()
         scheduleBake()
         return rows
     }
@@ -1165,7 +1181,7 @@ final class ClayEngine {
         if activeLayerSlot >= slot { activateLayer(slot: activeLayerSlot) }
         fieldCache = nil
         fieldCacheVersion += 1
-        version += 1
+        commit()
         scheduleBake()
     }
 
@@ -1176,13 +1192,13 @@ final class ClayEngine {
         localBounds.insert(localBounds.remove(at: from), at: to)
         itemLayers.insert(itemLayers.remove(at: from), at: to)
         dropCacheIfCovers(min(from, to))
-        version += 1
+        commit()
     }
 
     // MARK: Field cache (baked rendering, design D2 / task 3.1 first stage)
 
-    private(set) var fieldCache: FieldCache?
-    private(set) var fieldCacheVersion = 0
+    @ObservationIgnored private(set) var fieldCache: FieldCache?
+    @ObservationIgnored private(set) var fieldCacheVersion = 0
     private var bakeTask: Task<Void, Never>?
 
     /// Debounced rebake after committed edits. The bake runs on a background
@@ -1224,7 +1240,7 @@ final class ClayEngine {
         cache.bakedItemCount = itemCount
         fieldCache = cache
         fieldCacheVersion += 1
-        version += 1 // wake the renderer
+        commit() // wake the renderer
     }
 
     /// Drops the cache when the edit list shrinks below the bake point
@@ -1272,22 +1288,34 @@ final class ClayEngine {
     /// World units per voxel cell.
     static let voxelSize: Float = 0.12
     /// Greedy mesh of the grid, rebuilt after edits (world-space floats).
-    private(set) var voxelPositions: [Float] = []
-    private(set) var voxelNormals: [Float] = []
-    private(set) var voxelColors: [Float] = []
-    private(set) var voxelIndices: [UInt32] = []
-    private(set) var voxelMeshVersion = 0
+    @ObservationIgnored private(set) var voxelPositions: [Float] = []
+    @ObservationIgnored private(set) var voxelNormals: [Float] = []
+    @ObservationIgnored private(set) var voxelColors: [Float] = []
+    @ObservationIgnored private(set) var voxelIndices: [UInt32] = []
+    @ObservationIgnored private(set) var voxelMeshVersion = 0
     private var paletteIndexByColor: [String: Int32] = [:]
 
     var hasVoxels: Bool { !voxelIndices.isEmpty }
 
-    /// ClayCore >= 0.20 journals voxel edits into the undo history
-    /// (openspec add-voxel-undo); older libraries leave them direct, and
-    /// the app then neither brackets nor logs them.
+    /// Whether the linked ClayCore journals voxel edits into the undo
+    /// history (openspec add-voxel-undo). Probed by behavior, not version
+    /// number — version numbering races with parallel ClayCore work (0.20
+    /// shipped without the journal), and a wrong gate silently desyncs the
+    /// op-log. The probe stamps a scratch document and asks the journal.
     static let voxelUndoAvailable: Bool = {
-        var major: Int32 = 0, minor: Int32 = 0, patch: Int32 = 0
-        clay_version(&major, &minor, &patch)
-        return major > 0 || minor >= 20
+        guard let doc = clay_document_create() else { return false }
+        defer { clay_document_destroy(doc) }
+        var layer: clay_layer_id = 0
+        var grid: OpaquePointer?
+        guard clay_document_add_voxel_layer(doc, "probe", 0.1, &layer, &grid) == CLAY_OK,
+              grid != nil,
+              clay_document_enable_undo(doc) == CLAY_OK else { return false }
+        var index: Int32 = 0
+        guard clay_voxel_palette_add(grid, [1, 1, 1], &index) == CLAY_OK else { return false }
+        _ = clay_voxel_set(grid, [0, 0, 0], index)
+        var depth: size_t = 0
+        _ = clay_document_undo_state(doc, nil, &depth, nil)
+        return depth > 0
     }()
 
     private var voxelSessionOpen = false
@@ -1401,7 +1429,7 @@ final class ClayEngine {
             }
         }
         rebuildVoxelMesh()
-        version += 1
+        commit()
         scheduleAutosave()
     }
 
@@ -1498,7 +1526,7 @@ final class ClayEngine {
         }
         endVoxelEdits()
         rebuildVoxelMesh()
-        version += 1
+        commit()
         scheduleAutosave()
         return OBJImportStats(triangles: triangles.count, cells: cells.count,
                               truncated: truncated)
@@ -1530,6 +1558,7 @@ final class ClayEngine {
     }
 
     var voxelCount: Int {
+        _ = uiVersion // registers list/inspector updates at commit granularity
         guard let voxelGrid else { return 0 }
         var count: size_t = 0
         _ = clay_voxel_occupied_count(voxelGrid, &count)
@@ -1577,7 +1606,7 @@ final class ClayEngine {
         items[index].color = color
         undoLog.append(.recolor(index: index, before: before, after: color))
         redoOps.removeAll()
-        version += 1
+        commit()
         scheduleBake()
         return true
     }
@@ -2008,7 +2037,7 @@ final class ClayEngine {
     private(set) var lastSavedVersion = -1
     private(set) var lastSavedAt: Date?
     private var autosaveTask: Task<Void, Never>?
-    var isDirty: Bool { version != lastSavedVersion }
+    var isDirty: Bool { _ = uiVersion; return version != lastSavedVersion }
 
     private static let mirrorMagic: UInt32 = 0x4353_4D52 // "CSMR"
     /// Format 2 appended the material preset; format 3 adds the layer
@@ -2077,6 +2106,7 @@ final class ClayEngine {
         }
         lastSavedVersion = version
         lastSavedAt = Date()
+        uiVersion += 1 // saved/edited indicator flips
         return true
     }
 
@@ -2206,7 +2236,7 @@ final class ClayEngine {
             voxelPositions = []; voxelNormals = []; voxelColors = []; voxelIndices = []
             voxelMeshVersion += 1
         }
-        version += 1
+        commit()
         lastSavedVersion = version
         lastSavedAt = Date()
         scheduleBake(debounceMilliseconds: 10)
@@ -2278,7 +2308,7 @@ final class ClayEngine {
                      at: SIMD3(0, 0.8, 0), op: CLAY_OP_ADD,
                      blendK: 0, color: Self.clayColor, recordMirror: true)
         _ = check(clay_document_enable_undo(doc))
-        version += 1
+        commit()
     }
 
     /// Saves the current document, then starts a fresh one under a unique

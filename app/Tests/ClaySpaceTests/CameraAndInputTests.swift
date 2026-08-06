@@ -268,6 +268,32 @@ final class CameraAndInputTests: XCTestCase {
         state.pencilEnded(at: center)
     }
 
+    func testHoverThrottleSkipsSubpixelJitterButTracksRealMoves() {
+        let state = ViewportState()
+        state.viewportSize = CGSize(width: 800, height: 600)
+        state.activate(.sculpt, announce: false)
+        let center = CGPoint(x: 400, y: 300)
+
+        state.pencilHovered(at: center, altitude: .pi / 2)
+        let ghost = state.hoverGhost
+        XCTAssertNotNil(ghost)
+
+        // A 1-pt jitter is coalesced: the ghost stays put (no re-raycast).
+        state.pencilHovered(at: CGPoint(x: 401, y: 300), altitude: .pi / 2)
+        XCTAssertEqual(state.hoverGhost, ghost, "sub-3pt jitter is coalesced")
+
+        // A real move updates.
+        state.pencilHovered(at: CGPoint(x: 440, y: 300), altitude: .pi / 2)
+        XCTAssertNotEqual(state.hoverGhost?.center, ghost?.center)
+
+        // Hover end resets the throttle: the next hover at the same point
+        // recomputes rather than being swallowed.
+        state.pencilHoverEnded()
+        XCTAssertNil(state.hoverGhost)
+        state.pencilHovered(at: CGPoint(x: 440, y: 300), altitude: .pi / 2)
+        XCTAssertNotNil(state.hoverGhost)
+    }
+
     func testScreenPointInvertsRay() {
         let state = ViewportState()
         state.viewportSize = CGSize(width: 800, height: 600)

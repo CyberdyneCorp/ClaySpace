@@ -101,12 +101,13 @@ final class ViewportState {
     /// mode). Display comes from ContentView; interaction routes through
     /// the pencil sink so touches can never leak into sculpting.
     var gizmoLayout: GizmoLayout? {
+        let items = engine.uiItems // registers observation for the overlay
         guard mode == .sdf, activeTool == .select || activeTool == .move,
-              let index = selectedIndex, engine.items.indices.contains(index),
-              let center = screenPoint(for: engine.items[index].boundCenter)
+              let index = selectedIndex, items.indices.contains(index),
+              let center = screenPoint(for: items[index].boundCenter)
         else { return nil }
-        let edge = screenPoint(for: engine.items[index].boundCenter
-                               + camera.basis.right * engine.items[index].boundRadius)
+        let edge = screenPoint(for: items[index].boundCenter
+                               + camera.basis.right * items[index].boundRadius)
         let projected = edge.map { hypot($0.x - center.x, $0.y - center.y) } ?? 60
         let ring = min(max(projected + 14, 44), 170)
         func onRing(_ angle: CGFloat) -> CGPoint {
@@ -135,6 +136,9 @@ final class ViewportState {
     }
     /// Brush footprint under a hovering Pencil (M2+ iPads); nil = hidden.
     var hoverGhost: HoverGhost?
+    @ObservationIgnored fileprivate var lastHoverPoint: CGPoint?
+    @ObservationIgnored fileprivate var lastHoverTool: Tool = .sculpt
+    @ObservationIgnored fileprivate var lastHoverMode: EditorMode = .sdf
 
     enum HapticEvent { case alignment, completed }
     /// Set by the viewport view — the canvas generator anchors to a UIView.
@@ -721,6 +725,15 @@ extension ViewportState: PencilToolSink {
     // MARK: Hover preview (task 5.3)
 
     func pencilHovered(at point: CGPoint, altitude: Float) {
+        // Hover streams at Pencil rate; a raycast per sub-3pt jitter is
+        // wasted work the eye can't see. Tool/mode switches reset the
+        // throttle — the ghost's meaning changed even if the point didn't.
+        if let last = lastHoverPoint, hoverGhost != nil,
+           lastHoverTool == activeTool, lastHoverMode == mode,
+           hypot(point.x - last.x, point.y - last.y) < 3 { return }
+        lastHoverPoint = point
+        lastHoverTool = activeTool
+        lastHoverMode = mode
         guard let ray = ray(through: point) else { hoverGhost = nil; return }
         if mode == .voxel {
             guard activeTool == .sculpt || activeTool == .erase || activeTool == .paint,
@@ -758,6 +771,7 @@ extension ViewportState: PencilToolSink {
 
     func pencilHoverEnded() {
         hoverGhost = nil
+        lastHoverPoint = nil
     }
 
     private func ghost(at world: SIMD3<Float>, worldRadius: Float,

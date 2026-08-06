@@ -342,7 +342,8 @@ final class MetalViewportView: UIView {
                        camera: camera,
                        engine: state.engine,
                        selectedIndex: selection,
-                       lightDir: state.lightDirection)
+                       lightDir: state.lightDirection,
+                       fullQuality: activeTouchCount == 0)
     }
 }
 

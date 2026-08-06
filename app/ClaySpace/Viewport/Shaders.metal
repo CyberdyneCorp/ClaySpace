@@ -23,7 +23,7 @@ struct Uniforms {
     float4 gridScale;     // xyz = dims/maxResolution (texture sub-region)
     float4 lightDir;      // xyz normalized light direction (light dial)
     float4 material;      // x spec strength, y shininess, z metalness
-    uint4 layerBits;      // x visibility mask, y mirror axes (4b/slot), z count
+    uint4 layerBits;      // x vis mask, y mirror (4b/slot), z count, w quality
 };
 
 // Must match SceneItem in ClayEngine.swift (80 bytes).
@@ -640,7 +640,10 @@ fragment FragOut raymarch_fragment(VertexOut in [[stage_in]],
             // the light dial (task 4.2)
             float clearance = mapDist(gp, ctx);
             float contact = 1.0 - 0.25 * exp(-2.2 * max(clearance, 0.0));
-            float sun = mix(0.55, 1.0, softShadow(gp + float3(0.0, 0.02, 0.0), l, ctx));
+            // While a touch is down the frame already renders at reduced
+            // resolution; the shadow marches go with it (w = 0).
+            float sun = u.layerBits.w == 0 ? 1.0
+                : mix(0.55, 1.0, softShadow(gp + float3(0.0, 0.02, 0.0), l, ctx));
             // fade at the edge of the build area
             float edge = smoothstep(6.0, 4.6, max(abs(gp.x), abs(gp.z)));
             color = mix(color, ground * contact * sun, edge);
@@ -652,7 +655,7 @@ fragment FragOut raymarch_fragment(VertexOut in [[stage_in]],
         float3 n = calcNormal(p, ctx);
         float3 albedo = mapShade(p, ctx).rgb;
         float ao = calcAO(p, n, ctx);
-        float shadow = softShadow(p + n * 0.02, l, ctx);
+        float shadow = u.layerBits.w == 0 ? 1.0 : softShadow(p + n * 0.02, l, ctx);
         float diffuse = saturate(dot(n, l)) * shadow;
         float rim = pow(1.0 - saturate(dot(n, -rd)), 3.0);
 

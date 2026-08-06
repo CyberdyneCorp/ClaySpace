@@ -25,7 +25,7 @@ struct EditListPanel: View {
                     .foregroundStyle(.tertiary)
             }
             List {
-                ForEach(Array(state.engine.items.enumerated()), id: \.offset) { index, item in
+                ForEach(Array(state.engine.uiItems.enumerated()), id: \.offset) { index, item in
                     row(index: index, item: item)
                         .listRowInsets(EdgeInsets(top: 4, leading: 6, bottom: 4, trailing: 6))
                         .listRowBackground(
@@ -57,7 +57,7 @@ struct EditListPanel: View {
             .accessibilityIdentifier("editList")
 
             if let index = state.selectedIndex,
-               state.engine.items.indices.contains(index) {
+               state.engine.uiItems.indices.contains(index) {
                 selectionEditor(index: index)
             }
         }
@@ -87,7 +87,7 @@ struct EditListPanel: View {
     @ViewBuilder
     private func selectionEditor(index: Int) -> some View {
         let engine = state.engine
-        let item = engine.items[index]
+        let item = engine.uiItems[index]
         VStack(alignment: .leading, spacing: 8) {
             Divider()
             Text("Shape \(index)")

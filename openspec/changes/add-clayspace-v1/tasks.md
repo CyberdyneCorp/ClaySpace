@@ -37,7 +37,7 @@
 - [ ] 4.3 Voxel layer renderer: greedy meshing + raster pass, depth-composited with the raymarch pass
 - [x] 4.4 Camera system: orbit/pan/zoom/roll, perspective/ortho + presets, orientation widget, zoom-to-selection, camera bookmarks — `OrbitCamera` + Blender-style `NavigationGizmo` (axis balls snap views, center cube = Home) with tappable persp/ortho readout; zoom-to-selection deferred to 4.5. NOTE: bookmark save/recall lives in `ViewportState` but its UI was removed by design review — the viewport-rendering spec requires ≥4 bookmarks, so give them a new surface (e.g. gizmo long-press or a view menu) or amend the spec before archiving
 - [x] 4.5 Selection highlight incl. occluded X-ray hint; on-canvas status/hints/toasts; zoom-to-selection — X-ray: the selected item's own analytic field is marched per pixel and its silhouette tints through occluding clay; zoom-to-selection: Frame button in the edit panel animates the camera to the selection's bound; toasts shipped earlier
-- [ ] 4.6 Performance pass to spec targets (60/120 fps, ≤1-frame stroke preview, ≤250 ms refinement); MetalFX if needed
+- [ ] 4.6 Performance pass to spec targets (60/120 fps, ≤1-frame stroke preview, ≤250 ms refinement); MetalFX if needed — IN PROGRESS: app-side pass shipped (SwiftUI observation decoupled from the 120 Hz stroke path via @ObservationIgnored hot mirror + commit-granularity uiVersion; soft-shadow marches skipped while touching, riding the existing dynamic-resolution dial; hover raycasts throttled to 3 pt with tool/mode-aware reset); GPU-side targets await the sparse brick cache (3.1)
 
 ## 5. Input — Pencil & touch
 

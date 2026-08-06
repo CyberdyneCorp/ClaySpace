@@ -86,6 +86,43 @@ final class ClayEngineTests: XCTestCase {
         XCTAssertNotNil(engine.raycast(origin: probe.origin, direction: probe.dir))
     }
 
+    func testStrokeAppendsDoNotChurnTheObservableUI() {
+        // Perf contract: a 120 Hz stroke drag must not invalidate SwiftUI
+        // per point — only commits (begin/end, adds, undo…) may. The
+        // renderer polls `version` directly and still sees every point.
+        let engine = ClayEngine()
+        XCTAssertTrue(engine.beginStroke(at: SIMD3(0, 1.6, 0), radius: 0.15,
+                                         op: CLAY_OP_ADD, blendK: 0.05,
+                                         color: ClayEngine.clayColor))
+
+        final class Flag: @unchecked Sendable { var value = false }
+        let uiFired = Flag() // onChange fires synchronously on the mutator
+        withObservationTracking {
+            _ = engine.uiItems
+            _ = engine.isDirty
+            _ = engine.uiItemCount
+        } onChange: {
+            uiFired.value = true
+        }
+        let versionBefore = engine.version
+        engine.appendStrokePoint(SIMD3(0.3, 1.6, 0), radius: 0.15)
+        engine.appendStrokePoint(SIMD3(0.6, 1.6, 0), radius: 0.15)
+        XCTAssertGreaterThan(engine.version, versionBefore,
+                             "the renderer still sees every point")
+        XCTAssertFalse(uiFired.value, "appends must not invalidate the UI")
+
+        // The stroke's END is a commit and must reach the UI.
+        withObservationTracking {
+            _ = engine.uiItems
+        } onChange: {
+            uiFired.value = true
+        }
+        engine.endStroke()
+        XCTAssertTrue(uiFired.value, "endStroke commits to the UI")
+        XCTAssertEqual(Int(engine.uiItems.last?.params.y ?? 0), 3,
+                       "the UI snapshot shows the finished chain")
+    }
+
     func testFieldBakeMatchesTheAnalyticField() async throws {
         let engine = ClayEngine()
         engine.addPrimitive(CLAY_PRIM_SPHERE, params: [0.3],
@@ -938,7 +975,11 @@ final class ClayEngineTests: XCTestCase {
         engine.endStroke()
         XCTAssertTrue(engine.isDirty, "edit pending inside the debounce window")
 
-        try await Task.sleep(for: .seconds(2.6)) // let the autosave land
+        // Poll rather than sleep a fixed window: on cold builds the 2 s
+        // debounce can land late and a fixed wait flakes.
+        for _ in 0..<40 where engine.isDirty {
+            try await Task.sleep(for: .milliseconds(150))
+        }
         XCTAssertFalse(engine.isDirty, "autosave fired without an explicit save")
 
         // A "relaunch after crash": restore purely from disk + defaults.

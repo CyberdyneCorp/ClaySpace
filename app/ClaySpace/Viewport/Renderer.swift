@@ -168,7 +168,8 @@ final class Renderer {
 
     func draw(to drawable: CAMetalDrawable, time: Float, camera: OrbitCamera,
               engine: ClayEngine, selectedIndex: Int,
-              lightDir: SIMD3<Float> = simd_normalize(SIMD3(0.5, 0.8, 0.3))) {
+              lightDir: SIMD3<Float> = simd_normalize(SIMD3(0.5, 0.8, 0.3)),
+              fullQuality: Bool = true) {
         let items = engine.items
         let strokePoints = engine.strokePoints
         if engine.version != uploadedVersion {
@@ -252,7 +253,8 @@ final class Renderer {
             material: engine.materialPreset.shadingParams,
             layerBits: SIMD4(engine.layerVisibilityMask,
                              engine.layerMirrorPacked,
-                             UInt32(max(engine.sdfLayers.count, 1)), 0)
+                             UInt32(max(engine.sdfLayers.count, 1)),
+                             fullQuality ? 1 : 0)
         )
 
         encoder.setRenderPipelineState(pipeline)

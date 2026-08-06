@@ -263,7 +263,7 @@ struct ContentView: View {
             HStack {
                 Text("Shapes")
                 Spacer()
-                Text("\(state.engine.items.count)")
+                Text("\(state.engine.uiItemCount)")
                     .accessibilityIdentifier("shapeCount")
             }
             .font(.system(size: 12.5))
