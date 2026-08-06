@@ -140,6 +140,69 @@ final class ClayEngineTests: XCTestCase {
         XCTAssertLessThan(engine.voxelCount, before)
     }
 
+    // MARK: Voxel undo (ClayCore >= 0.20, openspec add-voxel-undo)
+
+    func testVoxelUndoRoundTripSessionsAndInterleaving() throws {
+        try XCTSkipUnless(ClayEngine.voxelUndoAvailable, "needs ClayCore >= 0.20")
+        let engine = ClayEngine()
+        let pink = SIMD3<Float>(1, 0.27, 0.56)
+
+        // A lone stamp is one undo step; redo restores it.
+        engine.voxelStamp(.place, at: SIMD3(6, 0, 6), brushSize: 1, color: pink)
+        XCTAssertEqual(engine.voxelCount, 1)
+        XCTAssertTrue(engine.undo())
+        XCTAssertEqual(engine.voxelCount, 0, "the stamp undid")
+        XCTAssertTrue(engine.redo())
+        XCTAssertEqual(engine.voxelCount, 1)
+
+        // A drag session coalesces into ONE step.
+        engine.beginVoxelEdits()
+        for x in Int32(10)...14 {
+            engine.voxelStamp(.place, at: SIMD3(x, 0, 10), brushSize: 1, color: pink)
+        }
+        engine.endVoxelEdits()
+        XCTAssertEqual(engine.voxelCount, 6)
+        XCTAssertTrue(engine.undo())
+        XCTAssertEqual(engine.voxelCount, 1, "the whole drag was one step")
+
+        // Mirror stamps (multiple ABI brush calls) are still one step.
+        engine.setMirror(axes: 1)
+        engine.voxelStamp(.place, at: SIMD3(8, 0, 8), brushSize: 1, color: pink)
+        engine.setMirror(axes: 0)
+        XCTAssertEqual(engine.voxelCount, 3)
+        XCTAssertTrue(engine.undo())
+        XCTAssertEqual(engine.voxelCount, 1, "cell + reflection undid together")
+
+        // Interleaving: an SDF add then a stamp — undo pops the stamp first.
+        let itemsBefore = engine.items.count
+        XCTAssertTrue(engine.addPrimitive(CLAY_PRIM_SPHERE, params: [0.3],
+                                          at: SIMD3(5, 2, 0), op: CLAY_OP_ADD,
+                                          blendK: 0, color: ClayEngine.clayColor))
+        engine.voxelStamp(.place, at: SIMD3(20, 0, 20), brushSize: 1, color: pink)
+        XCTAssertTrue(engine.undo())
+        XCTAssertEqual(engine.voxelCount, 1, "voxel step popped first")
+        XCTAssertEqual(engine.items.count, itemsBefore + 1, "the sphere survived")
+        XCTAssertTrue(engine.undo())
+        XCTAssertEqual(engine.items.count, itemsBefore, "then the sphere")
+    }
+
+    func testImportOBJUndoesAsOneStep() async throws {
+        try XCTSkipUnless(ClayEngine.voxelUndoAvailable, "needs ClayCore >= 0.20")
+        let engine = ClayEngine()
+        let exported = await engine.exportMesh(format: .obj, resolution: 96)
+        let obj = try XCTUnwrap(exported)
+        defer { try? FileManager.default.removeItem(at: obj.url) }
+
+        let stats = engine.importOBJ(at: obj.url, color: ClayEngine.clayColor)
+        XCTAssertGreaterThan(stats?.cells ?? 0, 1000)
+        XCTAssertEqual(engine.voxelCount, stats?.cells ?? -1)
+
+        XCTAssertTrue(engine.undo())
+        XCTAssertEqual(engine.voxelCount, 0, "the whole import was one step")
+        XCTAssertTrue(engine.redo())
+        XCTAssertEqual(engine.voxelCount, stats?.cells ?? -1)
+    }
+
     func testVoxelsSurviveSaveLoad() throws {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("vox_\(UUID().uuidString)")

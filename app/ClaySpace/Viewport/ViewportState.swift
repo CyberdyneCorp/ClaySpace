@@ -453,6 +453,7 @@ extension ViewportState: PencilToolSink {
                 return
             }
             lastVoxelCell = nil
+            engine.beginVoxelEdits() // the whole drag = one undo step
             voxelEdit(at: point, pressure: max(pressure, 0.1))
             return
         }
@@ -631,6 +632,7 @@ extension ViewportState: PencilToolSink {
         dragStartItemPosition = nil
         dragStartHit = nil
         gizmoDrag = nil
+        engine.endVoxelEdits() // commit a cancelled voxel drag's step
         if engine.isTransforming {
             engine.endTransform() // commit the drag so far
         } else {
@@ -643,6 +645,7 @@ extension ViewportState: PencilToolSink {
         pencilStart = nil
         if mode == .voxel {
             lastVoxelCell = nil
+            engine.endVoxelEdits()
             return
         }
         if activeTool == .shape {

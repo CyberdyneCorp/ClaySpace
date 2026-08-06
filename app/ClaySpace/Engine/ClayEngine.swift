@@ -204,6 +204,7 @@ final class ClayEngine {
         case layerAdd(info: SdfLayer)
         case layerRemove(slot: Int, info: SdfLayer, rows: [LayerRow])
         case layerVisibility(slot: Int, before: Bool, after: Bool)
+        case voxelStep // grid diff lives in ClayCore's journal (ABI 0.20)
     }
     private enum RedoOp {
         case add(item: SceneItem, points: [SIMD4<Float>],
@@ -219,6 +220,7 @@ final class ClayEngine {
         case layerAdd(info: SdfLayer)
         case layerRemove(slot: Int)
         case layerVisibility(slot: Int, before: Bool, after: Bool)
+        case voxelStep
     }
     private var undoLog: [UndoKind] = []
     private var redoOps: [RedoOp] = []
@@ -668,6 +670,9 @@ final class ClayEngine {
             fieldCache = nil
             fieldCacheVersion += 1
             redoOps.append(.layerVisibility(slot: slot, before: before, after: after))
+        case .voxelStep:
+            rebuildVoxelMesh() // ClayCore's journal reverted the cells
+            redoOps.append(.voxelStep)
         case .add, .none: // .none: history predating the log — treat as add
             if let last = items.popLast() {
                 var points: [SIMD4<Float>] = []
@@ -747,6 +752,9 @@ final class ClayEngine {
             fieldCache = nil
             fieldCacheVersion += 1
             undoLog.append(.layerVisibility(slot: slot, before: before, after: after))
+        case .voxelStep:
+            rebuildVoxelMesh()
+            undoLog.append(.voxelStep)
         case .none:
             break
         }
@@ -1273,6 +1281,46 @@ final class ClayEngine {
 
     var hasVoxels: Bool { !voxelIndices.isEmpty }
 
+    /// ClayCore >= 0.20 journals voxel edits into the undo history
+    /// (openspec add-voxel-undo); older libraries leave them direct, and
+    /// the app then neither brackets nor logs them.
+    static let voxelUndoAvailable: Bool = {
+        var major: Int32 = 0, minor: Int32 = 0, patch: Int32 = 0
+        clay_version(&major, &minor, &patch)
+        return major > 0 || minor >= 20
+    }()
+
+    private var voxelSessionOpen = false
+    private var voxelSessionDepthBefore = 0
+
+    private func clayUndoDepth() -> Int {
+        guard let doc else { return 0 }
+        var depth: size_t = 0
+        _ = clay_document_undo_state(doc, nil, &depth, nil)
+        return depth
+    }
+
+    /// Brackets a run of voxel edits (a drag, an import) into ONE undo
+    /// step. The op-log entry is appended only if ClayCore actually
+    /// journaled a step (depth delta), so no-op edits cannot desync.
+    func beginVoxelEdits() {
+        guard Self.voxelUndoAvailable, let doc, !voxelSessionOpen,
+              activeStroke == nil, transformIndex == nil else { return }
+        voxelSessionDepthBefore = clayUndoDepth()
+        _ = check(clay_document_begin_undo_group(doc))
+        voxelSessionOpen = true
+    }
+
+    func endVoxelEdits() {
+        guard voxelSessionOpen, let doc else { return }
+        _ = check(clay_document_end_undo_group(doc))
+        voxelSessionOpen = false
+        if clayUndoDepth() > voxelSessionDepthBefore {
+            undoLog.append(.voxelStep)
+            redoOps.removeAll()
+        }
+    }
+
     /// Creates or re-borrows the document's voxel layer.
     @discardableResult
     func ensureVoxelLayer() -> Bool {
@@ -1337,6 +1385,11 @@ final class ClayEngine {
     func voxelStamp(_ edit: VoxelEdit, at cell: SIMD3<Int32>,
                     brushSize: Int32, color: SIMD3<Float>) {
         guard ensureVoxelLayer(), let voxelGrid else { return }
+        // A lone stamp is its own undo step; stamps inside a drag session
+        // (beginVoxelEdits) coalesce into the session's step.
+        let selfBracketed = Self.voxelUndoAvailable && !voxelSessionOpen
+        if selfBracketed { beginVoxelEdits() }
+        defer { if selfBracketed { endVoxelEdits() } }
         var brush = voxelBrush(size: brushSize)
         let index = paletteIndex(for: color)
         for target in mirrorCells(of: cell) {
@@ -1438,10 +1491,12 @@ final class ClayEngine {
 
         var brush = voxelBrush(size: 1)
         let paletteId = paletteIndex(for: color)
+        beginVoxelEdits() // the whole import is one undo step
         for cell in cells {
             _ = clay_voxel_set_brush(voxelGrid, [cell.x, cell.y, cell.z],
                                      &brush, paletteId)
         }
+        endVoxelEdits()
         rebuildVoxelMesh()
         version += 1
         scheduleAutosave()
