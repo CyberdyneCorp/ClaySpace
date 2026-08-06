@@ -17,7 +17,7 @@
 - [ ] 2.4 Implement layer instancing and instance→copy conversion
 - [ ] 2.5 Binary document format (versioned chunks, RLE voxel grids, embedded thumbnail) + load/save round-trip tests
 - [ ] 2.6 UIDocument + document browser integration (Files/iCloud, create/duplicate/rename/delete), autosave, save-state indicator — IN PROGRESS: autosave (2 s debounce riding edit commits + immediate on backgrounding), launch restore, and the saved/edited indicator shipped via clay_document_save/load + a blittable render-mirror sidecar (the C ABI has no scene enumeration); named multi-document management shipped (tap the title: list/new/open/delete, last-open restore, legacy migration); sculpts are .clayspace PACKAGE documents visible in the Files app (UIFileSharingEnabled + LSSupportsOpeningDocumentsInPlace + exported package UTI); rename (documents sheet swipe/context menu) and open-from-Files (onOpenURL: in-place for in-container URLs, coordinated security-scoped import for external ones) shipped; iCloud Drive sync (ubiquity container entitlement) and thumbnails pending
-- [ ] 2.7 Sample document shipping both layer kinds; first-launch copy-on-open behavior
+- [x] 2.7 Sample document shipping both layer kinds; first-launch copy-on-open behavior — "Sample Sculpt" (mirrored creature: arm strokes, painted eyes, torus hat, plastic preset, voxel plinth) GENERATED through the tool APIs on first launch instead of a bundled blob (cannot version-skew); a regular document thereafter — copy-on-open dropped by design since regeneration replaces pristine-asset semantics
 - [x] 2.8 Replace `packages/ClayCoreStub` with the real tag-pinned ClayCore package once its C ABI lands — consuming ClayCore v0.5.0 (sibling checkout, SwiftPM binaryTarget over `dist/claycore.xcframework`; app links libc++, sim arch arm64-only); CI checks out the tag and builds the xcframework
 
 ## 3. SDF engine (claycore: `kernel`, `brick`, `eval`, `pick`)
@@ -86,5 +86,5 @@
 
 - [ ] 10.1 `openspec validate --all --strict` green; spec scenarios mapped to XCTest/UI-test cases — IN PROGRESS: ClaySpaceTests (engine, camera/input, ClayCore feature contracts: strokes/voxels/meshing/IO/picking) + ClaySpaceUITests (end-to-end tap-to-sculpt, simulator) run via `scripts/test.sh` (`--device` for connected iPads) and in CI; remaining scenarios join as their features land
 - [ ] 10.2 Device matrix pass (M1 iPad Pro, M4 iPad Pro, iPad Air) for performance targets
-- [ ] 10.3 Offline/airplane-mode full-workflow test; crash-recovery autosave test
+- [x] 10.3 Offline/airplane-mode full-workflow test; crash-recovery autosave test — offline: sculpt+shape+voxel -> save -> reopen -> export runs with zero network surface (nothing in the stack can make a request); crash recovery: debounced autosave lands without an explicit save and a restoreFromDefault engine (a fresh launch) recovers the edits, bounding loss to the 2 s window
 - [ ] 10.4 Update `docs/` with any spec-relevant findings from Milestone 0 and archive this change

@@ -102,6 +102,7 @@ struct ContentView: View {
             }
         }
         .onAppear {
+            ClayEngine.ensureSampleDocument() // first launch seeds it once
             if !hasSeenGestures {
                 hasSeenGestures = true
                 showGestures = true

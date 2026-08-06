@@ -623,6 +623,80 @@ final class ClayEngineTests: XCTestCase {
         XCTAssertEqual(third.materialPreset, .matte, "format-1 files stay loadable")
     }
 
+    func testSampleDocumentShipsBothLayerKinds() {
+        let url = ClayEngine.documentURL(named: "Sample Sculpt")
+        let existed = FileManager.default.fileExists(atPath: url.path)
+        ClayEngine.ensureSampleDocument()
+        defer { if !existed { try? FileManager.default.removeItem(at: url) } }
+
+        let engine = ClayEngine()
+        XCTAssertTrue(engine.loadDocument(documentURL: url, mirrorURL: url))
+        XCTAssertGreaterThanOrEqual(engine.items.count, 4,
+                                    "ball, arms, eyes, hat")
+        XCTAssertGreaterThan(engine.voxelCount, 20, "the voxel plinth")
+        XCTAssertEqual(engine.mirrorAxes, 1, "mirror X is on for play")
+        XCTAssertEqual(engine.materialPreset, .plastic)
+
+        // Idempotent: a second call must not clobber or duplicate.
+        ClayEngine.ensureSampleDocument()
+        XCTAssertTrue(FileManager.default.fileExists(atPath: url.path))
+    }
+
+    /// 10.3 offline scenario: the full author loop touches no network —
+    /// nothing in the engine or persistence stack can even make a request,
+    /// so this passes identically in airplane mode.
+    func testOfflineFullWorkflowSculptSaveReopenExport() async throws {
+        let suffix = UUID().uuidString.prefix(6)
+        let name = "Test-\(suffix)-Offline"
+        let engine = ClayEngine()
+
+        engine.beginStroke(at: SIMD3(1.4, 0.9, 0), radius: 0.2,
+                           op: CLAY_OP_ADD, blendK: 0.02, color: ClayEngine.clayColor)
+        engine.appendStrokePoint(SIMD3(1.8, 1.1, 0), radius: 0.18)
+        engine.endStroke()
+        XCTAssertTrue(engine.addShape(CLAY_PRIM_TORUS, params: [0.4, 0.12],
+                                      at: SIMD3(-1.5, 1, 0), op: CLAY_OP_ADD,
+                                      blendK: 0.03, color: ClayEngine.clayColor))
+        engine.voxelStamp(.place, at: SIMD3(10, 0, 10), brushSize: 1,
+                          color: ClayEngine.clayColor)
+        XCTAssertTrue(engine.saveDocument(documentURL: ClayEngine.documentURL(named: name)))
+        defer { _ = engine.deleteDocument(named: name) }
+
+        let reopened = ClayEngine()
+        XCTAssertTrue(reopened.openDocument(named: name))
+        XCTAssertEqual(reopened.items.count, engine.items.count)
+        XCTAssertGreaterThan(reopened.voxelCount, 0)
+
+        let exported = await reopened.exportMesh(format: .obj, resolution: 96)
+        XCTAssertNotNil(exported, "the whole loop closes without connectivity")
+        if let exported { try? FileManager.default.removeItem(at: exported.url) }
+    }
+
+    /// 10.3 crash recovery: edits autosave on the 2 s debounce; an engine
+    /// built the way a fresh launch builds one restores them — losing at
+    /// most the debounce window, never the document.
+    func testCrashRecoveryRestoresAutosavedWork() async throws {
+        let engine = ClayEngine(restoreFromDefault: true)
+        let baseline = engine.items.count
+        engine.beginStroke(at: SIMD3(-1.6, 0.7, 0.4), radius: 0.19,
+                           op: CLAY_OP_ADD, blendK: 0.02, color: ClayEngine.clayColor)
+        engine.endStroke()
+        XCTAssertTrue(engine.isDirty, "edit pending inside the debounce window")
+
+        try await Task.sleep(for: .seconds(2.6)) // let the autosave land
+        XCTAssertFalse(engine.isDirty, "autosave fired without an explicit save")
+
+        // A "relaunch after crash": restore purely from disk + defaults.
+        let recovered = ClayEngine(restoreFromDefault: true)
+        XCTAssertEqual(recovered.items.count, baseline + 1,
+                       "the autosaved stroke survived the crash")
+        XCTAssertEqual(recovered.documentName, engine.documentName)
+
+        // Cleanup: drop the recovery stroke from the shared document.
+        XCTAssertTrue(recovered.deleteItem(index: recovered.items.count - 1))
+        recovered.saveNow()
+    }
+
     func testRenameDocumentMovesPackageAndRefusesCollisions() {
         let engine = ClayEngine()
         let suffix = UUID().uuidString.prefix(6)

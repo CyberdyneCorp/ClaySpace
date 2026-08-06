@@ -1921,6 +1921,44 @@ final class ClayEngine {
         return true
     }
 
+    /// First-launch sample (task 2.7): a small mirrored creature with a
+    /// painted face, a torus hat and a voxel plinth — both layer kinds in
+    /// one document. Generated through the same APIs the tools use, so it
+    /// can never version-skew; a regular document thereafter (open it,
+    /// edit it, delete it).
+    static func ensureSampleDocument() {
+        let url = documentURL(named: "Sample Sculpt")
+        guard !FileManager.default.fileExists(atPath: url.path) else { return }
+        let scratch = ClayEngine()
+        scratch.setMirror(axes: 1) // X
+
+        // Arms swept out to the sides (mirrored).
+        _ = scratch.beginStroke(at: SIMD3(0.55, 1.0, 0), radius: 0.16,
+                                op: CLAY_OP_ADD, blendK: 0.03, color: clayColor)
+        scratch.appendStrokePoint(SIMD3(0.95, 1.2, 0.05), radius: 0.13)
+        scratch.appendStrokePoint(SIMD3(1.2, 1.5, 0.1), radius: 0.11)
+        scratch.endStroke()
+
+        // Eyes: ink stains on the mirrored front.
+        _ = scratch.addPrimitive(CLAY_PRIM_SPHERE, params: [0.1],
+                                 at: SIMD3(0.26, 1.0, 0.68), op: CLAY_OP_PAINT,
+                                 blendK: 0.05, color: SIMD3(0.18, 0.17, 0.17))
+        // Hat: a press-yellow torus.
+        _ = scratch.addPrimitive(CLAY_PRIM_TORUS, params: [0.36, 0.11],
+                                 at: SIMD3(0, 1.58, 0), op: CLAY_OP_ADD,
+                                 blendK: 0.04, color: SIMD3(0.93, 0.73, 0.0))
+        scratch.setMaterialPreset(.plastic)
+
+        // Voxel plinth ring around the build area (the second layer kind).
+        for x in Int32(-4)...4 {
+            for z in Int32(-4)...4 where abs(x) == 4 || abs(z) == 4 {
+                scratch.voxelStamp(.place, at: SIMD3(x, 0, z), brushSize: 1,
+                                   color: SIMD3(0.22, 0.65, 0.81))
+            }
+        }
+        _ = scratch.saveDocument(documentURL: url)
+    }
+
     /// Debounced autosave, armed by the same commits that trigger bakes.
     private func scheduleAutosave() {
         autosaveTask?.cancel()
