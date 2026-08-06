@@ -29,6 +29,7 @@ final class Renderer {
         var gridScale: SIMD4<Float>     // xyz = dims/maxResolution
         var lightDir: SIMD4<Float>      // xyz normalized (light dial)
         var material: SIMD4<Float>      // spec strength, shininess, metalness
+        var layerBits: SIMD4<UInt32>    // visibility mask, mirror packed, count
     }
 
     static let maxItems = 256
@@ -248,7 +249,10 @@ final class Renderer {
                         Float(cache!.dims.z) / Float(FieldCache.maxResolution), 0)
                 : SIMD4(1, 1, 1, 0),
             lightDir: SIMD4(lightDir.x, lightDir.y, lightDir.z, 0),
-            material: engine.materialPreset.shadingParams
+            material: engine.materialPreset.shadingParams,
+            layerBits: SIMD4(engine.layerVisibilityMask,
+                             engine.layerMirrorPacked,
+                             UInt32(max(engine.sdfLayers.count, 1)), 0)
         )
 
         encoder.setRenderPipelineState(pipeline)

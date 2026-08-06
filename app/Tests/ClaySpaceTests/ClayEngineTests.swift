@@ -661,17 +661,158 @@ final class ClayEngineTests: XCTestCase {
         XCTAssertTrue(second.loadDocument(documentURL: url, mirrorURL: url))
         XCTAssertEqual(second.materialPreset, .metal, "preset round-trips (format 2)")
 
-        // A format-1 sidecar (no preset field) still loads, defaulting Matte.
+        // A format-2 sidecar (no layer tail) still loads: patch the format
+        // word and truncate the format-3 tail — older files ARE exactly a
+        // truncated new one by design.
         let mirror = url.appendingPathComponent("mirror.bin")
         var data = try Data(contentsOf: mirror)
+        let itemCount = data.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: 8, as: UInt32.self) }
+        let layerCount = 1
+        let tail = 8 + layerCount * 48 + Int(itemCount) * 4
         data.withUnsafeMutableBytes { raw in
-            raw.storeBytes(of: UInt32(1), toByteOffset: 4, as: UInt32.self) // format
+            raw.storeBytes(of: UInt32(2), toByteOffset: 4, as: UInt32.self) // format
         }
-        data.removeSubrange(32..<36) // drop the appended preset field
+        data.removeLast(tail)
         try data.write(to: mirror)
         let third = ClayEngine()
         XCTAssertTrue(third.loadDocument(documentURL: url, mirrorURL: url))
-        XCTAssertEqual(third.materialPreset, .matte, "format-1 files stay loadable")
+        XCTAssertEqual(third.materialPreset, .metal, "format-2 files stay loadable")
+        XCTAssertEqual(third.sdfLayers.count, 1, "old files come up as one layer")
+    }
+
+    // MARK: Layers (task 2.1 app-side)
+
+    func testLayerOpsAreScopedAndLayersUnion() {
+        let engine = ClayEngine()
+        // Ball on the base layer, then a second layer with a Cut through it.
+        let base = SIMD3<Float>(5, 2, 0)
+        XCTAssertTrue(engine.addPrimitive(CLAY_PRIM_SPHERE, params: [0.6],
+                                          at: base, op: CLAY_OP_ADD,
+                                          blendK: 0, color: ClayEngine.clayColor))
+        XCTAssertTrue(engine.addLayer(named: "Carve"))
+        XCTAssertEqual(engine.activeLayerSlot, 1, "new layer becomes active")
+        XCTAssertTrue(engine.addPrimitive(CLAY_PRIM_ROUND_BOX,
+                                          params: [0.7, 0.3, 0.7, 0.05],
+                                          at: SIMD3(5, 2.6, 0), op: CLAY_OP_SUBTRACT,
+                                          blendK: 0, color: ClayEngine.clayColor))
+        XCTAssertEqual(engine.itemLayers.last, 1, "item routed to the new layer")
+
+        // ClayCore semantics: the cut lives on ITS layer — the base ball
+        // keeps its crown.
+        let crown = engine.raycast(origin: SIMD3(5, 8, 0), direction: SIMD3(0, -1, 0))
+        XCTAssertEqual(crown?.position.y ?? 0, 2.6, accuracy: 0.03,
+                       "a Cut on layer 2 cannot carve layer 1")
+
+        // An Add on the second layer unions into the scene.
+        XCTAssertTrue(engine.addPrimitive(CLAY_PRIM_SPHERE, params: [0.3],
+                                          at: SIMD3(6.5, 2, 0), op: CLAY_OP_ADD,
+                                          blendK: 0, color: ClayEngine.clayColor))
+        let unioned = engine.raycast(origin: SIMD3(6.5, 8, 0), direction: SIMD3(0, -1, 0))
+        XCTAssertEqual(unioned?.position.y ?? 0, 2.3, accuracy: 0.03)
+    }
+
+    func testLayerVisibilityHidesGeometryAndUndoes() {
+        let engine = ClayEngine()
+        XCTAssertTrue(engine.addLayer(named: "Extras"))
+        XCTAssertTrue(engine.addPrimitive(CLAY_PRIM_SPHERE, params: [0.4],
+                                          at: SIMD3(5, 2, 0), op: CLAY_OP_ADD,
+                                          blendK: 0, color: ClayEngine.clayColor))
+        let probe = SIMD3<Float>(5, 8, 0)
+        XCTAssertNotNil(engine.raycast(origin: probe, direction: SIMD3(0, -1, 0)))
+
+        XCTAssertTrue(engine.setLayerVisible(slot: 1, false))
+        XCTAssertNil(engine.raycast(origin: probe, direction: SIMD3(0, -1, 0)),
+                     "hidden layers evaluate as empty space")
+        XCTAssertNotNil(engine.raycast(origin: SIMD3(0, 8, 0), direction: SIMD3(0, -1, 0)),
+                        "the base layer still shows")
+
+        XCTAssertTrue(engine.undo())
+        XCTAssertTrue(engine.sdfLayers[1].visible)
+        XCTAssertNotNil(engine.raycast(origin: probe, direction: SIMD3(0, -1, 0)))
+        XCTAssertTrue(engine.redo())
+        XCTAssertNil(engine.raycast(origin: probe, direction: SIMD3(0, -1, 0)))
+    }
+
+    func testDeleteLayerRemovesItsItemsAndUndoRestoresThem() {
+        let engine = ClayEngine()
+        XCTAssertTrue(engine.addLayer(named: "Doomed"))
+        engine.beginStroke(at: SIMD3(5, 2, 0), radius: 0.25,
+                           op: CLAY_OP_ADD, blendK: 0, color: ClayEngine.clayColor)
+        engine.endStroke()
+        XCTAssertTrue(engine.addPrimitive(CLAY_PRIM_SPHERE, params: [0.3],
+                                          at: SIMD3(6.2, 2, 0), op: CLAY_OP_ADD,
+                                          blendK: 0, color: ClayEngine.clayColor))
+        let total = engine.items.count
+
+        XCTAssertTrue(engine.deleteLayer(slot: 1))
+        XCTAssertEqual(engine.sdfLayers.count, 1)
+        XCTAssertEqual(engine.items.count, total - 2, "both layer items went")
+        XCTAssertEqual(engine.activeLayerSlot, 0)
+        XCTAssertNil(engine.raycast(origin: SIMD3(5, 8, 0), direction: SIMD3(0, -1, 0)))
+
+        XCTAssertTrue(engine.undo())
+        XCTAssertEqual(engine.sdfLayers.count, 2, "layer restored with its rows")
+        XCTAssertEqual(engine.items.count, total)
+        XCTAssertNotNil(engine.raycast(origin: SIMD3(5, 8, 0), direction: SIMD3(0, -1, 0)))
+        XCTAssertEqual(engine.strokeRadii(of: engine.items.count - 2) ?? [], [0.25],
+                       "the stroke's pool slice survived the round trip")
+        XCTAssertTrue(engine.redo())
+        XCTAssertEqual(engine.sdfLayers.count, 1)
+        XCTAssertEqual(engine.items.count, total - 2)
+    }
+
+    func testPerItemOpsRouteToTheOwningLayer() {
+        let engine = ClayEngine()
+        XCTAssertTrue(engine.addLayer(named: "Second"))
+        XCTAssertTrue(engine.addPrimitive(CLAY_PRIM_SPHERE, params: [0.35],
+                                          at: SIMD3(5, 2, 0), op: CLAY_OP_ADD,
+                                          blendK: 0, color: ClayEngine.clayColor))
+        let index = engine.items.count - 1
+        // Back on the base layer, edit the layer-2 item: the calls must
+        // address ITS layer, not the active one.
+        engine.activateLayer(slot: 0)
+        XCTAssertTrue(engine.setStyle(index: index, op: CLAY_OP_ADD,
+                                      blend: CLAY_BLEND_CUBIC, blendK: 0.05))
+        XCTAssertTrue(engine.setColor(index: index, color: SIMD3(1, 0, 0)))
+        XCTAssertTrue(engine.deleteItem(index: index))
+        XCTAssertNil(engine.raycast(origin: SIMD3(5, 8, 0), direction: SIMD3(0, -1, 0)))
+    }
+
+    func testLayersPersistAcrossSaveLoad() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("layers_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("l.clayspace")
+
+        let first = ClayEngine()
+        XCTAssertTrue(first.addLayer(named: "Details"))
+        XCTAssertTrue(first.addPrimitive(CLAY_PRIM_SPHERE, params: [0.3],
+                                         at: SIMD3(5, 2, 0), op: CLAY_OP_ADD,
+                                         blendK: 0, color: ClayEngine.clayColor))
+        XCTAssertTrue(first.addLayer(named: "Hidden things"))
+        XCTAssertTrue(first.addPrimitive(CLAY_PRIM_SPHERE, params: [0.3],
+                                         at: SIMD3(-5, 2, 0), op: CLAY_OP_ADD,
+                                         blendK: 0, color: ClayEngine.clayColor))
+        XCTAssertTrue(first.setLayerVisible(slot: 2, false))
+        first.activateLayer(slot: 1)
+        XCTAssertTrue(first.saveDocument(documentURL: url))
+
+        let second = ClayEngine()
+        XCTAssertTrue(second.loadDocument(documentURL: url, mirrorURL: url))
+        XCTAssertEqual(second.sdfLayers.map(\.name), ["Clay", "Details", "Hidden things"])
+        XCTAssertEqual(second.sdfLayers.map(\.visible), [true, true, false])
+        XCTAssertEqual(second.activeLayerSlot, 1)
+        XCTAssertEqual(second.itemLayers, first.itemLayers)
+        XCTAssertNil(second.raycast(origin: SIMD3(-5, 8, 0), direction: SIMD3(0, -1, 0)),
+                     "hidden layer stayed hidden after load")
+        XCTAssertNotNil(second.raycast(origin: SIMD3(5, 8, 0), direction: SIMD3(0, -1, 0)))
+
+        // And the reloaded document keeps editing on the right layer.
+        XCTAssertTrue(second.addPrimitive(CLAY_PRIM_SPHERE, params: [0.2],
+                                          at: SIMD3(5, 3, 0), op: CLAY_OP_ADD,
+                                          blendK: 0, color: ClayEngine.clayColor))
+        XCTAssertEqual(second.itemLayers.last, 1)
     }
 
     func testSampleDocumentShipsBothLayerKinds() {

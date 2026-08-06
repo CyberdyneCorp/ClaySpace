@@ -297,6 +297,7 @@ struct ContentView: View {
                     .tint(.orange)
                     .accessibilityLabel("Light direction")
             }
+            LayersPanel(state: state)
             EditListPanel(state: state)
             Spacer()
         }

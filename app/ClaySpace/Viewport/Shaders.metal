@@ -23,6 +23,7 @@ struct Uniforms {
     float4 gridScale;     // xyz = dims/maxResolution (texture sub-region)
     float4 lightDir;      // xyz normalized light direction (light dial)
     float4 material;      // x spec strength, y shininess, z metalness
+    uint4 layerBits;      // x visibility mask, y mirror axes (4b/slot), z count
 };
 
 // Must match SceneItem in ClayEngine.swift (80 bytes).
@@ -41,7 +42,8 @@ struct SceneItem {
     float boundRadius;
     int mirrorFlag;    // item mirrors through the layer's axes
     float radialCount; // >= 2: radial repeat about world Y
-    float2 _pad2;
+    float layerSlot;   // owning SDF layer slot (0..7)
+    float _pad2;
 };
 
 struct VertexOut {
@@ -351,18 +353,26 @@ struct FieldCtx {
     float4 gridOrigin;   // w = cache enabled
     float4 gridInvExtent;
     float4 gridScale;    // dims/maxResolution: the used texture sub-region
-    int mirrorAxes;      // layer mirror bits
+    uint layerVisMask;   // bit per slot
+    uint layerMirror;    // mirror axes, 4 bits per slot
+    int layerCount;
     float mirrorK;       // Mirror Blend seam width
 };
 
 // Item distance including its mirror copies — ClayCore's emit_item order
 // exactly: the item, then per enabled axis one reflection about that axis
 // plane, each folded in with Add at mirror_k (csminQ handles k=0 as min).
+static int layerAxes(constant SceneItem &it, FieldCtx ctx) {
+    int slot = clamp(int(it.layerSlot), 0, 7);
+    return int((ctx.layerMirror >> (slot * 4)) & 7u);
+}
+
 static float sdItemMirrored(float3 p, constant SceneItem &it, FieldCtx ctx) {
     float di = sdItem(p, it, ctx.pts);
-    if (it.mirrorFlag != 0 && ctx.mirrorAxes != 0) {
+    int axes = layerAxes(it, ctx);
+    if (it.mirrorFlag != 0 && axes != 0) {
         for (int axis = 0; axis < 3; axis++) {
-            if ((ctx.mirrorAxes & (1 << axis)) == 0) continue;
+            if ((axes & (1 << axis)) == 0) continue;
             float3 rp = p;
             rp[axis] = -rp[axis];
             di = csminQ(di, sdItem(rp, it, ctx.pts), ctx.mirrorK);
@@ -374,9 +384,10 @@ static float sdItemMirrored(float3 p, constant SceneItem &it, FieldCtx ctx) {
 // Bound test that also covers the reflections and the seam blend support.
 static float itemBound(float3 p, constant SceneItem &it, FieldCtx ctx) {
     float b = length(p - it.boundCenter);
-    if (it.mirrorFlag != 0 && ctx.mirrorAxes != 0) {
+    int axes = layerAxes(it, ctx);
+    if (it.mirrorFlag != 0 && axes != 0) {
         for (int axis = 0; axis < 3; axis++) {
-            if ((ctx.mirrorAxes & (1 << axis)) == 0) continue;
+            if ((axes & (1 << axis)) == 0) continue;
             float3 rp = p;
             rp[axis] = -rp[axis];
             b = min(b, length(rp - it.boundCenter));
@@ -411,62 +422,132 @@ static float mapDist(float3 p, FieldCtx ctx) {
     constant SceneItem *items = ctx.items;
     bool cached = ctx.gridOrigin.w > 0.5;
     float d = cached ? sampleCache(p, ctx) : 1e9;
+    if (ctx.layerCount <= 1) {
+        // Single layer: sequential fold — tail ops carve the cache exactly.
+        if ((ctx.layerVisMask & 1u) == 0) return d;
+        for (int i = cached ? ctx.start : 0; i < ctx.count; i++) {
+            constant SceneItem &it = items[i];
+            float bound = itemBound(p, it, ctx);
+            if (it.op == OP_ADD) {
+                if (bound >= d) continue;
+            } else if (bound > 0.0) {
+                continue;
+            }
+            float di = sdItemMirrored(p, it, ctx);
+            float k = (it.blend != 0) ? it.blendK : 0.0;
+            if (it.op == OP_ADD) {
+                d = csminP(d, di, k, it.blend);
+            } else if (it.op == OP_SUBTRACT) {
+                d = -csminP(-d, di, k, it.blend); // op_ssubtract
+            } else if (it.op == OP_INTERSECT) {
+                d = -csminP(-d, -di, k, it.blend);
+            }
+        }
+        return d;
+    }
+    // Multiple layers: ops are LAYER-SCOPED (ClayCore semantics) — fold
+    // each layer's chain into its own accumulator, union at the end. Tail
+    // ops on already-baked content resolve at the next bake (transient).
+    float ld[8] = {1e9, 1e9, 1e9, 1e9, 1e9, 1e9, 1e9, 1e9};
     for (int i = cached ? ctx.start : 0; i < ctx.count; i++) {
         constant SceneItem &it = items[i];
+        int slot = clamp(int(it.layerSlot), 0, 7);
+        if (((ctx.layerVisMask >> slot) & 1u) == 0) continue; // hidden
         float bound = itemBound(p, it, ctx);
         if (it.op == OP_ADD) {
-            if (bound >= d) continue; // cannot beat or blend with current best
-        } else if (bound > 0.0) {
-            continue; // subtract/paint only act inside their influence
-        }
-        float di = sdItemMirrored(p, it, ctx);
-        float k = (it.blend != 0) ? it.blendK : 0.0;
-        if (it.op == OP_ADD) {
-            d = csminP(d, di, k, it.blend);
-        } else if (it.op == OP_SUBTRACT) {
-            d = -csminP(-d, di, k, it.blend); // op_ssubtract: item carved from accum
-        } else if (it.op == OP_INTERSECT) {
-            d = -csminP(-d, -di, k, it.blend);
-        }
-    }
-    return d;
-}
-
-static float4 mapShade(float3 p, FieldCtx ctx) {
-    constant SceneItem *items = ctx.items;
-    bool cached = ctx.gridOrigin.w > 0.5;
-    float d = 1e9;
-    float3 col = float3(0.22, 0.65, 0.81);
-    if (cached) {
-        d = sampleCache(p, ctx);
-        float3 uvw = (p - ctx.gridOrigin.xyz) * ctx.gridInvExtent.xyz;
-        col = ctx.ctex.sample(fieldSampler, gridTexCoord(uvw, ctx.gridScale)).rgb;
-    }
-    for (int i = cached ? ctx.start : 0; i < ctx.count; i++) {
-        constant SceneItem &it = items[i];
-        float bound = itemBound(p, it, ctx);
-        if (it.op == OP_ADD) {
-            if (bound >= d) continue;
+            if (bound >= ld[slot]) continue;
         } else if (bound > 0.0) {
             continue;
         }
         float di = sdItemMirrored(p, it, ctx);
         float k = (it.blend != 0) ? it.blendK : 0.0;
         if (it.op == OP_ADD) {
-            // csmin_*_m: the profile's h-power drives the material mix.
-            float2 dm = csminPM(d, di, k, it.blend);
-            col = mix(col, it.color, dm.y);
-            d = dm.x;
+            ld[slot] = csminP(ld[slot], di, k, it.blend);
         } else if (it.op == OP_SUBTRACT) {
-            d = -csminP(-d, di, k, it.blend);
+            ld[slot] = -csminP(-ld[slot], di, k, it.blend);
         } else if (it.op == OP_INTERSECT) {
-            d = -csminP(-d, -di, k, it.blend);
+            ld[slot] = -csminP(-ld[slot], -di, k, it.blend);
+        }
+    }
+    for (int slot = 0; slot < ctx.layerCount; slot++) d = min(d, ld[slot]);
+    return d;
+}
+
+static float4 mapShade(float3 p, FieldCtx ctx) {
+    constant SceneItem *items = ctx.items;
+    bool cached = ctx.gridOrigin.w > 0.5;
+    float cacheD = 1e9;
+    float3 cacheCol = float3(0.22, 0.65, 0.81);
+    if (cached) {
+        cacheD = sampleCache(p, ctx);
+        float3 uvw = (p - ctx.gridOrigin.xyz) * ctx.gridInvExtent.xyz;
+        cacheCol = ctx.ctex.sample(fieldSampler, gridTexCoord(uvw, ctx.gridScale)).rgb;
+    }
+    if (ctx.layerCount <= 1) {
+        float d = cacheD;
+        float3 col = cacheCol;
+        if ((ctx.layerVisMask & 1u) == 0) return float4(col, d);
+        for (int i = cached ? ctx.start : 0; i < ctx.count; i++) {
+            constant SceneItem &it = items[i];
+            float bound = itemBound(p, it, ctx);
+            if (it.op == OP_ADD) {
+                if (bound >= d) continue;
+            } else if (bound > 0.0) {
+                continue;
+            }
+            float di = sdItemMirrored(p, it, ctx);
+            float k = (it.blend != 0) ? it.blendK : 0.0;
+            if (it.op == OP_ADD) {
+                float2 dm = csminPM(d, di, k, it.blend);
+                col = mix(col, it.color, dm.y);
+                d = dm.x;
+            } else if (it.op == OP_SUBTRACT) {
+                d = -csminP(-d, di, k, it.blend);
+            } else if (it.op == OP_INTERSECT) {
+                d = -csminP(-d, -di, k, it.blend);
+            } else if (it.op == OP_PAINT) {
+                float support = max(blendSupport(it.blend, k), k);
+                float w = 1.0 - clamp(di / max(support, 1e-6), 0.0, 1.0);
+                col = mix(col, it.color, w);
+            }
+        }
+        return float4(col, d);
+    }
+    // Multi-layer: per-layer fold, then the closest layer's color wins
+    // (layers union with a hard min, matching op_union color semantics).
+    float ld[8] = {1e9, 1e9, 1e9, 1e9, 1e9, 1e9, 1e9, 1e9};
+    float3 lcol[8];
+    for (int slot = 0; slot < 8; slot++) lcol[slot] = float3(0.22, 0.65, 0.81);
+    for (int i = cached ? ctx.start : 0; i < ctx.count; i++) {
+        constant SceneItem &it = items[i];
+        int slot = clamp(int(it.layerSlot), 0, 7);
+        if (((ctx.layerVisMask >> slot) & 1u) == 0) continue;
+        float bound = itemBound(p, it, ctx);
+        if (it.op == OP_ADD) {
+            if (bound >= ld[slot]) continue;
+        } else if (bound > 0.0) {
+            continue;
+        }
+        float di = sdItemMirrored(p, it, ctx);
+        float k = (it.blend != 0) ? it.blendK : 0.0;
+        if (it.op == OP_ADD) {
+            float2 dm = csminPM(ld[slot], di, k, it.blend);
+            lcol[slot] = mix(lcol[slot], it.color, dm.y);
+            ld[slot] = dm.x;
+        } else if (it.op == OP_SUBTRACT) {
+            ld[slot] = -csminP(-ld[slot], di, k, it.blend);
+        } else if (it.op == OP_INTERSECT) {
+            ld[slot] = -csminP(-ld[slot], -di, k, it.blend);
         } else if (it.op == OP_PAINT) {
-            // ccombine_paint: color-only, field untouched.
             float support = max(blendSupport(it.blend, k), k);
             float w = 1.0 - clamp(di / max(support, 1e-6), 0.0, 1.0);
-            col = mix(col, it.color, w);
+            lcol[slot] = mix(lcol[slot], it.color, w);
         }
+    }
+    float d = cacheD;
+    float3 col = cacheCol;
+    for (int slot = 0; slot < ctx.layerCount; slot++) {
+        if (ld[slot] < d) { d = ld[slot]; col = lcol[slot]; }
     }
     return float4(col, d);
 }
@@ -514,7 +595,8 @@ fragment FragOut raymarch_fragment(VertexOut in [[stage_in]],
                                   texture3d<float> colorTex [[texture(1)]]) {
     FieldCtx ctx{items, u.itemCount, u.bakedCount, strokePts,
                  distanceTex, colorTex, u.gridOrigin, u.gridInvExtent,
-                 u.gridScale, u.mirrorAxes, u.mirrorK};
+                 u.gridScale, u.layerBits.x, u.layerBits.y,
+                 int(u.layerBits.z), u.mirrorK};
     const float aspect = u.params.x;
     const float lens = u.params.z;
     const float orthoHalfHeight = u.params.w;

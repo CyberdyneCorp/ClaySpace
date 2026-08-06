@@ -11,7 +11,7 @@
 
 ## 2. Scene model & documents (claycore: `scene`, `io`)
 
-- [ ] 2.1 Implement the document tree: layers (voxel/sdf), groups, edit items, transforms, visibility, selection
+- [ ] 2.1 Implement the document tree: layers (voxel/sdf), groups, edit items, transforms, visibility, selection — IN PROGRESS: app-side SDF layers shipped (up to 8: add/activate/delete/show-hide via LayersPanel, per-layer mirror+radial restored on switch, per-item layer routing on every node op, layer-scoped eval in the preview via per-layer fold accumulators + union, visibility/mirror packed into one uint4 uniform, sidecar format 3 with append-at-end layer table so v1/v2 files are exact truncations); all three layer commands mirror 1:1 into the op-log (LIFO keeps indices honest); groups and layer reordering pending (clay_document_move_layer is internally two commands — breaks 1:1 undo alignment — needs a ClayCore single-command move or an app-side undo group)
 - [ ] 2.2 Implement the edit-command vocabulary + command-based undo/redo stack (coalescing per stroke)
 - [ ] 2.3 Implement ordered-list evaluation semantics with rigid smooth/chamfer blends and per-item influence bounds
 - [ ] 2.4 Implement layer instancing and instance→copy conversion

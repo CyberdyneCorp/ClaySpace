@@ -28,7 +28,10 @@ struct SceneItem {
     /// (clay_item_set_repeat_radial), evaluated with ClayCore's O(2)
     /// nearest-sector scheme.
     var radialCount: Float
-    var pad2 = SIMD2<Float>.zero
+    /// Which SDF layer (slot 0..7) owns the item — the shader folds each
+    /// layer's chain separately and unions the results.
+    var layerSlot: Float = 0
+    var pad2: Float = 0
 }
 
 /// Baked field cache (design D2, task 3.1 first stage): the document's SDF
@@ -94,6 +97,34 @@ final class ClayEngine {
     private nonisolated(unsafe) var doc: OpaquePointer?
     private var layer: clay_layer_id = 0
 
+    /// SDF layers in creation order; slot = array index (task 2.1).
+    private(set) var sdfLayers: [SdfLayer] = []
+    private(set) var activeLayerSlot = 0
+    /// Owning layer slot per mirror item, parallel to `items`.
+    private(set) var itemLayers: [Int32] = []
+
+    /// Bit i set = slot i visible (shader visibility mask).
+    var layerVisibilityMask: UInt32 {
+        var mask: UInt32 = 0
+        for (slot, info) in sdfLayers.enumerated() where info.visible {
+            mask |= 1 << UInt32(slot)
+        }
+        return mask
+    }
+    /// 4 bits of mirror axes per slot (shader per-layer mirror).
+    var layerMirrorPacked: UInt32 {
+        var packed: UInt32 = 0
+        for (slot, info) in sdfLayers.enumerated() {
+            packed |= UInt32(info.mirrorAxes & 7) << (UInt32(slot) * 4)
+        }
+        return packed
+    }
+
+    private func layerId(of index: Int) -> clay_layer_id {
+        let slot = Int(itemLayers.indices.contains(index) ? itemLayers[index] : 0)
+        return sdfLayers.indices.contains(slot) ? sdfLayers[slot].id : layer
+    }
+
     /// Render mirror of the SDF edit list, in document order.
     private(set) var items: [SceneItem] = []
     /// Stroke point pool (xyz, radius) referenced by stroke items via
@@ -137,6 +168,28 @@ final class ClayEngine {
         var rounding: Float
     }
 
+    /// One SDF layer (task 2.1 app-side). Ops are layer-scoped in ClayCore
+    /// — a Cut on one layer cannot carve another — and layers compose by
+    /// union. Mirror/radial are per-layer tool state, restored on switch.
+    struct SdfLayer: Identifiable, Equatable {
+        var id: clay_layer_id
+        var name: String
+        var visible: Bool = true
+        var mirrorAxes: Int32 = 0
+        var radialCount: Int32 = 0
+    }
+    static let maxLayers = 8
+
+    /// A removed layer's mirror rows, kept for undo restore.
+    private struct LayerRow {
+        var index: Int
+        var item: SceneItem
+        var node: clay_node_id
+        var aabb: (min: SIMD3<Float>, max: SIMD3<Float>)
+        var local: (center: SIMD3<Float>, radius: Float)
+        var slot: Int32
+    }
+
     private enum UndoKind {
         case add
         case transform(index: Int, before: Placement, after: Placement)
@@ -145,19 +198,27 @@ final class ClayEngine {
         case restroke(index: Int, before: [Float], after: [Float]) // point radii
         case remove(index: Int, item: SceneItem, node: clay_node_id,
                     aabb: (min: SIMD3<Float>, max: SIMD3<Float>),
-                    localBound: (center: SIMD3<Float>, radius: Float))
+                    localBound: (center: SIMD3<Float>, radius: Float),
+                    slot: Int32)
         case reorder(from: Int, to: Int)
+        case layerAdd(info: SdfLayer)
+        case layerRemove(slot: Int, info: SdfLayer, rows: [LayerRow])
+        case layerVisibility(slot: Int, before: Bool, after: Bool)
     }
     private enum RedoOp {
         case add(item: SceneItem, points: [SIMD4<Float>],
                  aabb: (min: SIMD3<Float>, max: SIMD3<Float>),
-                 node: clay_node_id, localBound: (center: SIMD3<Float>, radius: Float))
+                 node: clay_node_id, localBound: (center: SIMD3<Float>, radius: Float),
+                 slot: Int32)
         case transform(index: Int, before: Placement, after: Placement)
         case recolor(index: Int, before: SIMD3<Float>, after: SIMD3<Float>)
         case restyle(index: Int, before: Style, after: Style)
         case restroke(index: Int, before: [Float], after: [Float])
         case remove(index: Int)
         case reorder(from: Int, to: Int)
+        case layerAdd(info: SdfLayer)
+        case layerRemove(slot: Int)
+        case layerVisibility(slot: Int, before: Bool, after: Bool)
     }
     private var undoLog: [UndoKind] = []
     private var redoOps: [RedoOp] = []
@@ -225,6 +286,9 @@ final class ClayEngine {
 
     func setRadial(count: Int32) {
         radialCount = count >= 2 ? min(count, 16) : 0
+        if sdfLayers.indices.contains(activeLayerSlot) {
+            sdfLayers[activeLayerSlot].radialCount = radialCount
+        }
         version += 1
     }
 
@@ -290,6 +354,9 @@ final class ClayEngine {
                                           (axes & 4) != 0 ? 1 : 0, seam)) else { return }
         mirrorAxes = axes
         mirrorK = seam
+        if sdfLayers.indices.contains(activeLayerSlot) {
+            sdfLayers[activeLayerSlot].mirrorAxes = axes
+        }
         version += 1
         scheduleBake()
     }
@@ -319,6 +386,8 @@ final class ClayEngine {
         var layerId: clay_layer_id = 0
         guard check(clay_add_sdf_layer(doc, "Clay", &layerId)) else { return }
         layer = layerId
+        sdfLayers = [SdfLayer(id: layerId, name: "Clay")]
+        activeLayerSlot = 0
 
         // Base ball of clay resting on the ground plane, seeded before undo
         // is enabled so it can't be undone away — there is always something
@@ -384,12 +453,14 @@ final class ClayEngine {
                 blend: Int32(effectiveBlend.rawValue), rounding: 0,
                 boundCenter: position, boundRadius: radius,
                 mirrorFlag: mirrorAxes != 0 ? 1 : 0,
-                radialCount: 0
+                radialCount: 0,
+                layerSlot: Float(activeLayerSlot)
             ))
             itemAABBs.append((position - SIMD3(repeating: radius),
                               position + SIMD3(repeating: radius)))
             nodeIDs.append(node)
             localBounds.append((SIMD3.zero, radius))
+            itemLayers.append(Int32(activeLayerSlot))
             undoLog.append(.add)
             redoOps.removeAll()
             version += 1
@@ -474,7 +545,8 @@ final class ClayEngine {
             blend: Int32(CLAY_BLEND_QUADRATIC.rawValue), rounding: 0,
             boundCenter: bound.0, boundRadius: bound.1,
             mirrorFlag: mirrorAxes != 0 ? 1 : 0,
-            radialCount: Float(radialCount)
+            radialCount: Float(radialCount),
+            layerSlot: Float(activeLayerSlot)
         ))
         strokePoints.append(SIMD4(position.x, position.y, position.z, radius))
         let pad = radius + radius * 0.12 * 4 + blendK * 4 + 0.02
@@ -484,6 +556,7 @@ final class ClayEngine {
         itemAABBs.append(aabb)
         nodeIDs.append(node)
         localBounds.append((bound.0, bound.1)) // stroke origin is identity
+        itemLayers.append(Int32(activeLayerSlot))
         undoLog.append(.add)
         redoOps.removeAll()
         version += 1
@@ -567,17 +640,34 @@ final class ClayEngine {
         case .restroke(let index, let before, let after):
             replayRadiiMirror(before, at: index)
             redoOps.append(.restroke(index: index, before: before, after: after))
-        case .remove(let index, let item, let node, let aabb, let local):
+        case .remove(let index, let item, let node, let aabb, let local, let slot):
             // The doc restored the node (same id); re-insert the mirror row.
             items.insert(item, at: index)
             itemAABBs.insert(aabb, at: index)
             nodeIDs.insert(node, at: index)
             localBounds.insert(local, at: index)
+            itemLayers.insert(slot, at: index)
             dropCacheIfCovers(index)
             redoOps.append(.remove(index: index))
         case .reorder(let from, let to):
             applyReorder(from: to, to: from)
             redoOps.append(.reorder(from: from, to: to))
+        case .layerAdd(let info):
+            // LIFO: the layer's own items were undone first, so it is empty
+            // and last; the doc side already removed it.
+            if sdfLayers.last?.id == info.id {
+                sdfLayers.removeLast()
+                activateLayer(slot: min(activeLayerSlot, sdfLayers.count - 1))
+            }
+            redoOps.append(.layerAdd(info: info))
+        case .layerRemove(let slot, let info, let rows):
+            restoreLayerRows(slot: slot, info: info, rows: rows)
+            redoOps.append(.layerRemove(slot: slot))
+        case .layerVisibility(let slot, let before, let after):
+            if sdfLayers.indices.contains(slot) { sdfLayers[slot].visible = before }
+            fieldCache = nil
+            fieldCacheVersion += 1
+            redoOps.append(.layerVisibility(slot: slot, before: before, after: after))
         case .add, .none: // .none: history predating the log — treat as add
             if let last = items.popLast() {
                 var points: [SIMD4<Float>] = []
@@ -590,8 +680,9 @@ final class ClayEngine {
                 let aabb = itemAABBs.popLast() ?? (SIMD3.zero, SIMD3.zero)
                 let node = nodeIDs.popLast() ?? 0
                 let local = localBounds.popLast() ?? (SIMD3.zero, 0)
+                let slot = itemLayers.popLast() ?? 0
                 redoOps.append(.add(item: last, points: points, aabb: aabb,
-                                    node: node, localBound: local))
+                                    node: node, localBound: local, slot: slot))
             }
         }
         version += 1
@@ -604,7 +695,7 @@ final class ClayEngine {
         var redone: Int32 = 0
         guard check(clay_document_redo(doc, &redone)), redone != 0 else { return false }
         switch redoOps.popLast() {
-        case .add(var item, let points, let aabb, let node, let local):
+        case .add(var item, let points, let aabb, let node, let local, let slot):
             if item.prim == Self.strokePrim {
                 item.params.x = Float(strokePoints.count)
                 strokePoints.append(contentsOf: points)
@@ -613,6 +704,7 @@ final class ClayEngine {
             itemAABBs.append(aabb)
             nodeIDs.append(node)
             localBounds.append(local)
+            itemLayers.append(slot)
             undoLog.append(.add)
         case .transform(let index, let before, let after):
             apply(after, to: index)
@@ -630,16 +722,31 @@ final class ClayEngine {
             let entry = UndoKind.remove(index: index, item: items[index],
                                         node: nodeIDs[index],
                                         aabb: itemAABBs[index],
-                                        localBound: localBounds[index])
+                                        localBound: localBounds[index],
+                                        slot: itemLayers[index])
             items.remove(at: index)
             itemAABBs.remove(at: index)
             nodeIDs.remove(at: index)
             localBounds.remove(at: index)
+            itemLayers.remove(at: index)
             dropCacheIfCovers(index)
             undoLog.append(entry)
         case .reorder(let from, let to):
             applyReorder(from: from, to: to)
             undoLog.append(.reorder(from: from, to: to))
+        case .layerAdd(let info):
+            sdfLayers.append(info)
+            activateLayer(slot: sdfLayers.count - 1)
+            undoLog.append(.layerAdd(info: info))
+        case .layerRemove(let slot):
+            let info = sdfLayers[slot]
+            let rows = removeLayerRows(slot: slot)
+            undoLog.append(.layerRemove(slot: slot, info: info, rows: rows))
+        case .layerVisibility(let slot, let before, let after):
+            if sdfLayers.indices.contains(slot) { sdfLayers[slot].visible = after }
+            fieldCache = nil
+            fieldCacheVersion += 1
+            undoLog.append(.layerVisibility(slot: slot, before: before, after: after))
         case .none:
             break
         }
@@ -734,7 +841,7 @@ final class ClayEngine {
         var axis = q.axis
         let angle = q.angle
         if !axis.x.isFinite || simd_length_squared(axis) < 1e-9 { axis = SIMD3(0, 1, 0) }
-        guard check(clay_layer_set_transform(doc, layer, nodeIDs[index],
+        guard check(clay_layer_set_transform(doc, layerId(of: index), nodeIDs[index],
                                              [position.x, position.y, position.z],
                                              [axis.x, axis.y, axis.z],
                                              angle.isFinite ? angle : 0,
@@ -822,7 +929,7 @@ final class ClayEngine {
     /// the callers log).
     private func applyStyle(_ style: Style, to index: Int) -> Bool {
         guard let doc,
-              check(clay_layer_set_op_blend(doc, layer, nodeIDs[index],
+              check(clay_layer_set_op_blend(doc, layerId(of: index), nodeIDs[index],
                                             style.op, style.blend,
                                             style.blendK, style.rounding))
         else { return false }
@@ -871,7 +978,7 @@ final class ClayEngine {
             flat.append(contentsOf: [p.x, p.y, p.z, radii[i]])
         }
         // tolerance must be > 0 (curve fitting; irrelevant for raw strokes).
-        guard check(clay_layer_set_stroke_points(doc, layer, nodeIDs[index],
+        guard check(clay_layer_set_stroke_points(doc, layerId(of: index), nodeIDs[index],
                                                  flat, count, nil, nil, nil, 0, 0.001))
         else { return false }
         replayRadiiMirror(radii, at: index)
@@ -900,15 +1007,17 @@ final class ClayEngine {
     func deleteItem(index: Int) -> Bool {
         guard let doc, items.indices.contains(index),
               activeStroke == nil, transformIndex == nil else { return false }
-        guard check(clay_remove_node(doc, layer, nodeIDs[index])) else { return false }
+        guard check(clay_remove_node(doc, layerId(of: index), nodeIDs[index])) else { return false }
         let entry = UndoKind.remove(index: index, item: items[index],
                                     node: nodeIDs[index],
                                     aabb: itemAABBs[index],
-                                    localBound: localBounds[index])
+                                    localBound: localBounds[index],
+                                    slot: itemLayers[index])
         items.remove(at: index)
         itemAABBs.remove(at: index)
         nodeIDs.remove(at: index)
         localBounds.remove(at: index)
+        itemLayers.remove(at: index)
         undoLog.append(entry)
         redoOps.removeAll()
         dropCacheIfCovers(index)
@@ -925,7 +1034,7 @@ final class ClayEngine {
         guard let doc, from != to,
               items.indices.contains(from), items.indices.contains(to),
               activeStroke == nil, transformIndex == nil else { return false }
-        guard check(clay_layer_move(doc, layer, nodeIDs[from], 0, Int32(to)))
+        guard check(clay_layer_move(doc, layerId(of: from), nodeIDs[from], 0, Int32(to)))
         else { return false }
         applyReorder(from: from, to: to)
         undoLog.append(.reorder(from: from, to: to))
@@ -934,11 +1043,130 @@ final class ClayEngine {
         return true
     }
 
+    // MARK: Layer management (task 2.1 app-side)
+
+    /// Adds an SDF layer and makes it active. One undo step.
+    @discardableResult
+    func addLayer(named name: String? = nil) -> Bool {
+        guard let doc, sdfLayers.count < Self.maxLayers,
+              activeStroke == nil, transformIndex == nil else { return false }
+        let layerName = name ?? "Layer \(sdfLayers.count + 1)"
+        var id: clay_layer_id = 0
+        guard check(clay_add_sdf_layer(doc, layerName, &id)) else { return false }
+        let info = SdfLayer(id: id, name: layerName)
+        sdfLayers.append(info)
+        undoLog.append(.layerAdd(info: info))
+        redoOps.removeAll()
+        activateLayer(slot: sdfLayers.count - 1)
+        return true
+    }
+
+    /// Switches the active layer (tool state, not undoable) and restores
+    /// its mirror/radial settings.
+    func activateLayer(slot: Int) {
+        guard sdfLayers.indices.contains(slot) else { return }
+        activeLayerSlot = slot
+        layer = sdfLayers[slot].id
+        mirrorAxes = sdfLayers[slot].mirrorAxes
+        radialCount = sdfLayers[slot].radialCount
+        version += 1
+    }
+
+    /// Show/hide a layer — an undoable document command; the bake follows
+    /// (ClayCore evaluates hidden layers as empty space).
+    @discardableResult
+    func setLayerVisible(slot: Int, _ visible: Bool) -> Bool {
+        guard let doc, sdfLayers.indices.contains(slot),
+              sdfLayers[slot].visible != visible,
+              activeStroke == nil, transformIndex == nil else { return false }
+        guard check(clay_document_set_layer_visible(doc, sdfLayers[slot].id,
+                                                    visible ? 1 : 0)) else { return false }
+        let before = sdfLayers[slot].visible
+        sdfLayers[slot].visible = visible
+        undoLog.append(.layerVisibility(slot: slot, before: before, after: visible))
+        redoOps.removeAll()
+        fieldCache = nil
+        fieldCacheVersion += 1
+        version += 1
+        scheduleBake()
+        return true
+    }
+
+    /// Deletes a layer and everything on it. One undo step (ClayCore's
+    /// RemoveLayerCmd restores the layer with its nodes; the mirror rows
+    /// restore from the logged snapshot).
+    @discardableResult
+    func deleteLayer(slot: Int) -> Bool {
+        guard let doc, sdfLayers.count > 1, sdfLayers.indices.contains(slot),
+              activeStroke == nil, transformIndex == nil else { return false }
+        let info = sdfLayers[slot]
+        guard check(clay_document_remove_layer(doc, info.id)) else { return false }
+        let rows = removeLayerRows(slot: slot)
+        undoLog.append(.layerRemove(slot: slot, info: info, rows: rows))
+        redoOps.removeAll()
+        return true
+    }
+
+    /// Mirror-side removal of a layer's rows + slot remap; shared by the
+    /// user-facing delete and redo replay. Returns the removed rows.
+    @discardableResult
+    private func removeLayerRows(slot: Int) -> [LayerRow] {
+        var rows: [LayerRow] = []
+        for i in items.indices where Int(itemLayers[i]) == slot {
+            rows.append(LayerRow(index: i, item: items[i], node: nodeIDs[i],
+                                 aabb: itemAABBs[i], local: localBounds[i],
+                                 slot: itemLayers[i]))
+        }
+        for row in rows.reversed() {
+            items.remove(at: row.index)
+            itemAABBs.remove(at: row.index)
+            nodeIDs.remove(at: row.index)
+            localBounds.remove(at: row.index)
+            itemLayers.remove(at: row.index)
+        }
+        for i in itemLayers.indices where itemLayers[i] > Int32(slot) {
+            itemLayers[i] -= 1
+            items[i].layerSlot = Float(itemLayers[i])
+        }
+        sdfLayers.remove(at: slot)
+        if activeLayerSlot >= slot {
+            activateLayer(slot: max(0, min(activeLayerSlot == slot ? slot : activeLayerSlot - 1,
+                                           sdfLayers.count - 1)))
+        }
+        fieldCache = nil
+        fieldCacheVersion += 1
+        version += 1
+        scheduleBake()
+        return rows
+    }
+
+    /// Mirror-side restore of a removed layer (undo replay).
+    private func restoreLayerRows(slot: Int, info: SdfLayer, rows: [LayerRow]) {
+        sdfLayers.insert(info, at: slot)
+        for i in itemLayers.indices where itemLayers[i] >= Int32(slot) {
+            itemLayers[i] += 1
+            items[i].layerSlot = Float(itemLayers[i])
+        }
+        for row in rows { // ascending indices restore exact positions
+            items.insert(row.item, at: row.index)
+            itemAABBs.insert(row.aabb, at: row.index)
+            nodeIDs.insert(row.node, at: row.index)
+            localBounds.insert(row.local, at: row.index)
+            itemLayers.insert(row.slot, at: row.index)
+        }
+        if activeLayerSlot >= slot { activateLayer(slot: activeLayerSlot) }
+        fieldCache = nil
+        fieldCacheVersion += 1
+        version += 1
+        scheduleBake()
+    }
+
     private func applyReorder(from: Int, to: Int) {
         items.insert(items.remove(at: from), at: to)
         itemAABBs.insert(itemAABBs.remove(at: from), at: to)
         nodeIDs.insert(nodeIDs.remove(at: from), at: to)
         localBounds.insert(localBounds.remove(at: from), at: to)
+        itemLayers.insert(itemLayers.remove(at: from), at: to)
         dropCacheIfCovers(min(from, to))
         version += 1
     }
@@ -1009,11 +1237,14 @@ final class ClayEngine {
         for (index, aabb) in itemAABBs.enumerated() {
             mn = simd_min(mn, aabb.min)
             mx = simd_max(mx, aabb.max)
-            // A mirrored item also occupies its reflections (+ seam blend).
-            if mirrorAxes != 0, items.indices.contains(index),
+            // A mirrored item also occupies its reflections (+ seam blend),
+            // through ITS layer's axes.
+            let slot = Int(itemLayers.indices.contains(index) ? itemLayers[index] : 0)
+            let axes = sdfLayers.indices.contains(slot) ? sdfLayers[slot].mirrorAxes : mirrorAxes
+            if axes != 0, items.indices.contains(index),
                items[index].mirrorFlag != 0 {
                 let pad = SIMD3<Float>(repeating: 4 * mirrorK)
-                for axis in 0..<3 where (mirrorAxes & (1 << axis)) != 0 {
+                for axis in 0..<3 where (axes & (1 << axis)) != 0 {
                     var rMin = aabb.min, rMax = aabb.max
                     rMin[axis] = -aabb.max[axis]
                     rMax[axis] = -aabb.min[axis]
@@ -1286,7 +1517,7 @@ final class ClayEngine {
         guard let doc, items.indices.contains(index),
               !isStroking, !isTransforming else { return false }
         let before = items[index].color
-        guard check(clay_layer_set_color(doc, layer, nodeIDs[index],
+        guard check(clay_layer_set_color(doc, layerId(of: index), nodeIDs[index],
                                          [color.x, color.y, color.z])) else { return false }
         items[index].color = color
         undoLog.append(.recolor(index: index, before: before, after: color))
@@ -1725,8 +1956,9 @@ final class ClayEngine {
     var isDirty: Bool { version != lastSavedVersion }
 
     private static let mirrorMagic: UInt32 = 0x4353_4D52 // "CSMR"
-    /// Format 2 appends the material preset; format-1 files load as Matte.
-    private static let mirrorFormat: UInt32 = 2
+    /// Format 2 appended the material preset; format 3 adds the layer
+    /// table + per-item layer slots. Formats 1/2 load as one layer.
+    private static let mirrorFormat: UInt32 = 3
 
     /// The render mirror as blittable sidecar data — the C ABI has no scene
     /// enumeration, so the mirror persists alongside the document.
@@ -1750,6 +1982,20 @@ final class ClayEngine {
         append(itemAABBs.map(\.max))
         append(localBounds.map(\.center))
         append(localBounds.map(\.radius))
+        // Format 3 tail: the layer table + per-item slots append AFTER the
+        // format-2 layout, so older files are exactly a truncated new one.
+        append([UInt32(sdfLayers.count), UInt32(activeLayerSlot)] as [UInt32])
+        for info in sdfLayers {
+            append([info.id, info.visible ? 1 : 0,
+                    UInt32(bitPattern: info.mirrorAxes),
+                    UInt32(bitPattern: info.radialCount)] as [UInt32])
+            var nameBytes = [UInt8](repeating: 0, count: 32)
+            for (i, byte) in Array(info.name.utf8.prefix(32)).enumerated() {
+                nameBytes[i] = byte
+            }
+            append(nameBytes)
+        }
+        append(itemLayers)
         return data
     }
 
@@ -1818,7 +2064,7 @@ final class ClayEngine {
 
         guard let header: [UInt32] = readArray(count: 8),
               header[0] == Self.mirrorMagic,
-              header[1] == 1 || header[1] == Self.mirrorFormat else {
+              (1...Self.mirrorFormat).contains(header[1]) else {
             clay_document_destroy(newDoc)
             return false
         }
@@ -1839,10 +2085,43 @@ final class ClayEngine {
             return false
         }
 
+        // Format 3 tail: layer table + per-item slots; absent in 1/2.
+        var loadedLayers: [SdfLayer] = []
+        var loadedActiveSlot = 0
+        var newItemLayers = [Int32](repeating: 0, count: itemCount)
+        if header[1] >= 3, let counts: [UInt32] = readArray(count: 2) {
+            loadedActiveSlot = Int(counts[1])
+            for _ in 0..<min(Int(counts[0]), Self.maxLayers) {
+                guard let record: [UInt32] = readArray(count: 4),
+                      let nameBytes: [UInt8] = readArray(count: 32) else {
+                    clay_document_destroy(newDoc)
+                    return false
+                }
+                let name = String(bytes: nameBytes.prefix { $0 != 0 }, encoding: .utf8)
+                    ?? "Layer"
+                loadedLayers.append(SdfLayer(id: record[0], name: name,
+                                             visible: record[1] != 0,
+                                             mirrorAxes: Int32(bitPattern: record[2]),
+                                             radialCount: Int32(bitPattern: record[3])))
+            }
+            if let slots: [Int32] = readArray(count: itemCount) {
+                newItemLayers = slots
+            }
+        }
+
         if let old = doc { clay_document_destroy(old) }
         doc = newDoc
-        layer = clay_layer_id(header[7])
         materialPreset = loadedPreset
+        if loadedLayers.isEmpty {
+            loadedLayers = [SdfLayer(id: clay_layer_id(header[7]), name: "Clay",
+                                     mirrorAxes: Int32(bitPattern: header[4]),
+                                     radialCount: Int32(bitPattern: header[5]))]
+            loadedActiveSlot = 0
+        }
+        sdfLayers = loadedLayers
+        activeLayerSlot = min(max(loadedActiveSlot, 0), loadedLayers.count - 1)
+        layer = loadedLayers[activeLayerSlot].id
+        itemLayers = newItemLayers
         mirrorAxes = Int32(bitPattern: header[4])
         radialCount = Int32(bitPattern: header[5])
         mirrorK = Float(bitPattern: header[6])
@@ -1937,6 +2216,9 @@ final class ClayEngine {
         var layerId: clay_layer_id = 0
         guard check(clay_add_sdf_layer(doc, "Clay", &layerId)) else { return }
         layer = layerId
+        sdfLayers = [SdfLayer(id: layerId, name: "Clay")]
+        activeLayerSlot = 0
+        itemLayers = []
         addPrimitive(CLAY_PRIM_SPHERE, params: [0.8],
                      at: SIMD3(0, 0.8, 0), op: CLAY_OP_ADD,
                      blendK: 0, color: Self.clayColor, recordMirror: true)
