@@ -128,10 +128,24 @@ final class ClayEngine {
 
     /// One entry per ClayCore undo step, so mixed histories (adds and
     /// transforms) keep the render mirror in sync through undo/redo.
+    /// An item's combine styling (edit-list panel, task 7.4).
+    struct Style: Equatable {
+        var op: Int32
+        var blend: Int32
+        var blendK: Float
+        var rounding: Float
+    }
+
     private enum UndoKind {
         case add
         case transform(index: Int, before: Placement, after: Placement)
         case recolor(index: Int, before: SIMD3<Float>, after: SIMD3<Float>)
+        case restyle(index: Int, before: Style, after: Style)
+        case restroke(index: Int, before: [Float], after: [Float]) // point radii
+        case remove(index: Int, item: SceneItem, node: clay_node_id,
+                    aabb: (min: SIMD3<Float>, max: SIMD3<Float>),
+                    localBound: (center: SIMD3<Float>, radius: Float))
+        case reorder(from: Int, to: Int)
     }
     private enum RedoOp {
         case add(item: SceneItem, points: [SIMD4<Float>],
@@ -139,6 +153,10 @@ final class ClayEngine {
                  node: clay_node_id, localBound: (center: SIMD3<Float>, radius: Float))
         case transform(index: Int, before: Placement, after: Placement)
         case recolor(index: Int, before: SIMD3<Float>, after: SIMD3<Float>)
+        case restyle(index: Int, before: Style, after: Style)
+        case restroke(index: Int, before: [Float], after: [Float])
+        case remove(index: Int)
+        case reorder(from: Int, to: Int)
     }
     private var undoLog: [UndoKind] = []
     private var redoOps: [RedoOp] = []
@@ -508,6 +526,25 @@ final class ClayEngine {
         case .recolor(let index, let before, let after):
             if items.indices.contains(index) { items[index].color = before }
             redoOps.append(.recolor(index: index, before: before, after: after))
+        case .restyle(let index, let before, let after):
+            // clay_document_undo already reverted the doc; only the mirror
+            // needs the before-style (applyStyle would double-log the doc).
+            replayStyleMirror(before, at: index)
+            redoOps.append(.restyle(index: index, before: before, after: after))
+        case .restroke(let index, let before, let after):
+            replayRadiiMirror(before, at: index)
+            redoOps.append(.restroke(index: index, before: before, after: after))
+        case .remove(let index, let item, let node, let aabb, let local):
+            // The doc restored the node (same id); re-insert the mirror row.
+            items.insert(item, at: index)
+            itemAABBs.insert(aabb, at: index)
+            nodeIDs.insert(node, at: index)
+            localBounds.insert(local, at: index)
+            dropCacheIfCovers(index)
+            redoOps.append(.remove(index: index))
+        case .reorder(let from, let to):
+            applyReorder(from: to, to: from)
+            redoOps.append(.reorder(from: from, to: to))
         case .add, .none: // .none: history predating the log — treat as add
             if let last = items.popLast() {
                 var points: [SIMD4<Float>] = []
@@ -550,12 +587,63 @@ final class ClayEngine {
         case .recolor(let index, let before, let after):
             if items.indices.contains(index) { items[index].color = after }
             undoLog.append(.recolor(index: index, before: before, after: after))
+        case .restyle(let index, let before, let after):
+            replayStyleMirror(after, at: index)
+            undoLog.append(.restyle(index: index, before: before, after: after))
+        case .restroke(let index, let before, let after):
+            replayRadiiMirror(after, at: index)
+            undoLog.append(.restroke(index: index, before: before, after: after))
+        case .remove(let index):
+            let entry = UndoKind.remove(index: index, item: items[index],
+                                        node: nodeIDs[index],
+                                        aabb: itemAABBs[index],
+                                        localBound: localBounds[index])
+            items.remove(at: index)
+            itemAABBs.remove(at: index)
+            nodeIDs.remove(at: index)
+            localBounds.remove(at: index)
+            dropCacheIfCovers(index)
+            undoLog.append(entry)
+        case .reorder(let from, let to):
+            applyReorder(from: from, to: to)
+            undoLog.append(.reorder(from: from, to: to))
         case .none:
             break
         }
         version += 1
         scheduleBake()
         return true
+    }
+
+    /// Mirror-only style replay for undo/redo (the doc side is already
+    /// rewound by clay_document_undo/redo).
+    private func replayStyleMirror(_ style: Style, at index: Int) {
+        guard items.indices.contains(index) else { return }
+        let oldSupport = Self.blendSupport(clay_blend(UInt32(items[index].blend)),
+                                           items[index].blendK)
+        let newSupport = Self.blendSupport(clay_blend(UInt32(style.blend)),
+                                           style.blendK)
+        items[index].op = style.op
+        items[index].blend = style.blend
+        items[index].blendK = style.blendK
+        items[index].rounding = style.rounding
+        localBounds[index].radius += newSupport - oldSupport
+        refreshWorldBound(index)
+        dropCacheIfCovers(index)
+    }
+
+    /// Mirror-only stroke-radii replay for undo/redo.
+    private func replayRadiiMirror(_ radii: [Float], at index: Int) {
+        guard items.indices.contains(index),
+              items[index].prim == Self.strokePrim else { return }
+        let first = Int(items[index].params.x)
+        let count = Int(items[index].params.y)
+        guard radii.count == count else { return }
+        let oldMax = strokePoints[first..<(first + count)].map(\.w).max() ?? 0
+        for i in 0..<count { strokePoints[first + i].w = radii[i] }
+        localBounds[index].radius += (radii.max() ?? 0) - oldMax
+        refreshWorldBound(index)
+        dropCacheIfCovers(index)
     }
 
     // MARK: Selection & transform (task 7.3 core)
@@ -659,6 +747,167 @@ final class ClayEngine {
     func boundContains(_ index: Int, point: SIMD3<Float>) -> Bool {
         guard items.indices.contains(index) else { return false }
         return simd_distance(point, items[index].boundCenter) <= items[index].boundRadius
+    }
+
+    // MARK: Edit-list operations (tasks 7.4/7.5)
+
+    func style(of index: Int) -> Style {
+        let it = items[index]
+        return Style(op: it.op, blend: it.blend, blendK: it.blendK,
+                     rounding: it.rounding)
+    }
+
+    /// Recomputes an item's world bound from its local sphere (the same
+    /// math updateTransform uses), for edits that change the local reach.
+    private func refreshWorldBound(_ index: Int) {
+        let it = items[index]
+        let q = simd_quatf(ix: it.rotation.x, iy: it.rotation.y,
+                           iz: it.rotation.z, r: it.rotation.w)
+        let local = localBounds[index]
+        let center = it.position + q.act(local.center * it.scale)
+        let radius = local.radius * max(it.scale, 1)
+        var bound = (center, radius)
+        var aabb = (min: center - SIMD3(repeating: radius),
+                    max: center + SIMD3(repeating: radius))
+        if it.radialCount >= 2 {
+            bound = Self.ringBound(center: bound.0, radius: bound.1)
+            aabb = Self.ringAABB(aabb)
+        }
+        items[index].boundCenter = bound.0
+        items[index].boundRadius = bound.1
+        itemAABBs[index] = aabb
+    }
+
+    private func dropCacheIfCovers(_ index: Int) {
+        if let cache = fieldCache, index < cache.bakedItemCount {
+            fieldCache = nil
+            fieldCacheVersion += 1
+        }
+    }
+
+    /// Applies a style through the ABI and mirrors it (no undo logging —
+    /// the callers log).
+    private func applyStyle(_ style: Style, to index: Int) -> Bool {
+        guard let doc,
+              check(clay_layer_set_op_blend(doc, layer, nodeIDs[index],
+                                            style.op, style.blend,
+                                            style.blendK, style.rounding))
+        else { return false }
+        replayStyleMirror(style, at: index)
+        version += 1
+        return true
+    }
+
+    /// Post-hoc op/blend edit (edit-list panel). One undo step.
+    @discardableResult
+    func setStyle(index: Int, op: clay_op, blend: clay_blend, blendK: Float) -> Bool {
+        guard items.indices.contains(index),
+              activeStroke == nil, transformIndex == nil else { return false }
+        let before = style(of: index)
+        let after = Style(op: Int32(op.rawValue),
+                          blend: Int32((blendK > 0 ? blend : CLAY_BLEND_HARD).rawValue),
+                          blendK: blendK, rounding: before.rounding)
+        guard after != before else { return true }
+        guard applyStyle(after, to: index) else { return false }
+        undoLog.append(.restyle(index: index, before: before, after: after))
+        redoOps.removeAll()
+        scheduleBake()
+        return true
+    }
+
+    /// Point radii of a stroke item (edit-list panel slider baseline).
+    func strokeRadii(of index: Int) -> [Float]? {
+        guard items.indices.contains(index),
+              items[index].prim == Self.strokePrim else { return nil }
+        let first = Int(items[index].params.x)
+        let count = Int(items[index].params.y)
+        return strokePoints[first..<(first + count)].map(\.w)
+    }
+
+    /// Replaces a stroke's point radii through the ABI and mirrors them
+    /// (no undo logging — the callers log).
+    private func applyStrokeRadii(_ radii: [Float], to index: Int) -> Bool {
+        guard let doc, items[index].prim == Self.strokePrim else { return false }
+        let first = Int(items[index].params.x)
+        let count = Int(items[index].params.y)
+        guard radii.count == count else { return false }
+        var flat = [Float]()
+        flat.reserveCapacity(count * 4)
+        for i in 0..<count {
+            let p = strokePoints[first + i]
+            flat.append(contentsOf: [p.x, p.y, p.z, radii[i]])
+        }
+        // tolerance must be > 0 (curve fitting; irrelevant for raw strokes).
+        guard check(clay_layer_set_stroke_points(doc, layer, nodeIDs[index],
+                                                 flat, count, nil, nil, nil, 0, 0.001))
+        else { return false }
+        replayRadiiMirror(radii, at: index)
+        version += 1
+        return true
+    }
+
+    /// Post-hoc stroke thickness (task 7.5): scales every point radius.
+    /// One undo step.
+    @discardableResult
+    func scaleStrokeRadii(index: Int, factor: Float) -> Bool {
+        guard let before = strokeRadii(of: index), factor > 0,
+              activeStroke == nil, transformIndex == nil else { return false }
+        let after = before.map { min(max($0 * factor, 0.005), 2.0) }
+        guard applyStrokeRadii(after, to: index) else { return false }
+        undoLog.append(.restroke(index: index, before: before, after: after))
+        redoOps.removeAll()
+        scheduleBake()
+        return true
+    }
+
+    /// Removes an item (edit-list panel). Its stroke points stay in the
+    /// pool as orphans so undo/redo of other strokes keeps the LIFO-tail
+    /// invariant; save/load compacts nothing but stays consistent.
+    @discardableResult
+    func deleteItem(index: Int) -> Bool {
+        guard let doc, items.indices.contains(index),
+              activeStroke == nil, transformIndex == nil else { return false }
+        guard check(clay_remove_node(doc, layer, nodeIDs[index])) else { return false }
+        let entry = UndoKind.remove(index: index, item: items[index],
+                                    node: nodeIDs[index],
+                                    aabb: itemAABBs[index],
+                                    localBound: localBounds[index])
+        items.remove(at: index)
+        itemAABBs.remove(at: index)
+        nodeIDs.remove(at: index)
+        localBounds.remove(at: index)
+        undoLog.append(entry)
+        redoOps.removeAll()
+        dropCacheIfCovers(index)
+        version += 1
+        scheduleBake()
+        return true
+    }
+
+    /// Reorders an item within the layer (edit-list panel drag): `to` is
+    /// the final index after removal. Changes eval order — that's the
+    /// point. One undo step.
+    @discardableResult
+    func moveItem(from: Int, to: Int) -> Bool {
+        guard let doc, from != to,
+              items.indices.contains(from), items.indices.contains(to),
+              activeStroke == nil, transformIndex == nil else { return false }
+        guard check(clay_layer_move(doc, layer, nodeIDs[from], 0, Int32(to)))
+        else { return false }
+        applyReorder(from: from, to: to)
+        undoLog.append(.reorder(from: from, to: to))
+        redoOps.removeAll()
+        scheduleBake()
+        return true
+    }
+
+    private func applyReorder(from: Int, to: Int) {
+        items.insert(items.remove(at: from), at: to)
+        itemAABBs.insert(itemAABBs.remove(at: from), at: to)
+        nodeIDs.insert(nodeIDs.remove(at: from), at: to)
+        localBounds.insert(localBounds.remove(at: from), at: to)
+        dropCacheIfCovers(min(from, to))
+        version += 1
     }
 
     // MARK: Field cache (baked rendering, design D2 / task 3.1 first stage)

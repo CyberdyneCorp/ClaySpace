@@ -61,8 +61,8 @@
 - [x] 7.1 Primitive placement (tap-to-place, pressure-sized) + kind picker — Shape tool in the rail: tap places the picked kind (sphere/box/cylinder/cone/torus/capsule/ellipsoid/hex prism) sized by peak pressure; radial symmetry stamps real oriented copies about world Y (the ABI's radial repeat is item-local — a no-op for centered prims)
 - [x] 7.2 Bottom contextual bar: kind, op, blend profile + radius slider — ShapeBar (Shape tool, Smooth mode): 8 kind icons, Add/Cut/Keep/Tint segmented op, Hard/Smooth/Silky/Fillet/Chamfer blend menu + k slider; all five csmin profiles and five new prim kernels copied verbatim into the preview MSL with per-profile support widths in the bound padding
 - [ ] 7.3 Touch transform gizmo (move/rotate/scale) with surface snapping (position / position+normal) and angle snap haptics; wire `pencilBarrelRolled` deltas to the selected item's view-axis rotation (5.4 plumbing) — IN PROGRESS: attributed picking (Select/Move tools), orange selection glow, drag-to-move as one grouped undo step, and barrel-roll rotation shipped; visible gizmo handles, scale, surface snapping, and snap haptics pending
-- [ ] 7.4 Edit-list inspector panel: reorder, group/ungroup, per-item op/blend/color editing
-- [ ] 7.5 Stroke editing UI (select stroke, adjust radius/color/blend post-hoc)
+- [ ] 7.4 Edit-list inspector panel: reorder, group/ungroup, per-item op/blend/color editing — IN PROGRESS: EditListPanel in the inspector (eval-order list, tap-select with viewport glow, drag-reorder via clay_layer_move, swipe/button delete via clay_remove_node, per-item op + blend profile/k via clay_layer_set_op_blend, color via palette recolor), all one-undo-step with mirror-replay undo/redo; group/ungroup pending (needs group nodes in the app model)
+- [x] 7.5 Stroke editing UI (select stroke, adjust radius/color/blend post-hoc) — thickness slider scales every point radius via clay_layer_set_stroke_points (commit-on-release, one undo step; deleted strokes orphan their pool slice to preserve the LIFO-tail undo invariant); color via palette, blend via the panel's profile/k controls
 
 ## 8. Materials & color
 

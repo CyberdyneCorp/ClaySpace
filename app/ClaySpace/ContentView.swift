@@ -193,9 +193,6 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Build")
                 .font(.system(size: 17, weight: .semibold, design: .serif))
-            Text("Layers, surface, and light arrive with the scene model.")
-                .font(.system(size: 12.5))
-                .foregroundStyle(.secondary)
             HStack {
                 Text("Shapes")
                 Spacer()
@@ -212,6 +209,7 @@ struct ContentView: View {
             }
             .font(.system(size: 12.5))
             .foregroundStyle(.secondary)
+            EditListPanel(state: state)
             Spacer()
         }
         .padding(16)

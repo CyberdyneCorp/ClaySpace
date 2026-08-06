@@ -397,6 +397,129 @@ final class ClayEngineTests: XCTestCase {
         engine.setRadial(count: 0)
     }
 
+    func testSetStyleReflowsTheFieldAndUndoes() {
+        let engine = ClayEngine()
+        let base = SIMD3<Float>(5, 2, 0)
+        XCTAssertTrue(engine.addPrimitive(CLAY_PRIM_SPHERE, params: [0.6],
+                                          at: base, op: CLAY_OP_ADD,
+                                          blendK: 0, color: ClayEngine.clayColor))
+        XCTAssertTrue(engine.addPrimitive(CLAY_PRIM_ROUND_BOX,
+                                          params: [0.7, 0.3, 0.7, 0.05],
+                                          at: SIMD3(5, 2.6, 0), op: CLAY_OP_SUBTRACT,
+                                          blendK: 0, color: ClayEngine.clayColor))
+        let cutIndex = engine.items.count - 1
+        let carved = engine.raycast(origin: SIMD3(5, 8, 0), direction: SIMD3(0, -1, 0))
+        XCTAssertLessThan(carved?.position.y ?? 10, 2.4, "box carved the crown")
+
+        // Flip the cut to Add: the box now sticks out the top.
+        XCTAssertTrue(engine.setStyle(index: cutIndex, op: CLAY_OP_ADD,
+                                      blend: CLAY_BLEND_QUADRATIC, blendK: 0))
+        let bumped = engine.raycast(origin: SIMD3(5, 8, 0), direction: SIMD3(0, -1, 0))
+        XCTAssertEqual(bumped?.position.y ?? 0, 2.9, accuracy: 0.03,
+                       "restyled box tops out at its own slab height")
+        XCTAssertEqual(engine.items[cutIndex].op, Int32(CLAY_OP_ADD.rawValue))
+
+        // Undo returns the carve — doc and mirror together.
+        XCTAssertTrue(engine.undo())
+        XCTAssertEqual(engine.items[cutIndex].op, Int32(CLAY_OP_SUBTRACT.rawValue))
+        let recarved = engine.raycast(origin: SIMD3(5, 8, 0), direction: SIMD3(0, -1, 0))
+        XCTAssertLessThan(recarved?.position.y ?? 10, 2.4)
+        XCTAssertTrue(engine.redo())
+        XCTAssertEqual(engine.items[cutIndex].op, Int32(CLAY_OP_ADD.rawValue))
+
+        // Widening the blend must widen the preview bound (support rule).
+        let before = engine.items[cutIndex].boundRadius
+        XCTAssertTrue(engine.setStyle(index: cutIndex, op: CLAY_OP_ADD,
+                                      blend: CLAY_BLEND_CUBIC, blendK: 0.1))
+        XCTAssertEqual(engine.items[cutIndex].boundRadius, before + 0.6,
+                       accuracy: 0.01, "cubic support is 6k")
+    }
+
+    func testScaleStrokeRadiiThickensAndUndoes() {
+        let engine = ClayEngine()
+        engine.beginStroke(at: SIMD3(5, 2, 0), radius: 0.2,
+                           op: CLAY_OP_ADD, blendK: 0.02, color: ClayEngine.clayColor)
+        engine.appendStrokePoint(SIMD3(5.6, 2, 0), radius: 0.2)
+        engine.endStroke()
+        let index = engine.items.count - 1
+
+        let before = engine.raycast(origin: SIMD3(5.3, 8, 0), direction: SIMD3(0, -1, 0))
+        XCTAssertEqual(before?.position.y ?? 0, 2.2, accuracy: 0.05)
+
+        XCTAssertTrue(engine.scaleStrokeRadii(index: index, factor: 2))
+        XCTAssertEqual(engine.strokeRadii(of: index) ?? [], [0.4, 0.4])
+        let after = engine.raycast(origin: SIMD3(5.3, 8, 0), direction: SIMD3(0, -1, 0))
+        XCTAssertEqual(after?.position.y ?? 0, 2.4, accuracy: 0.05,
+                       "doubled radii raise the chain's crown")
+
+        XCTAssertTrue(engine.undo())
+        XCTAssertEqual(engine.strokeRadii(of: index) ?? [], [0.2, 0.2])
+        let restored = engine.raycast(origin: SIMD3(5.3, 8, 0), direction: SIMD3(0, -1, 0))
+        XCTAssertEqual(restored?.position.y ?? 0, 2.2, accuracy: 0.05)
+        XCTAssertTrue(engine.redo())
+        XCTAssertEqual(engine.strokeRadii(of: index) ?? [], [0.4, 0.4])
+    }
+
+    func testDeleteMiddleStrokeKeepsPoolInvariantThroughUndo() {
+        let engine = ClayEngine()
+        engine.beginStroke(at: SIMD3(4, 2, 0), radius: 0.25,
+                           op: CLAY_OP_ADD, blendK: 0, color: ClayEngine.clayColor)
+        engine.endStroke()
+        let middle = engine.items.count - 1
+        engine.beginStroke(at: SIMD3(7, 2, 0), radius: 0.25,
+                           op: CLAY_OP_ADD, blendK: 0, color: ClayEngine.clayColor)
+        engine.endStroke()
+
+        // Delete the MIDDLE stroke: its points orphan in the pool; the
+        // later stroke keeps working and stays the pool tail.
+        XCTAssertTrue(engine.deleteItem(index: middle))
+        XCTAssertNil(engine.raycast(origin: SIMD3(4, 8, 0), direction: SIMD3(0, -1, 0)),
+                     "deleted stroke's surface is gone")
+        XCTAssertNotNil(engine.raycast(origin: SIMD3(7, 8, 0), direction: SIMD3(0, -1, 0)))
+
+        // Undo restores it — same node id, same pool slice.
+        XCTAssertTrue(engine.undo())
+        let back = engine.raycast(origin: SIMD3(4, 8, 0), direction: SIMD3(0, -1, 0))
+        XCTAssertEqual(back?.position.y ?? 0, 2.25, accuracy: 0.03)
+        XCTAssertEqual(engine.strokeRadii(of: middle) ?? [], [0.25])
+
+        // And undoing the LATER stroke's add still pops the pool tail.
+        XCTAssertTrue(engine.redo()) // delete middle again
+        XCTAssertTrue(engine.undo()) // restore middle
+        XCTAssertTrue(engine.undo()) // undo the later stroke's add
+        XCTAssertNil(engine.raycast(origin: SIMD3(7, 8, 0), direction: SIMD3(0, -1, 0)))
+        XCTAssertNotNil(engine.raycast(origin: SIMD3(4, 8, 0), direction: SIMD3(0, -1, 0)))
+    }
+
+    func testReorderChangesEvalOrderAndUndoes() {
+        let engine = ClayEngine()
+        let base = SIMD3<Float>(5, 2, 0)
+        XCTAssertTrue(engine.addPrimitive(CLAY_PRIM_SPHERE, params: [0.6],
+                                          at: base, op: CLAY_OP_ADD,
+                                          blendK: 0, color: ClayEngine.clayColor))
+        let ballIndex = engine.items.count - 1
+        XCTAssertTrue(engine.addPrimitive(CLAY_PRIM_ROUND_BOX,
+                                          params: [0.7, 0.3, 0.7, 0.05],
+                                          at: SIMD3(5, 2.6, 0), op: CLAY_OP_SUBTRACT,
+                                          blendK: 0, color: ClayEngine.clayColor))
+        let cutIndex = engine.items.count - 1
+        XCTAssertLessThan(engine.raycast(origin: SIMD3(5, 8, 0),
+                                         direction: SIMD3(0, -1, 0))?.position.y ?? 10,
+                          2.4, "cut after add carves")
+
+        // Move the cut BEFORE the ball: subtracting from nothing, then
+        // adding the ball — the crown comes back whole.
+        XCTAssertTrue(engine.moveItem(from: cutIndex, to: ballIndex))
+        XCTAssertEqual(engine.raycast(origin: SIMD3(5, 8, 0),
+                                      direction: SIMD3(0, -1, 0))?.position.y ?? 0,
+                       2.6, accuracy: 0.03, "cut evaluated first is a no-op")
+
+        XCTAssertTrue(engine.undo())
+        XCTAssertLessThan(engine.raycast(origin: SIMD3(5, 8, 0),
+                                         direction: SIMD3(0, -1, 0))?.position.y ?? 10,
+                          2.4, "undo restores the carve order")
+    }
+
     func testRenameDocumentMovesPackageAndRefusesCollisions() {
         let engine = ClayEngine()
         let suffix = UUID().uuidString.prefix(6)
