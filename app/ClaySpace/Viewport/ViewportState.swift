@@ -282,6 +282,8 @@ extension ViewportState: PencilToolSink {
             // freshly-built surface.
             strokePlane = (start, camera.basis.forward)
             lastStrokePoint = start
+        } else if let error = engine.lastError {
+            showToast("Stroke failed: \(error)")
         }
     }
 
@@ -301,12 +303,15 @@ extension ViewportState: PencilToolSink {
         lastStrokePoint = p
     }
 
-    /// The system/UI cancelled the pencil gesture: abort without an edit.
+    /// The system cancelled the pencil gesture (palm rejection, app switch,
+    /// recognizer). Commit what was drawn — deleting a long smear because a
+    /// notification banner appeared would be data loss; phantom chrome taps
+    /// are already swallowed before they ever begin a stroke.
     func pencilCancelled() {
         pencilStart = nil
         strokePlane = nil
         lastStrokePoint = nil
-        engine.cancelStroke()
+        engine.endStroke()
     }
 
     func pencilEnded(at point: CGPoint) {

@@ -94,14 +94,21 @@ final class MetalViewportView: UIView {
         addInteraction(UIPencilInteraction(delegate: self))
 
         // Radial-menu fallback for Pencils without squeeze: pencil long-press.
+        // Must never cancel the touch stream — a slow, careful stroke start
+        // looks exactly like a long-press, and cancelling it deleted strokes.
         let pencilHold = UILongPressGestureRecognizer(target: self, action: #selector(pencilHeld))
         pencilHold.allowedTouchTypes = [UITouch.TouchType.pencil.rawValue as NSNumber]
         pencilHold.minimumPressDuration = 0.45
+        pencilHold.cancelsTouchesInView = false
         addGestureRecognizer(pencilHold)
     }
 
     @objc private func pencilHeld(_ recognizer: UILongPressGestureRecognizer) {
         guard recognizer.state == .began else { return }
+        // Drawing tools own the pencil-down; the menu fallback would hijack
+        // slow stroke starts. Non-drawing tools (and Pencil Pro squeeze)
+        // still reach the menu.
+        guard state.activeTool != .sculpt, state.activeTool != .erase else { return }
         state.openRadialMenu(at: recognizer.location(in: self))
     }
 

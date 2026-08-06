@@ -133,6 +133,24 @@ final class CameraAndInputTests: XCTestCase {
         XCTAssertTrue(state.engine.strokePoints.isEmpty, "the point pool trims with it")
     }
 
+    func testCancelledPencilGestureCommitsTheDrawnStroke() {
+        // A system cancellation mid-smear (palm rejection, banner, app
+        // switch) must keep the work, not delete it.
+        let state = ViewportState()
+        state.viewportSize = CGSize(width: 800, height: 600)
+        state.activate(.sculpt, announce: false)
+        state.pencilBegan(at: CGPoint(x: 400, y: 300), pressure: 0.5)
+        for x in stride(from: 410, through: 500, by: 10) {
+            state.pencilMoved(to: CGPoint(x: CGFloat(x), y: 300), pressure: 0.6)
+        }
+        state.pencilCancelled()
+        XCTAssertFalse(state.engine.isStroking)
+        XCTAssertEqual(state.engine.items.count, 2, "the smear survives the cancellation")
+        XCTAssertGreaterThan(Int(state.engine.items[1].params.y), 1)
+        state.requestUndo()
+        XCTAssertEqual(state.engine.items.count, 1, "and stays one undo step")
+    }
+
     func testRadialArmedViaUIFlowThenTapAdds() {
         // Exact UI sequence from the failing XCUITest: toggleRadial() (not
         // setRadial directly), then a plain tap.
