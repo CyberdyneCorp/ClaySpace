@@ -261,6 +261,101 @@ final class ClayEngineTests: XCTestCase {
         }
     }
 
+    func testRenameDocumentMovesPackageAndRefusesCollisions() {
+        let engine = ClayEngine()
+        let suffix = UUID().uuidString.prefix(6)
+        let a = "Test-\(suffix)-A", b = "Test-\(suffix)-B"
+        let renamed = "Test-\(suffix)-Renamed"
+        XCTAssertTrue(engine.saveDocument(documentURL: ClayEngine.documentURL(named: a)))
+        XCTAssertTrue(engine.saveDocument(documentURL: ClayEngine.documentURL(named: b)))
+        defer {
+            for name in [a, b, renamed] where name != engine.documentName {
+                _ = engine.deleteDocument(named: name)
+            }
+        }
+
+        // Plain rename: package moves, old name gone.
+        XCTAssertTrue(engine.renameDocument(named: a, to: renamed))
+        let names = Set(ClayEngine.listDocuments().map(\.name))
+        XCTAssertTrue(names.contains(renamed))
+        XCTAssertFalse(names.contains(a))
+
+        // Collisions and junk names refuse instead of clobbering.
+        XCTAssertFalse(engine.renameDocument(named: renamed, to: b))
+        XCTAssertFalse(engine.renameDocument(named: renamed, to: "   "))
+        XCTAssertTrue(ClayEngine.listDocuments().contains { $0.name == renamed })
+
+        // Separators sanitize rather than escaping Documents.
+        XCTAssertEqual(ClayEngine.sanitizedName("a/b:c"), "a-b-c")
+        XCTAssertEqual(ClayEngine.sanitizedName(".hidden"), "hidden")
+        XCTAssertNil(ClayEngine.sanitizedName("  "))
+    }
+
+    func testRenameOpenDocumentFollowsTheMove() {
+        let engine = ClayEngine()
+        let suffix = UUID().uuidString.prefix(6)
+        let name = "Test-\(suffix)-Open", renamed = "Test-\(suffix)-Kept"
+        engine.beginStroke(at: SIMD3(1.1, 0.9, 0), radius: 0.2,
+                           op: CLAY_OP_ADD, blendK: 0.02, color: ClayEngine.clayColor)
+        engine.endStroke()
+        XCTAssertTrue(engine.saveDocument(documentURL: ClayEngine.documentURL(named: name)))
+        XCTAssertTrue(engine.openDocument(named: name))
+        defer {
+            _ = engine.newDocument()
+            for stale in [name, renamed, engine.documentName] {
+                _ = engine.deleteDocument(named: stale)
+            }
+        }
+
+        XCTAssertTrue(engine.renameDocument(named: name, to: renamed))
+        XCTAssertEqual(engine.documentName, renamed, "open document tracks its new name")
+        XCTAssertFalse(ClayEngine.listDocuments().contains { $0.name == name })
+
+        // Editing + autosave land under the new name (content survives reopen).
+        engine.beginStroke(at: SIMD3(-1.1, 0.9, 0), radius: 0.2,
+                           op: CLAY_OP_ADD, blendK: 0.02, color: ClayEngine.clayColor)
+        engine.endStroke()
+        engine.saveNow()
+        let other = ClayEngine()
+        XCTAssertTrue(other.openDocument(named: renamed))
+        XCTAssertEqual(other.items.count, 3)
+    }
+
+    func testOpenExternalDocumentImportsACopyUnderAUniqueName() throws {
+        let engine = ClayEngine()
+        let suffix = UUID().uuidString.prefix(6)
+        let name = "Test-\(suffix)-Ext"
+        engine.beginStroke(at: SIMD3(1.2, 0.7, 0), radius: 0.2,
+                           op: CLAY_OP_ADD, blendK: 0.02, color: ClayEngine.clayColor)
+        engine.endStroke()
+
+        // Stage a package OUTSIDE Documents, as Files/AirDrop would hand it over.
+        let outside = FileManager.default.temporaryDirectory
+            .appendingPathComponent("inbox_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: outside) }
+        let external = outside.appendingPathComponent("\(name).clayspace")
+        XCTAssertTrue(engine.saveDocument(documentURL: external))
+        defer {
+            _ = engine.newDocument()
+            for doc in ClayEngine.listDocuments() where doc.name.hasPrefix("Test-\(suffix)") {
+                _ = engine.deleteDocument(named: doc.name)
+            }
+        }
+
+        XCTAssertTrue(engine.openExternalDocument(at: external))
+        XCTAssertEqual(engine.documentName, name, "imported under its own name")
+        XCTAssertEqual(engine.items.count, 2)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: external.path),
+                      "import copies; the source stays put")
+
+        // Importing the same file again lands under a fresh name.
+        XCTAssertTrue(engine.openExternalDocument(at: external))
+        XCTAssertEqual(engine.documentName, "\(name) 2")
+        XCTAssertFalse(engine.openExternalDocument(
+            at: outside.appendingPathComponent("nope.obj")))
+    }
+
     func testSaveLoadRestoresSculptAndStaysEditable() throws {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("persist_\(UUID().uuidString)")

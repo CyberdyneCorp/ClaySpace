@@ -80,6 +80,14 @@ struct ContentView: View {
                 state.engine.saveNow()
             }
         }
+        .onOpenURL { url in
+            // A .clayspace tapped in Files (or shared to the app).
+            if state.engine.openExternalDocument(at: url) {
+                state.showToast("Opened \(state.engine.documentName)")
+            } else {
+                state.showToast("Couldn't open \(url.lastPathComponent)")
+            }
+        }
         .onAppear {
             if !hasSeenGestures {
                 hasSeenGestures = true

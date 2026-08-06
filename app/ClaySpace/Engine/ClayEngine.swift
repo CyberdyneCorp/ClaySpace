@@ -1250,6 +1250,88 @@ final class ClayEngine {
         return true
     }
 
+    /// A document name reduced to what the filesystem and Files app accept:
+    /// path separators stripped, whitespace trimmed, length capped.
+    static func sanitizedName(_ raw: String) -> String? {
+        var name = raw.replacingOccurrences(of: "/", with: "-")
+            .replacingOccurrences(of: ":", with: "-")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if name.hasPrefix(".") { name.removeFirst() }
+        guard !name.isEmpty else { return nil }
+        return String(name.prefix(80))
+    }
+
+    /// Renames a document (the open one included). Fails on invalid names
+    /// and collisions rather than overwriting.
+    @discardableResult
+    func renameDocument(named oldName: String, to rawNewName: String) -> Bool {
+        guard let newName = Self.sanitizedName(rawNewName) else { return false }
+        guard newName != oldName else { return true }
+        let source = Self.documentURL(named: oldName)
+        let target = Self.documentURL(named: newName)
+        let fm = FileManager.default
+        guard !fm.fileExists(atPath: target.path) else { return false }
+        if oldName == documentName { saveNow() } // package on disk is current
+        Self.migrateFlatIfNeeded(at: source)
+        do {
+            try fm.moveItem(at: source, to: target)
+        } catch {
+            lastError = error.localizedDescription
+            return false
+        }
+        if oldName == documentName {
+            documentName = newName
+            rememberCurrentDocument()
+        }
+        return true
+    }
+
+    /// Opens a .clayspace package handed over from outside the sandbox
+    /// (Files app tap, AirDrop, share sheet). In-container URLs open in
+    /// place; external ones import a copy under a unique name.
+    @discardableResult
+    func openExternalDocument(at url: URL) -> Bool {
+        guard url.pathExtension == "clayspace" else { return false }
+        let name = url.deletingPathExtension().lastPathComponent
+        let docsPath = Self.documentsDirectory.standardizedFileURL.path
+        if url.standardizedFileURL.path.hasPrefix(docsPath + "/") {
+            return openDocument(named: name)
+        }
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        let existing = Set(Self.listDocuments().map(\.name)).union([documentName])
+        var imported = name
+        var counter = 2
+        while existing.contains(imported) {
+            imported = "\(name) \(counter)"
+            counter += 1
+        }
+        let target = Self.documentURL(named: imported)
+        do {
+            var error: NSError?
+            var copyError: Error?
+            // File coordination: Files may still be materializing the
+            // package (iCloud download) when the open lands.
+            NSFileCoordinator().coordinate(readingItemAt: url, options: [],
+                                           error: &error) { readableURL in
+                do {
+                    try FileManager.default.copyItem(at: readableURL, to: target)
+                } catch {
+                    copyError = error
+                }
+            }
+            if let failure = error ?? (copyError as NSError?) { throw failure }
+        } catch {
+            lastError = error.localizedDescription
+            return false
+        }
+        guard openDocument(named: imported) else {
+            try? FileManager.default.removeItem(at: target)
+            return false
+        }
+        return true
+    }
+
     /// Debounced autosave, armed by the same commits that trigger bakes.
     private func scheduleAutosave() {
         autosaveTask?.cancel()
