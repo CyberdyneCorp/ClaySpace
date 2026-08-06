@@ -27,6 +27,7 @@ struct ContentView: View {
                 MetalViewport(state: state)
                     .ignoresSafeArea()
                 hoverGhostOverlay
+                gizmoOverlay
                 topBar
                 toastOverlay
                 VStack {
@@ -220,6 +221,36 @@ struct ContentView: View {
                 }
                 .frame(width: ghost.radiusPoints * 2, height: ghost.radiusPoints * 2)
                 .position(ghost.center)
+            }
+            .allowsHitTesting(false)
+        }
+    }
+
+    /// Transform gizmo (task 7.3): ring + scale/rotate handles over the
+    /// selection. Display only — interaction routes through the pencil
+    /// sink, so it never swallows or leaks touches.
+    @ViewBuilder
+    private var gizmoOverlay: some View {
+        if let gizmo = state.gizmoLayout {
+            ZStack(alignment: .topLeading) {
+                Color.clear
+                Circle()
+                    .strokeBorder(Color.orange.opacity(0.55),
+                                  style: StrokeStyle(lineWidth: 1.2, dash: [5, 4]))
+                    .frame(width: gizmo.ringRadius * 2, height: gizmo.ringRadius * 2)
+                    .position(gizmo.center)
+                Image(systemName: "arrow.up.left.and.arrow.down.right")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(.white)
+                    .frame(width: 26, height: 26)
+                    .background(Circle().fill(Color.orange))
+                    .position(gizmo.scaleHandle)
+                Image(systemName: "arrow.trianglehead.2.clockwise.rotate.90")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(.white)
+                    .frame(width: 26, height: 26)
+                    .background(Circle().fill(Color.orange))
+                    .position(gizmo.rotateHandle)
             }
             .allowsHitTesting(false)
         }

@@ -315,6 +315,105 @@ final class CameraAndInputTests: XCTestCase {
                           "turning the dial moves the light")
     }
 
+    // MARK: Transform gizmo (task 7.3)
+
+    private func selectSeededBall(_ state: ViewportState) -> Int? {
+        state.activate(.select, announce: false)
+        state.pencilBegan(at: CGPoint(x: 400, y: 300), pressure: 0.5)
+        state.pencilEnded(at: CGPoint(x: 400, y: 300))
+        return state.selectedIndex
+    }
+
+    func testGizmoLayoutFollowsSelectionAndTool() {
+        let state = ViewportState()
+        state.viewportSize = CGSize(width: 800, height: 600)
+        XCTAssertNil(state.gizmoLayout, "no selection, no gizmo")
+
+        XCTAssertNotNil(selectSeededBall(state))
+        let layout = state.gizmoLayout
+        XCTAssertNotNil(layout, "selection + select tool shows the gizmo")
+        if let layout {
+            let scaleDist = hypot(layout.scaleHandle.x - layout.center.x,
+                                  layout.scaleHandle.y - layout.center.y)
+            XCTAssertEqual(scaleDist, layout.ringRadius, accuracy: 0.5,
+                           "handles sit on the ring")
+        }
+        state.activate(.sculpt, announce: false)
+        XCTAssertNil(state.gizmoLayout, "gizmo is a select/move affordance")
+    }
+
+    func testScaleHandleDragsUniformScaleAsOneUndoStep() throws {
+        let state = ViewportState()
+        state.viewportSize = CGSize(width: 800, height: 600)
+        let index = try XCTUnwrap(selectSeededBall(state))
+        let layout = try XCTUnwrap(state.gizmoLayout)
+
+        state.pencilBegan(at: layout.scaleHandle, pressure: 0.5)
+        let outward = CGPoint(
+            x: layout.center.x + (layout.scaleHandle.x - layout.center.x) * 1.5,
+            y: layout.center.y + (layout.scaleHandle.y - layout.center.y) * 1.5)
+        state.pencilMoved(to: outward, pressure: 0.5)
+        XCTAssertEqual(state.engine.items[index].scale, 1.5, accuracy: 0.05,
+                       "ring-distance ratio drives uniform scale")
+        state.pencilEnded(at: outward)
+
+        state.requestUndo()
+        XCTAssertEqual(state.engine.items[index].scale, 1.0, accuracy: 1e-4,
+                       "the whole scale drag is one undo step")
+    }
+
+    func testRotateHandleSnapsToFifteenDegreesWithHaptic() throws {
+        let state = ViewportState()
+        state.viewportSize = CGSize(width: 800, height: 600)
+        var haptics: [ViewportState.HapticEvent] = []
+        state.hapticEmitter = { event, _ in haptics.append(event) }
+        let defaults = UserDefaults.standard
+        let saved = defaults.object(forKey: ViewportState.hapticsDefaultsKey)
+        defer { defaults.set(saved, forKey: ViewportState.hapticsDefaultsKey) }
+        defaults.set(true, forKey: ViewportState.hapticsDefaultsKey)
+
+        let index = try XCTUnwrap(selectSeededBall(state))
+        haptics = []
+        let layout = try XCTUnwrap(state.gizmoLayout)
+        state.pencilBegan(at: layout.rotateHandle, pressure: 0.5)
+
+        // 14° around the ring: inside the snap window, latches to 15°.
+        let angle = CGFloat(-Double.pi / 2 + 14 * Double.pi / 180)
+        let snapped = CGPoint(x: layout.center.x + cos(angle) * layout.ringRadius,
+                              y: layout.center.y + sin(angle) * layout.ringRadius)
+        state.pencilMoved(to: snapped, pressure: 0.5)
+        let rotation = state.engine.items[index].rotation
+        let quat = simd_quatf(ix: rotation.x, iy: rotation.y, iz: rotation.z, r: rotation.w)
+        XCTAssertEqual(abs(quat.angle), ViewportState.rotationSnapStep, accuracy: 0.005,
+                       "14° latches to the 15° step")
+        XCTAssertTrue(haptics.contains(.alignment), "the latch ticks")
+        state.pencilEnded(at: snapped)
+    }
+
+    func testMoveDragSnapsToAnotherItemsSurface() throws {
+        let state = ViewportState()
+        state.viewportSize = CGSize(width: 800, height: 600)
+        // A satellite ball well away from the seed.
+        _ = state.engine.addPrimitive(CLAY_PRIM_SPHERE, params: [0.35],
+                                      at: SIMD3(1.6, 0.9, 0), op: CLAY_OP_ADD,
+                                      blendK: 0, color: ClayEngine.clayColor)
+        state.activate(.move, announce: false)
+
+        // Grab the seeded ball (screen center)...
+        state.pencilBegan(at: CGPoint(x: 400, y: 300), pressure: 0.5)
+        let index = try XCTUnwrap(state.selectedIndex)
+        XCTAssertEqual(index, 0, "grabbed the seed")
+
+        // ...and drag the pencil over the satellite: position snaps to its
+        // surface rather than the view-parallel plane.
+        let over = try XCTUnwrap(state.screenPoint(for: SIMD3(1.6, 0.9, 0)))
+        state.pencilMoved(to: over, pressure: 0.5)
+        let position = state.engine.items[index].position
+        XCTAssertEqual(simd_distance(position, SIMD3(1.6, 0.9, 0)), 0.35,
+                       accuracy: 0.08, "the seed sits ON the satellite's surface")
+        state.pencilEnded(at: over)
+    }
+
     func testHapticsFireOnStrokeEndAndRespectTheToggle() {
         let state = ViewportState()
         state.viewportSize = CGSize(width: 800, height: 600)

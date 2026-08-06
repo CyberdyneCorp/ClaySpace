@@ -88,6 +88,44 @@ final class ViewportState {
     fileprivate var pencilStart: CGPoint?
     fileprivate var pencilPeakPressure: Float = 0
 
+    // MARK: Transform gizmo (task 7.3)
+
+    struct GizmoLayout: Equatable {
+        var center: CGPoint
+        var ringRadius: CGFloat
+        var scaleHandle: CGPoint
+        var rotateHandle: CGPoint
+    }
+
+    /// Screen-space gizmo over the selection (Select/Move tools, Smooth
+    /// mode). Display comes from ContentView; interaction routes through
+    /// the pencil sink so touches can never leak into sculpting.
+    var gizmoLayout: GizmoLayout? {
+        guard mode == .sdf, activeTool == .select || activeTool == .move,
+              let index = selectedIndex, engine.items.indices.contains(index),
+              let center = screenPoint(for: engine.items[index].boundCenter)
+        else { return nil }
+        let edge = screenPoint(for: engine.items[index].boundCenter
+                               + camera.basis.right * engine.items[index].boundRadius)
+        let projected = edge.map { hypot($0.x - center.x, $0.y - center.y) } ?? 60
+        let ring = min(max(projected + 14, 44), 170)
+        func onRing(_ angle: CGFloat) -> CGPoint {
+            CGPoint(x: center.x + cos(angle) * ring, y: center.y + sin(angle) * ring)
+        }
+        return GizmoLayout(center: center, ringRadius: ring,
+                           scaleHandle: onRing(.pi / 5),      // lower right
+                           rotateHandle: onRing(-.pi / 2))    // top
+    }
+
+    fileprivate enum GizmoDrag {
+        case scale(startScale: Float, startDistance: CGFloat, center: CGPoint)
+        case rotate(startRotation: SIMD4<Float>, startAngle: CGFloat,
+                    center: CGPoint, lastSnap: Int)
+    }
+    fileprivate var gizmoDrag: GizmoDrag?
+    /// 15° rotation latches (input-gestures spec: angle snap + haptics).
+    static let rotationSnapStep: Float = .pi / 12
+
     // MARK: Hover ghost + haptics storage (extension funcs, class storage)
 
     struct HoverGhost: Equatable {
@@ -422,9 +460,30 @@ extension ViewportState: PencilToolSink {
         // Shape tool places on lift (pencilEnded), sized by peak pressure.
         if activeTool == .shape { return }
 
-        // Select/Move: pick the item under the pencil and open a
-        // one-undo-step move session; tapping empty space deselects.
+        // Select/Move: gizmo handles first (scale/rotate sessions), then
+        // pick the item under the pencil for a one-undo-step move session;
+        // tapping empty space deselects.
         if activeTool == .select || activeTool == .move {
+            if let layout = gizmoLayout, let index = selectedIndex {
+                let item = engine.items[index]
+                func near(_ handle: CGPoint) -> Bool {
+                    hypot(point.x - handle.x, point.y - handle.y) < 26
+                }
+                if near(layout.scaleHandle), engine.beginTransform(index: index) {
+                    gizmoDrag = .scale(startScale: item.scale == 0 ? 1 : item.scale,
+                                       startDistance: max(hypot(point.x - layout.center.x,
+                                                                point.y - layout.center.y), 10),
+                                       center: layout.center)
+                    return
+                }
+                if near(layout.rotateHandle), engine.beginTransform(index: index) {
+                    gizmoDrag = .rotate(startRotation: item.rotation,
+                                        startAngle: atan2(point.y - layout.center.y,
+                                                          point.x - layout.center.x),
+                                        center: layout.center, lastSnap: 0)
+                    return
+                }
+            }
             guard let ray = ray(through: point) else { return }
             if let picked = engine.pick(origin: ray.origin, direction: ray.direction) {
                 if selectedIndex != picked.index {
@@ -484,18 +543,66 @@ extension ViewportState: PencilToolSink {
             return
         }
 
-        // Move session: drag the selected item on the view-parallel plane.
+        // Gizmo sessions: scale by ring distance, rotate about the view
+        // axis with 15° snap latches (haptic tick per latch).
+        if let drag = gizmoDrag, let index = selectedIndex,
+           engine.items.indices.contains(index) {
+            let item = engine.items[index]
+            switch drag {
+            case .scale(let startScale, let startDistance, let center):
+                let distance = max(hypot(point.x - center.x, point.y - center.y), 10)
+                let scale = min(max(startScale * Float(distance / startDistance), 0.2), 5)
+                engine.updateTransform(position: item.position,
+                                       rotation: item.rotation, scale: scale)
+            case .rotate(let startRotation, let startAngle, let center, let lastSnap):
+                let angle = atan2(point.y - center.y, point.x - center.x)
+                var delta = -Float(angle - startAngle) // screen y points down
+                let steps = delta / Self.rotationSnapStep
+                let nearest = steps.rounded()
+                if abs(steps - nearest) < 0.22 {
+                    delta = nearest * Self.rotationSnapStep
+                    if Int(nearest) != lastSnap {
+                        emitHaptic(.alignment, at: point)
+                        gizmoDrag = .rotate(startRotation: startRotation,
+                                            startAngle: startAngle,
+                                            center: center, lastSnap: Int(nearest))
+                    }
+                }
+                let start = simd_quatf(ix: startRotation.x, iy: startRotation.y,
+                                       iz: startRotation.z, r: startRotation.w)
+                let spin = simd_quatf(angle: delta, axis: camera.basis.forward)
+                let combined = (spin * start).normalized
+                engine.updateTransform(position: item.position,
+                                       rotation: SIMD4(combined.imag.x, combined.imag.y,
+                                                       combined.imag.z, combined.real),
+                                       scale: item.scale)
+            }
+            return
+        }
+
+        // Move session: surface snap when the pencil is over ANOTHER item's
+        // surface (attributed pick tells whose); view-parallel plane drag
+        // otherwise.
         if engine.isTransforming,
            let index = selectedIndex,
            let startPos = dragStartItemPosition,
            let startHit = dragStartHit,
            let plane = strokePlane,
-           let ray = ray(through: point),
-           let p = intersect(ray: ray, plane: plane) {
+           let ray = ray(through: point) {
             let item = engine.items[index]
-            engine.updateTransform(position: startPos + (p - startHit),
-                                   rotation: item.rotation,
-                                   scale: item.scale)
+            if activeTool == .move,
+               let picked = engine.pick(origin: ray.origin, direction: ray.direction),
+               picked.index != index {
+                engine.updateTransform(position: picked.position,
+                                       rotation: item.rotation,
+                                       scale: item.scale)
+                return
+            }
+            if let p = intersect(ray: ray, plane: plane) {
+                engine.updateTransform(position: startPos + (p - startHit),
+                                       rotation: item.rotation,
+                                       scale: item.scale)
+            }
             return
         }
 
@@ -523,6 +630,7 @@ extension ViewportState: PencilToolSink {
         lastStrokePoint = nil
         dragStartItemPosition = nil
         dragStartHit = nil
+        gizmoDrag = nil
         if engine.isTransforming {
             engine.endTransform() // commit the drag so far
         } else {
@@ -546,6 +654,7 @@ extension ViewportState: PencilToolSink {
             dragStartItemPosition = nil
             dragStartHit = nil
             strokePlane = nil
+            gizmoDrag = nil
             return
         }
         if engine.isStroking {
