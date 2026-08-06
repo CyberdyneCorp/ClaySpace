@@ -215,4 +215,96 @@ final class CameraAndInputTests: XCTestCase {
         XCTAssertEqual(state.engine.items.count, 2)
         XCTAssertEqual(state.engine.items[1].op, Int32(CLAY_OP_SUBTRACT.rawValue))
     }
+
+    // MARK: Tilt, hover, haptics (tasks 5.2/5.3/5.5)
+
+    func testTiltBroadensTheBrush() {
+        let state = ViewportState()
+        state.viewportSize = CGSize(width: 800, height: 600)
+        state.activate(.sculpt, announce: false)
+        let center = CGPoint(x: 400, y: 300)
+
+        state.pencilBegan(at: center, pressure: 0.5, altitude: .pi / 2) // vertical
+        state.pencilEnded(at: center)
+        let vertical = state.engine.strokeRadii(of: 1)?.first ?? 0
+
+        state.pencilBegan(at: center, pressure: 0.5, altitude: 0.2) // near-flat
+        state.pencilEnded(at: center)
+        let tilted = state.engine.strokeRadii(of: 2)?.first ?? 0
+
+        XCTAssertEqual(vertical, 0.21, accuracy: 0.005, "vertical is the base radius")
+        XCTAssertGreaterThan(tilted, vertical * 1.4,
+                             "a near-flat pencil sweeps a much wider footprint")
+    }
+
+    func testHoverGhostTracksToolAndSurface() {
+        let state = ViewportState()
+        state.viewportSize = CGSize(width: 800, height: 600)
+        let center = CGPoint(x: 400, y: 300) // over the seeded ball
+
+        state.activate(.sculpt, announce: false)
+        state.pencilHovered(at: center, altitude: .pi / 2)
+        let ghost = state.hoverGhost
+        XCTAssertNotNil(ghost, "sculpt hover shows the brush footprint")
+        XCTAssertEqual(ghost?.isVoxel, false)
+        XCTAssertGreaterThan(ghost?.radiusPoints ?? 0, 3)
+        XCTAssertEqual(ghost?.center.x ?? 0, center.x, accuracy: 40,
+                       "ghost sits under the pencil")
+
+        // Select tool has no footprint; hover end always clears.
+        state.activate(.select, announce: false)
+        state.pencilHovered(at: center, altitude: .pi / 2)
+        XCTAssertNil(state.hoverGhost)
+        state.activate(.sculpt, announce: false)
+        state.pencilHovered(at: center, altitude: .pi / 2)
+        XCTAssertNotNil(state.hoverGhost)
+        state.pencilHoverEnded()
+        XCTAssertNil(state.hoverGhost)
+
+        // Touch-down hides the ghost (the preview did its job).
+        state.pencilHovered(at: center, altitude: .pi / 2)
+        state.pencilBegan(at: center, pressure: 0.5)
+        XCTAssertNil(state.hoverGhost)
+        state.pencilEnded(at: center)
+    }
+
+    func testScreenPointInvertsRay() {
+        let state = ViewportState()
+        state.viewportSize = CGSize(width: 800, height: 600)
+        for point in [CGPoint(x: 400, y: 300), CGPoint(x: 220, y: 140),
+                      CGPoint(x: 610, y: 450)] {
+            guard let ray = state.ray(through: point) else {
+                XCTFail("no ray through \(point)"); continue
+            }
+            let world = ray.origin + ray.direction * 3
+            guard let back = state.screenPoint(for: world) else {
+                XCTFail("no projection for \(world)"); continue
+            }
+            XCTAssertEqual(back.x, point.x, accuracy: 0.5)
+            XCTAssertEqual(back.y, point.y, accuracy: 0.5)
+        }
+    }
+
+    func testHapticsFireOnStrokeEndAndRespectTheToggle() {
+        let state = ViewportState()
+        state.viewportSize = CGSize(width: 800, height: 600)
+        state.activate(.sculpt, announce: false)
+        var events: [ViewportState.HapticEvent] = []
+        state.hapticEmitter = { event, _ in events.append(event) }
+        let defaults = UserDefaults.standard
+        let saved = defaults.object(forKey: ViewportState.hapticsDefaultsKey)
+        defer { defaults.set(saved, forKey: ViewportState.hapticsDefaultsKey) }
+
+        defaults.set(true, forKey: ViewportState.hapticsDefaultsKey)
+        let center = CGPoint(x: 400, y: 300)
+        state.pencilBegan(at: center, pressure: 0.5)
+        state.pencilEnded(at: center)
+        XCTAssertEqual(events, [.completed], "a landed stroke ticks")
+
+        events = []
+        defaults.set(false, forKey: ViewportState.hapticsDefaultsKey)
+        state.pencilBegan(at: center, pressure: 0.5)
+        state.pencilEnded(at: center)
+        XCTAssertTrue(events.isEmpty, "the toggle silences haptics")
+    }
 }

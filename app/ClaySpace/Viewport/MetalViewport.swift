@@ -103,6 +103,35 @@ final class MetalViewportView: UIView {
         pencilHold.minimumPressDuration = 0.45
         pencilHold.cancelsTouchesInView = false
         addGestureRecognizer(pencilHold)
+
+        // Pencil hover → brush-footprint ghost (task 5.3; M2+ iPads).
+        let hover = UIHoverGestureRecognizer(target: self, action: #selector(hovered))
+        addGestureRecognizer(hover)
+
+        // Pencil Pro haptics anchor to this view (task 5.5).
+        if #available(iOS 17.5, *) {
+            let generator = UICanvasFeedbackGenerator(view: self)
+            state.hapticEmitter = { event, point in
+                switch event {
+                case .alignment: generator.alignmentOccurred(at: point)
+                case .completed: generator.pathCompleted(at: point)
+                }
+            }
+        }
+    }
+
+    @objc private func hovered(_ recognizer: UIHoverGestureRecognizer) {
+        switch recognizer.state {
+        case .began, .changed:
+            if state.isChromePoint(recognizer.location(in: nil)) {
+                state.pencilHoverEnded()
+            } else {
+                state.pencilHovered(at: recognizer.location(in: self),
+                                    altitude: Float(recognizer.altitudeAngle))
+            }
+        default:
+            state.pencilHoverEnded()
+        }
     }
 
     @objc private func pencilHeld(_ recognizer: UILongPressGestureRecognizer) {
@@ -133,7 +162,8 @@ final class MetalViewportView: UIView {
             }
             if touch.type == .pencil {
                 pencilSink?.pencilBegan(at: touch.location(in: self),
-                                        pressure: pressure(of: touch))
+                                        pressure: pressure(of: touch),
+                                        altitude: Float(touch.altitudeAngle))
             } else {
                 state.cancelCameraAnimation() // touch takes over any recall
                 fingerTouches.append(touch)
@@ -145,7 +175,8 @@ final class MetalViewportView: UIView {
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
         for touch in touches where touch.type == .pencil && !chromeTouches.contains(touch) {
             pencilSink?.pencilMoved(to: touch.location(in: self),
-                                    pressure: pressure(of: touch))
+                                    pressure: pressure(of: touch),
+                                    altitude: Float(touch.altitudeAngle))
             trackBarrelRoll(of: touch)
         }
         updateCamera(movedTouches: touches)
@@ -191,7 +222,7 @@ final class MetalViewportView: UIView {
                    let start = fingerStartLocations[touch] {
                     let end = touch.location(in: self)
                     if hypot(end.x - start.x, end.y - start.y) < 9 {
-                        pencilSink?.pencilBegan(at: end, pressure: 0.5)
+                        pencilSink?.pencilBegan(at: end, pressure: 0.5, altitude: .pi / 2)
                         pencilSink?.pencilEnded(at: end)
                     }
                 }

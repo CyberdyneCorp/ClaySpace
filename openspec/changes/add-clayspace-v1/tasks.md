@@ -42,10 +42,10 @@
 ## 5. Input — Pencil & touch
 
 - [x] 5.1 Touch router: pencil→tools, fingers→camera; recognizer suite (1-finger orbit, 2-finger pinch/pan/twist, 3-/4-finger tap undo/redo, right-edge swipe) — pencil routes to the `PencilToolSink` protocol (tools attach in 5.2+); undo/redo taps show honest placeholder toasts until the command stack lands (2.2)
-- [ ] 5.2 Pencil pressure/tilt pipeline with real-time tool preview binding
-- [ ] 5.3 Hover previews (voxel ghost, primitive footprint, stroke tip)
+- [x] 5.2 Pencil pressure/tilt pipeline with real-time tool preview binding — altitudeAngle rides the touch router into the brush: a shallow pencil broadens the footprint up to 1.6x (pressure already sized it)
+- [x] 5.3 Hover previews (voxel ghost, primitive footprint, stroke tip) — UIHoverGestureRecognizer -> raycast -> screen-projected ghost (circle for brush/shape footprint, square for the targeted voxel cell) via the new screenPoint(for:) forward projection; hides over chrome, on touch-down, and for select/move; M2+ iPads only by hardware
 - [x] 5.4 UIPencilInteraction: squeeze→radial menu (6 recent tools, long-press fallback), double-tap→eraser toggle, barrel roll→rotate selection — barrel-roll deltas are captured and routed (`pencilBarrelRolled`); applying them to the selected item is wired in 7.3 when selection exists. Tool model + left tool rail added alongside
-- [ ] 5.5 Pencil Pro haptics on snap/menu/tool events + settings toggle
+- [x] 5.5 Pencil Pro haptics on snap/menu/tool events + settings toggle — UICanvasFeedbackGenerator (iOS 17.5+): pathCompleted on stroke land / shape place, alignmentOccurred on radial-menu open and view snaps (gizmo + presets); Gestures-sheet toggle persisted in defaults
 - [x] 5.6 Gestures reference sheet + first-launch presentation
 
 ## 6. Voxel mode

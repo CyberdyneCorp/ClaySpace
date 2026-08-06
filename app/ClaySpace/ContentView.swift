@@ -26,6 +26,7 @@ struct ContentView: View {
             ZStack(alignment: .top) {
                 MetalViewport(state: state)
                     .ignoresSafeArea()
+                hoverGhostOverlay
                 topBar
                 toastOverlay
                 VStack {
@@ -187,6 +188,31 @@ struct ContentView: View {
             }
         }
         .animation(.easeOut(duration: 0.18), value: state.toast)
+    }
+
+    /// Brush footprint under a hovering Pencil (task 5.3): circle for the
+    /// SDF brush, square for the targeted voxel cell. Never intercepts
+    /// touches.
+    @ViewBuilder
+    private var hoverGhostOverlay: some View {
+        if let ghost = state.hoverGhost {
+            ZStack(alignment: .topLeading) {
+                Color.clear
+                Group {
+                    if ghost.isVoxel {
+                        Rectangle()
+                            .strokeBorder(Color.orange.opacity(0.8), lineWidth: 1.5)
+                    } else {
+                        Circle()
+                            .strokeBorder(Color.orange.opacity(0.8), lineWidth: 1.5)
+                            .background(Circle().fill(Color.orange.opacity(0.08)))
+                    }
+                }
+                .frame(width: ghost.radiusPoints * 2, height: ghost.radiusPoints * 2)
+                .position(ghost.center)
+            }
+            .allowsHitTesting(false)
+        }
     }
 
     private var inspector: some View {

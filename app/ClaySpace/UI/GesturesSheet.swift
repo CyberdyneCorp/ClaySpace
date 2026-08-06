@@ -5,6 +5,7 @@ import SwiftUI
 /// launch.
 struct GesturesSheet: View {
     @Environment(\.dismiss) private var dismiss
+    @AppStorage(ViewportState.hapticsDefaultsKey) private var hapticsEnabled = true
 
     private let pencilRows: [(String, String)] = [
         ("Press harder", "Bigger tip in voxels, thicker stroke on smooth shapes."),
@@ -38,6 +39,15 @@ struct GesturesSheet: View {
                     column(title: "Pencil", rows: pencilRows, tint: .orange)
                     column(title: "Fingers", rows: fingerRows, tint: .teal)
                 }
+
+                Toggle(isOn: $hapticsEnabled) {
+                    (Text("Pencil haptics").fontWeight(.semibold)
+                        + Text(" — a tick in your grip when a stroke lands or a view snaps. Pencil Pro only."))
+                        .font(.system(size: 13.5))
+                }
+                .tint(.orange)
+                .padding(.top, 20)
+                .accessibilityIdentifier("hapticsToggle")
 
                 HStack {
                     Spacer()

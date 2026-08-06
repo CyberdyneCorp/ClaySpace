@@ -87,6 +87,21 @@ final class ViewportState {
     // because extensions cannot add storage).
     fileprivate var pencilStart: CGPoint?
     fileprivate var pencilPeakPressure: Float = 0
+
+    // MARK: Hover ghost + haptics storage (extension funcs, class storage)
+
+    struct HoverGhost: Equatable {
+        var center: CGPoint
+        var radiusPoints: CGFloat
+        var isVoxel: Bool
+    }
+    /// Brush footprint under a hovering Pencil (M2+ iPads); nil = hidden.
+    var hoverGhost: HoverGhost?
+
+    enum HapticEvent { case alignment, completed }
+    /// Set by the viewport view — the canvas generator anchors to a UIView.
+    var hapticEmitter: ((HapticEvent, CGPoint) -> Void)?
+    static let hapticsDefaultsKey = "pencilHapticsEnabled"
     /// While a smear is live: the working plane through the stroke's start,
     /// perpendicular to the view, that moves project onto.
     fileprivate var strokePlane: (point: SIMD3<Float>, normal: SIMD3<Float>)?
@@ -134,6 +149,7 @@ final class ViewportState {
 
     func openRadialMenu(at point: CGPoint) {
         radialMenuLocation = point
+        emitHaptic(.alignment, at: point)
     }
 
     func closeRadialMenu() {
@@ -195,6 +211,9 @@ final class ViewportState {
         case .top: animateCamera(to: .preset(top: true, distance: camera.distance))
         case .home: animateCamera(to: OrbitCamera())
         }
+        // A view snap is an alignment event (task 5.5).
+        emitHaptic(.alignment, at: CGPoint(x: viewportSize.width / 2,
+                                           y: viewportSize.height / 2))
         showToast(preset.rawValue)
     }
 
@@ -212,6 +231,8 @@ final class ViewportState {
         }
         target.setOrthographic(true)
         animateCamera(to: target)
+        emitHaptic(.alignment, at: CGPoint(x: viewportSize.width / 2,
+                                           y: viewportSize.height / 2))
         showToast(name)
     }
 
@@ -324,8 +345,8 @@ final class ViewportState {
 /// is tool-agnostic.
 @MainActor
 protocol PencilToolSink: AnyObject {
-    func pencilBegan(at point: CGPoint, pressure: Float)
-    func pencilMoved(to point: CGPoint, pressure: Float)
+    func pencilBegan(at point: CGPoint, pressure: Float, altitude: Float)
+    func pencilMoved(to point: CGPoint, pressure: Float, altitude: Float)
     func pencilEnded(at point: CGPoint)
 }
 
@@ -333,8 +354,12 @@ protocol PencilToolSink: AnyObject {
 
 extension ViewportState: PencilToolSink {
 
-    private func radius(for pressure: Float) -> Float {
-        0.07 + pressure * 0.28
+    /// Pressure sizes the brush; tilt broadens it (task 5.2) — a shallow
+    /// pencil sweeps a wider footprint, like the side of a real tool.
+    private func radius(for pressure: Float, altitude: Float = .pi / 2) -> Float {
+        let base = 0.07 + pressure * 0.28
+        let tilt = 1 - min(max(altitude / (.pi / 2), 0), 1)
+        return base * (1 + 0.6 * tilt)
     }
 
     fileprivate func voxelEdit(at point: CGPoint, pressure: Float) {
@@ -351,9 +376,10 @@ extension ViewportState: PencilToolSink {
         engine.voxelStamp(edit, at: cell, brushSize: brushSize, color: activeColor)
     }
 
-    func pencilBegan(at point: CGPoint, pressure: Float) {
+    func pencilBegan(at point: CGPoint, pressure: Float, altitude: Float = .pi / 2) {
         pencilStart = point
         pencilPeakPressure = max(pressure, 0.1)
+        hoverGhost = nil // the pencil is down; the preview did its job
 
         if mode == .voxel {
             if activeTool == .select || activeTool == .move || activeTool == .shape {
@@ -403,7 +429,7 @@ extension ViewportState: PencilToolSink {
         }
         guard let start else { return }
 
-        let r = radius(for: max(pressure, 0.1))
+        let r = radius(for: max(pressure, 0.1), altitude: altitude)
         let op: clay_op
         let blend: Float
         switch activeTool {
@@ -423,7 +449,7 @@ extension ViewportState: PencilToolSink {
         }
     }
 
-    func pencilMoved(to point: CGPoint, pressure: Float) {
+    func pencilMoved(to point: CGPoint, pressure: Float, altitude: Float = .pi / 2) {
         pencilPeakPressure = max(pencilPeakPressure, pressure)
 
         if mode == .voxel {
@@ -452,7 +478,7 @@ extension ViewportState: PencilToolSink {
               let ray = ray(through: point),
               let p = intersect(ray: ray, plane: plane) else { return }
 
-        let r = radius(for: max(pressure, 0.1))
+        let r = radius(for: max(pressure, 0.1), altitude: altitude)
         // Decimate: only append once the Pencil has travelled a fraction of
         // the brush radius, so point counts stay low and segments smooth.
         guard simd_distance(p, last) > r * 0.45 else { return }
@@ -497,6 +523,7 @@ extension ViewportState: PencilToolSink {
         }
         if engine.isStroking {
             engine.endStroke()
+            emitHaptic(.completed, at: point)
             strokePlane = nil
             lastStrokePoint = nil
             return
@@ -532,12 +559,13 @@ extension ViewportState: PencilToolSink {
         }
         let size = 0.14 + pencilPeakPressure * 0.42
         let k = shapeBlendProfile == .hard ? 0 : shapeBlendK
-        if !engine.addShape(shapeKind.clayPrim,
-                            params: shapeKind.params(size: size),
-                            at: target, op: shapeOp.clayOp,
-                            blendK: k, color: activeColor,
-                            blend: shapeBlendProfile.clayBlend),
-           let error = engine.lastError {
+        if engine.addShape(shapeKind.clayPrim,
+                           params: shapeKind.params(size: size),
+                           at: target, op: shapeOp.clayOp,
+                           blendK: k, color: activeColor,
+                           blend: shapeBlendProfile.clayBlend) {
+            emitHaptic(.completed, at: point)
+        } else if let error = engine.lastError {
             showToast("Shape failed: \(error)")
         }
     }
@@ -549,6 +577,90 @@ extension ViewportState: PencilToolSink {
         let t = simd_dot(plane.point - ray.origin, plane.normal) / denom
         guard t > 0 else { return nil }
         return ray.origin + ray.direction * t
+    }
+
+    // MARK: Hover preview (task 5.3)
+
+    func pencilHovered(at point: CGPoint, altitude: Float) {
+        guard let ray = ray(through: point) else { hoverGhost = nil; return }
+        if mode == .voxel {
+            guard activeTool == .sculpt || activeTool == .erase || activeTool == .paint,
+                  let pick = engine.voxelPick(origin: ray.origin, direction: ray.direction,
+                                              buildPlane: buildPlane) else {
+                hoverGhost = nil
+                return
+            }
+            let cell = activeTool == .sculpt ? pick.adjacent : pick.hit
+            let world = (SIMD3<Float>(cell) + 0.5) * ClayEngine.voxelSize
+            hoverGhost = ghost(at: world, worldRadius: ClayEngine.voxelSize * 0.5,
+                               isVoxel: true)
+            return
+        }
+        let hoverPressure: Float = 0.35 // preview at a middling press
+        let hit = engine.raycast(origin: ray.origin, direction: ray.direction)
+        switch activeTool {
+        case .sculpt, .shape:
+            guard let target = hit?.position ?? groundPoint(on: ray) else {
+                hoverGhost = nil
+                return
+            }
+            let r = activeTool == .shape ? 0.14 + hoverPressure * 0.42
+                                         : radius(for: hoverPressure, altitude: altitude)
+            hoverGhost = ghost(at: target, worldRadius: r, isVoxel: false)
+        case .erase, .paint:
+            guard let hit else { hoverGhost = nil; return }
+            hoverGhost = ghost(at: hit.position,
+                               worldRadius: radius(for: hoverPressure, altitude: altitude),
+                               isVoxel: false)
+        default:
+            hoverGhost = nil
+        }
+    }
+
+    func pencilHoverEnded() {
+        hoverGhost = nil
+    }
+
+    private func ghost(at world: SIMD3<Float>, worldRadius: Float,
+                       isVoxel: Bool) -> HoverGhost? {
+        guard let c = screenPoint(for: world),
+              let e = screenPoint(for: world + camera.basis.right * worldRadius)
+        else { return nil }
+        return HoverGhost(center: c,
+                          radiusPoints: max(hypot(e.x - c.x, e.y - c.y), 3),
+                          isVoxel: isVoxel)
+    }
+
+    /// Forward projection — the exact inverse of ray(through:).
+    func screenPoint(for world: SIMD3<Float>) -> CGPoint? {
+        guard viewportSize.width > 0, viewportSize.height > 0 else { return nil }
+        let aspect = Float(viewportSize.width / viewportSize.height)
+        let b = camera.basis
+        let d = world - camera.position
+        let u: Float, v: Float
+        if camera.isOrthographic {
+            u = simd_dot(d, b.right) / camera.orthoHalfHeight
+            v = simd_dot(d, b.up) / camera.orthoHalfHeight
+        } else {
+            let vz = simd_dot(d, b.forward)
+            guard vz > 1e-4 else { return nil }
+            u = camera.lens * simd_dot(d, b.right) / vz
+            v = camera.lens * simd_dot(d, b.up) / vz
+        }
+        return CGPoint(x: CGFloat((u / aspect + 1) / 2) * viewportSize.width,
+                       y: CGFloat((1 - v) / 2) * viewportSize.height)
+    }
+
+    // MARK: Pencil Pro haptics (task 5.5)
+
+    var hapticsEnabled: Bool {
+        UserDefaults.standard.object(forKey: Self.hapticsDefaultsKey) == nil
+            || UserDefaults.standard.bool(forKey: Self.hapticsDefaultsKey)
+    }
+
+    func emitHaptic(_ event: HapticEvent, at point: CGPoint) {
+        guard hapticsEnabled else { return }
+        hapticEmitter?(event, point)
     }
 
     /// World ray through a viewport point — the inverse of the shader's
