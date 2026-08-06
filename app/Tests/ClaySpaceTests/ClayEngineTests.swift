@@ -221,6 +221,18 @@ final class ClayEngineTests: XCTestCase {
                 .attributesOfItem(atPath: result.url.path)[.size] as? Int)
             XCTAssertGreaterThan(size, 1000, "\(format.title) file landed on disk")
             XCTAssertEqual(result.url.pathExtension, format.rawValue)
+            if format == .usdz {
+                // USDZ packaging rules: a stored zip whose payload starts on
+                // a 64-byte boundary (Quick Look requires both).
+                let data = try Data(contentsOf: result.url)
+                XCTAssertEqual(Array(data.prefix(2)), [0x50, 0x4B], "zip magic")
+                let nameLen = Int(data[26]) | (Int(data[27]) << 8)
+                let extraLen = Int(data[28]) | (Int(data[29]) << 8)
+                XCTAssertEqual((30 + nameLen + extraLen) % 64, 0,
+                               "usdc payload is 64-byte aligned")
+                let method = Int(data[8]) | (Int(data[9]) << 8)
+                XCTAssertEqual(method, 0, "stored, not deflated")
+            }
             try? FileManager.default.removeItem(at: result.url)
         }
     }

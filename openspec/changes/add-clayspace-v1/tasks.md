@@ -76,7 +76,7 @@
 - [ ] 9.1 Export pipeline: GPU MC at export resolution, decimation (quadric collapse), merged/per-layer output, hidden-layer exclusion, triangle estimate — IN PROGRESS: background snapshot export at 96/192/256 with watertight validation + stats shipped; decimation toggle, per-layer output, and voxel-mesh inclusion pending
 - [ ] 9.2 Voxel export: greedy weld option with per-face color preservation
 - [ ] 9.3 OBJ+MTL writer and reader; vertex-color story documented in dialog — IN PROGRESS: writer shipped (clay_mesh_save via export); reader shipped app-side as import-to-voxels (tap an .obj in Files: parse v/f with fans + negative indices, fit into the build area, surface-sample triangles at half-cell spacing into the voxel layer, 200k-cell cap; declared as an imported UTI, LSHandlerRank Alternate) — true mesh->SDF import stays blocked on ClayCore#5; MTL colors pending
-- [ ] 9.4 USDZ export via Model I/O; Quick Look AR verification
+- [ ] 9.4 USDZ export via Model I/O; Quick Look AR verification — IN PROGRESS: USDZ ships in the export sheet (ClayCore mesh -> MDLMesh with positions/normals/vertex colors -> .usdc, packaged into a stored zip with 64-byte-aligned payload per the usdz rules, since iOS Model I/O cannot write .usdz directly); AR Quick Look needs an eyes-on device check (share the export, tap it in Files)
 - [ ] 9.5 FBX export (writer or assimp) + FBX/OBJ import via ufbx/custom; triangle-budget guard
 - [ ] 9.6 `clay-cli` (mesh/convert/validate) as the headless entry point for CI and batch use
 - [ ] 9.7 Automated round-trip CI tests on Mac/Linux: clay-cli export → validate watertight/manifold + import into assimp/Blender headless; Unity/Unreal manual checklist

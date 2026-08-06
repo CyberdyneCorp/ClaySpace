@@ -1,4 +1,5 @@
 import Foundation
+import ModelIO
 import Observation
 import claycore
 import simd
@@ -1318,7 +1319,7 @@ final class ClayEngine {
     // MARK: Mesh export (import-export spec; task 9.1/9.8 core)
 
     enum ExportFormat: String, CaseIterable, Identifiable {
-        case obj, fbx, glb, ply
+        case obj, fbx, glb, ply, usdz
         var id: String { rawValue }
         var title: String { rawValue.uppercased() }
         var note: String {
@@ -1327,6 +1328,7 @@ final class ClayEngine {
             case .fbx: "Unity · Unreal"
             case .glb: "glTF binary"
             case .ply: "vertex colors"
+            case .usdz: "AR Quick Look"
             }
         }
     }
@@ -1376,13 +1378,149 @@ final class ClayEngine {
 
         var watertight: Int32 = 0, manifold: Int32 = 0
         _ = clay_mesh_validate(mesh, &watertight, &manifold)
-        guard clay_mesh_save(mesh, url.path) == CLAY_OK else { return nil }
+        if url.pathExtension == "usdz" {
+            // ClayCore has no USD writer; Model I/O takes it from here
+            // (task 9.4 — AR Quick Look).
+            guard writeUSDZ(mesh: mesh!, to: url) else { return nil }
+        } else {
+            guard clay_mesh_save(mesh, url.path) == CLAY_OK else { return nil }
+        }
 
         return ExportResult(url: url,
                             vertexCount: clay_mesh_vertex_count(mesh),
                             triangleCount: clay_mesh_index_count(mesh) / 3,
                             watertight: watertight == 1,
                             manifold: manifold == 1)
+    }
+
+    /// USDZ via Model I/O (task 9.4): positions/normals/colors from the
+    /// ClayCore mesh into an MDLMesh, exported for AR Quick Look.
+    nonisolated private static func writeUSDZ(mesh: OpaquePointer, to url: URL) -> Bool {
+        let vertexCount = clay_mesh_vertex_count(mesh)
+        let indexCount = clay_mesh_index_count(mesh)
+        guard vertexCount > 0, indexCount > 0,
+              let positions = clay_mesh_positions(mesh),
+              let indices = clay_mesh_indices(mesh) else { return false }
+
+        let allocator = MDLMeshBufferDataAllocator()
+        let descriptor = MDLVertexDescriptor()
+        var buffers: [MDLMeshBuffer] = []
+
+        func addAttribute(_ name: String, _ floats: UnsafePointer<Float>) {
+            let data = Data(bytes: floats, count: vertexCount * 3 * 4)
+            descriptor.attributes[buffers.count] = MDLVertexAttribute(
+                name: name, format: .float3, offset: 0, bufferIndex: buffers.count)
+            descriptor.layouts[buffers.count] = MDLVertexBufferLayout(stride: 12)
+            buffers.append(allocator.newBuffer(with: data, type: .vertex))
+        }
+        addAttribute(MDLVertexAttributePosition, positions)
+        if let normals = clay_mesh_normals(mesh) {
+            addAttribute(MDLVertexAttributeNormal, normals)
+        }
+        if let colors = clay_mesh_colors(mesh) {
+            addAttribute(MDLVertexAttributeColor, colors)
+        }
+
+        let indexData = Data(bytes: indices, count: indexCount * 4)
+        let submesh = MDLSubmesh(
+            indexBuffer: allocator.newBuffer(with: indexData, type: .index),
+            indexCount: indexCount, indexType: .uInt32, geometryType: .triangles,
+            material: MDLMaterial(name: "clay",
+                                  scatteringFunction: MDLPhysicallyPlausibleScatteringFunction()))
+        let mdlMesh = MDLMesh(vertexBuffers: buffers, vertexCount: vertexCount,
+                              descriptor: descriptor, submeshes: [submesh])
+        let asset = MDLAsset()
+        asset.add(mdlMesh)
+
+        // Model I/O on iOS cannot write .usdz directly (canExportFileExtension
+        // says no) — but a usdz IS a stored zip of a usdc with 64-byte-aligned
+        // payloads, so export the usdc and package it ourselves.
+        let innerExtension = MDLAsset.canExportFileExtension("usdc") ? "usdc" : "usda"
+        let inner = FileManager.default.temporaryDirectory
+            .appendingPathComponent("clayspace-usdz-inner.\(innerExtension)")
+        try? FileManager.default.removeItem(at: inner)
+        defer { try? FileManager.default.removeItem(at: inner) }
+        do {
+            try asset.export(to: inner)
+            let payload = try Data(contentsOf: inner)
+            try storedZip(entries: [("model.\(innerExtension)", payload)])
+                .write(to: url, options: .atomic)
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    /// A stored (no-compression) zip with payloads aligned to 64 bytes —
+    /// the usdz packaging rules.
+    nonisolated private static func storedZip(entries: [(name: String, data: Data)]) -> Data {
+        func crc32(_ data: Data) -> UInt32 {
+            var table = [UInt32](repeating: 0, count: 256)
+            for i in 0..<256 {
+                var c = UInt32(i)
+                for _ in 0..<8 { c = (c & 1) != 0 ? 0xEDB8_8320 ^ (c >> 1) : c >> 1 }
+                table[i] = c
+            }
+            var crc: UInt32 = 0xFFFF_FFFF
+            for byte in data { crc = table[Int((crc ^ UInt32(byte)) & 0xFF)] ^ (crc >> 8) }
+            return crc ^ 0xFFFF_FFFF
+        }
+        var out = Data()
+        var central = Data()
+        func put16(_ v: Int, into data: inout Data) {
+            data.append(contentsOf: [UInt8(v & 0xFF), UInt8((v >> 8) & 0xFF)])
+        }
+        func put32(_ v: UInt32, into data: inout Data) {
+            data.append(contentsOf: [UInt8(v & 0xFF), UInt8((v >> 8) & 0xFF),
+                                     UInt8((v >> 16) & 0xFF), UInt8((v >> 24) & 0xFF)])
+        }
+        for entry in entries {
+            let name = Array(entry.name.utf8)
+            let crc = crc32(entry.data)
+            let headerOffset = out.count
+            // Extra-field padding so the payload starts on a 64-byte boundary.
+            let baseStart = headerOffset + 30 + name.count
+            var extra = (64 - baseStart % 64) % 64
+            if extra > 0 && extra < 4 { extra += 64 }
+            put32(0x0403_4B50, into: &out)
+            put16(20, into: &out); put16(0, into: &out); put16(0, into: &out)
+            put16(0, into: &out); put16(0, into: &out) // time, date
+            put32(crc, into: &out)
+            put32(UInt32(entry.data.count), into: &out)
+            put32(UInt32(entry.data.count), into: &out)
+            put16(name.count, into: &out)
+            put16(extra, into: &out)
+            out.append(contentsOf: name)
+            if extra > 0 { // arbitrary-id extra field, zero-filled
+                put16(0x1986, into: &out)
+                put16(extra - 4, into: &out)
+                out.append(contentsOf: [UInt8](repeating: 0, count: extra - 4))
+            }
+            out.append(entry.data)
+
+            put32(0x0201_4B50, into: &central)
+            put16(20, into: &central); put16(20, into: &central)
+            put16(0, into: &central); put16(0, into: &central)
+            put16(0, into: &central); put16(0, into: &central) // time, date
+            put32(crc, into: &central)
+            put32(UInt32(entry.data.count), into: &central)
+            put32(UInt32(entry.data.count), into: &central)
+            put16(name.count, into: &central)
+            put16(0, into: &central); put16(0, into: &central) // extra, comment
+            put16(0, into: &central); put16(0, into: &central) // disk, internal
+            put32(0, into: &central)                           // external attrs
+            put32(UInt32(headerOffset), into: &central)
+            central.append(contentsOf: name)
+        }
+        let centralOffset = out.count
+        out.append(central)
+        put32(0x0605_4B50, into: &out)
+        put16(0, into: &out); put16(0, into: &out)
+        put16(entries.count, into: &out); put16(entries.count, into: &out)
+        put32(UInt32(central.count), into: &out)
+        put32(UInt32(centralOffset), into: &out)
+        put16(0, into: &out)
+        return out
     }
 
     // MARK: Persistence (project-documents spec: autosave, restore)
