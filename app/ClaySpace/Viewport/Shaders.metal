@@ -21,6 +21,8 @@ struct Uniforms {
     float4 gridOrigin;    // xyz cache origin; w = cache enabled (0/1)
     float4 gridInvExtent; // xyz = 1/extent; w = normal epsilon
     float4 gridScale;     // xyz = dims/maxResolution (texture sub-region)
+    float4 lightDir;      // xyz normalized light direction (light dial)
+    float4 material;      // x spec strength, y shininess, z metalness
 };
 
 // Must match SceneItem in ClayEngine.swift (80 bytes).
@@ -469,6 +471,31 @@ static float4 mapShade(float3 p, FieldCtx ctx) {
     return float4(col, d);
 }
 
+// Field-derived AO (task 4.2): probe outward along the normal; occlusion
+// is how much the field undercuts the probe distances.
+static float calcAO(float3 p, float3 n, FieldCtx ctx) {
+    float occ = 0.0, sca = 1.0;
+    for (int i = 1; i <= 5; i++) {
+        float h = 0.012 + 0.11 * float(i);
+        occ += (h - mapDist(p + n * h, ctx)) * sca;
+        sca *= 0.72;
+    }
+    return saturate(1.0 - 1.6 * occ);
+}
+
+// Soft shadow toward the light: penumbra from the closest-approach ratio.
+static float softShadow(float3 ro, float3 rd, FieldCtx ctx) {
+    float res = 1.0;
+    float t = 0.04;
+    for (int i = 0; i < 24 && t < 6.0; i++) {
+        float d = mapDist(ro + rd * t, ctx);
+        if (d < 0.001) return 0.0;
+        res = min(res, 8.0 * d / t);
+        t += clamp(d, 0.02, 0.35);
+    }
+    return saturate(res);
+}
+
 static float3 calcNormal(float3 p, FieldCtx ctx) {
     // Epsilon scales with cache voxel size so trilinear normals stay smooth.
     const float h = ctx.gridInvExtent.w;
@@ -514,7 +541,9 @@ fragment FragOut raymarch_fragment(VertexOut in [[stage_in]],
     float3 color = mix(float3(0.88, 0.87, 0.86), float3(0.80, 0.79, 0.78),
                        saturate(0.5 - 0.5 * in.uv.y));
 
-    // Ground plane y = 0: build target + contact shadow + light grid.
+    const float3 l = normalize(u.lightDir.xyz);
+
+    // Ground plane y = 0: build target + shadows + light grid.
     float tGround = (rd.y < -1e-5) ? -ro.y / rd.y : -1.0;
     bool groundCloser = tGround > 0.0 && (!hit || tGround < t);
     if (groundCloser) {
@@ -525,12 +554,14 @@ fragment FragOut raymarch_fragment(VertexOut in [[stage_in]],
             float2 cell = abs(fract(gp.xz * 2.0) - 0.5);
             float line = smoothstep(0.47, 0.5, max(cell.x, cell.y));
             ground = mix(ground, ground * 0.93, line);
-            // contact shadow from the field
+            // contact darkening + a directional soft shadow that follows
+            // the light dial (task 4.2)
             float clearance = mapDist(gp, ctx);
-            float shadow = 1.0 - 0.35 * exp(-2.2 * max(clearance, 0.0));
+            float contact = 1.0 - 0.25 * exp(-2.2 * max(clearance, 0.0));
+            float sun = mix(0.55, 1.0, softShadow(gp + float3(0.0, 0.02, 0.0), l, ctx));
             // fade at the edge of the build area
             float edge = smoothstep(6.0, 4.6, max(abs(gp.x), abs(gp.z)));
-            color = mix(color, ground * shadow, edge);
+            color = mix(color, ground * contact * sun, edge);
         }
     }
 
@@ -538,10 +569,21 @@ fragment FragOut raymarch_fragment(VertexOut in [[stage_in]],
         float3 p = ro + rd * t;
         float3 n = calcNormal(p, ctx);
         float3 albedo = mapShade(p, ctx).rgb;
-        float3 l = normalize(float3(0.5, 0.8, 0.3));
-        float diffuse = saturate(dot(n, l));
+        float ao = calcAO(p, n, ctx);
+        float shadow = softShadow(p + n * 0.02, l, ctx);
+        float diffuse = saturate(dot(n, l)) * shadow;
         float rim = pow(1.0 - saturate(dot(n, -rd)), 3.0);
-        color = albedo * (0.35 + 0.65 * diffuse) + rim * 0.18;
+
+        // Material presets (task 8.4): Matte/Plastic/Metal as spec
+        // strength + shininess + metalness (spec tinted by albedo, less
+        // diffuse energy for metals).
+        float3 h = normalize(l - rd);
+        float spec = pow(saturate(dot(n, h)), max(u.material.y, 1.0))
+                     * u.material.x * shadow;
+        float3 specTint = mix(float3(1.0), albedo, u.material.z);
+        float3 diffuseAlbedo = albedo * (1.0 - 0.55 * u.material.z);
+        color = diffuseAlbedo * (0.35 * ao + 0.65 * diffuse * mix(1.0, ao, 0.35))
+              + spec * specTint + rim * 0.18 * ao;
 
         // Selection highlight: warm glow where the selected item's own
         // field owns the surface (fades over its blend reach).
@@ -549,6 +591,24 @@ fragment FragOut raymarch_fragment(VertexOut in [[stage_in]],
             float ds = sdItemMirrored(p, items[u.selectedIndex], ctx);
             float glow = 1.0 - smoothstep(0.0, 0.05, abs(ds));
             color = mix(color, float3(1.0, 0.62, 0.15), glow * 0.45);
+        }
+    }
+
+    // X-ray hint (task 4.5): the selected item's silhouette shows faintly
+    // through occluding clay — march its own analytic field only.
+    if (u.selectedIndex >= 0 && u.selectedIndex < u.itemCount) {
+        constant SceneItem &sel = items[u.selectedIndex];
+        float ts = 0.0;
+        bool selHit = false;
+        for (int i = 0; i < 48 && ts < 24.0; i++) {
+            float d = sdItemMirrored(ro + rd * ts, sel, ctx);
+            if (d < 0.0015 * max(ts, 1.0)) { selHit = true; break; }
+            ts += max(d * 0.95, 0.002);
+        }
+        bool frontT = hit && (!groundCloser || t < tGround);
+        float tFront = frontT ? t : (groundCloser ? tGround : -1.0);
+        if (selHit && tFront > 0.0 && ts > tFront + 0.02) {
+            color = mix(color, float3(1.0, 0.62, 0.15), 0.20);
         }
     }
 
@@ -603,9 +663,10 @@ vertex VoxelVSOut voxel_vertex(uint vid [[vertex_id]],
     return out;
 }
 
-fragment float4 voxel_fragment(VoxelVSOut in [[stage_in]]) {
+fragment float4 voxel_fragment(VoxelVSOut in [[stage_in]],
+                               constant Uniforms &u [[buffer(0)]]) {
     float3 n = normalize(in.normal);
-    float3 l = normalize(float3(0.5, 0.8, 0.3));
+    float3 l = normalize(u.lightDir.xyz);
     float diffuse = saturate(dot(n, l));
     float3 color = in.color * (0.45 + 0.55 * diffuse);
     return float4(pow(color, 1.0 / 2.2), 1.0);

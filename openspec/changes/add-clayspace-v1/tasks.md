@@ -33,10 +33,10 @@
 ## 4. Viewport & rendering
 
 - [ ] 4.1 Sphere-tracing renderer over brick caches: pixel-proportional epsilon, tetrahedron normals, MatCap shading (≥3 matcaps)
-- [ ] 4.2 Field-derived AO + soft shadows with light-direction dial hookup
+- [x] 4.2 Field-derived AO + soft shadows with light-direction dial hookup — 5-tap normal-probe AO + penumbra soft shadows (closest-approach ratio) on the surface AND a directional ground shadow; light dial (azimuth slider, fixed 53-degree elevation) in the inspector rides Uniforms.lightDir into both raymarch and voxel passes
 - [ ] 4.3 Voxel layer renderer: greedy meshing + raster pass, depth-composited with the raymarch pass
 - [x] 4.4 Camera system: orbit/pan/zoom/roll, perspective/ortho + presets, orientation widget, zoom-to-selection, camera bookmarks — `OrbitCamera` + Blender-style `NavigationGizmo` (axis balls snap views, center cube = Home) with tappable persp/ortho readout; zoom-to-selection deferred to 4.5. NOTE: bookmark save/recall lives in `ViewportState` but its UI was removed by design review — the viewport-rendering spec requires ≥4 bookmarks, so give them a new surface (e.g. gizmo long-press or a view menu) or amend the spec before archiving
-- [ ] 4.5 Selection highlight incl. occluded X-ray hint; on-canvas status/hints/toasts; zoom-to-selection (deferred from 4.4, needs selection bounds)
+- [x] 4.5 Selection highlight incl. occluded X-ray hint; on-canvas status/hints/toasts; zoom-to-selection — X-ray: the selected item's own analytic field is marched per pixel and its silhouette tints through occluding clay; zoom-to-selection: Frame button in the edit panel animates the camera to the selection's bound; toasts shipped earlier
 - [ ] 4.6 Performance pass to spec targets (60/120 fps, ≤1-frame stroke preview, ≤250 ms refinement); MetalFX if needed
 
 ## 5. Input — Pencil & touch
@@ -69,7 +69,7 @@
 - [x] 8.1 Per-document palette with swatch editing; active-color plumbing to both modes — starter palette + active color drives SDF strokes and voxel stamps (swatch editing pending)
 - [x] 8.2 Per-item/per-voxel color storage; recolor flows — colored strokes, Paint (CLAY_OP_PAINT) stain tool, selection recolor via clay_layer_set_color with op-log undo; voxel palette indices
 - [x] 8.3 Color-blend-at-joint field sampling (matches geometric falloff) — csmin_quadratic_m h² weights in the preview; bake/export carry field colors
-- [ ] 8.4 Surface material presets (Matte/Plastic/Metal) per layer
+- [x] 8.4 Surface material presets (Matte/Plastic/Metal) per layer — inspector segmented picker -> spec strength/shininess/metalness in Uniforms.material (metal tints spec by albedo and sheds diffuse energy); persisted in mirror sidecar format 2 (format-1 files load as Matte)
 
 ## 9. Import & export (claycore: `mesh`, `io`, `clay-cli`)
 

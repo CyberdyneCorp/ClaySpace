@@ -180,6 +180,33 @@ final class ViewportState {
                                scale: item.scale)
     }
 
+    // MARK: Light dial (task 4.2)
+
+    /// Light azimuth about world Y; elevation is fixed at the study's
+    /// pleasant ~53°. Default reproduces the original (0.5, 0.8, 0.3).
+    var lightAngle: Float = 0.98
+
+    var lightDirection: SIMD3<Float> {
+        let elevation: Float = 0.927
+        return simd_normalize(SIMD3(cos(elevation) * sin(lightAngle),
+                                    sin(elevation),
+                                    cos(elevation) * cos(lightAngle)))
+    }
+
+    /// Zoom-to-selection (task 4.5): frame the selected item's bound.
+    func frameSelection() {
+        guard let index = selectedIndex,
+              engine.items.indices.contains(index) else { return }
+        var target = camera
+        target.target = engine.items[index].boundCenter
+        target.distance = max(engine.items[index].boundRadius * 3, 0.8)
+        if target.isOrthographic {
+            target.orthoHalfHeight = target.distance / target.lens
+        }
+        animateCamera(to: target)
+        showToast("Framed shape \(index)")
+    }
+
     // MARK: Camera bookmarks, presets & animated recall (task 4.4)
 
     private(set) var bookmarks: [OrbitCamera?] = [nil, nil, nil, nil]

@@ -520,6 +520,34 @@ final class ClayEngineTests: XCTestCase {
                           2.4, "undo restores the carve order")
     }
 
+    func testMaterialPresetPersistsAndOldSidecarsStillLoad() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mat_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("m.clayspace")
+
+        let first = ClayEngine()
+        first.setMaterialPreset(.metal)
+        XCTAssertTrue(first.saveDocument(documentURL: url))
+
+        let second = ClayEngine()
+        XCTAssertTrue(second.loadDocument(documentURL: url, mirrorURL: url))
+        XCTAssertEqual(second.materialPreset, .metal, "preset round-trips (format 2)")
+
+        // A format-1 sidecar (no preset field) still loads, defaulting Matte.
+        let mirror = url.appendingPathComponent("mirror.bin")
+        var data = try Data(contentsOf: mirror)
+        data.withUnsafeMutableBytes { raw in
+            raw.storeBytes(of: UInt32(1), toByteOffset: 4, as: UInt32.self) // format
+        }
+        data.removeSubrange(32..<36) // drop the appended preset field
+        try data.write(to: mirror)
+        let third = ClayEngine()
+        XCTAssertTrue(third.loadDocument(documentURL: url, mirrorURL: url))
+        XCTAssertEqual(third.materialPreset, .matte, "format-1 files stay loadable")
+    }
+
     func testRenameDocumentMovesPackageAndRefusesCollisions() {
         let engine = ClayEngine()
         let suffix = UUID().uuidString.prefix(6)

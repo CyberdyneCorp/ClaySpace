@@ -246,6 +246,38 @@ final class ClayEngine {
 
     private(set) var lastError: String?
 
+    /// Surface material preset (task 8.4): shading parameters the preview
+    /// applies to the whole SDF layer. Persisted in the mirror sidecar.
+    enum MaterialPreset: Int32, CaseIterable, Identifiable {
+        case matte = 0, plastic = 1, metal = 2
+
+        var id: Int32 { rawValue }
+        var title: String {
+            switch self {
+            case .matte: "Matte"
+            case .plastic: "Plastic"
+            case .metal: "Metal"
+            }
+        }
+        /// spec strength, shininess, metalness (shader u.material).
+        var shadingParams: SIMD4<Float> {
+            switch self {
+            case .matte: SIMD4(0.0, 1, 0, 0)
+            case .plastic: SIMD4(0.5, 36, 0, 0)
+            case .metal: SIMD4(0.95, 64, 1, 0)
+            }
+        }
+    }
+
+    private(set) var materialPreset: MaterialPreset = .matte
+
+    func setMaterialPreset(_ preset: MaterialPreset) {
+        guard preset != materialPreset else { return }
+        materialPreset = preset
+        version += 1 // redraw + autosave ride the version bump
+        scheduleAutosave()
+    }
+
     /// Not undoable by design — mirror is tool state, like ClayCore's own
     /// direct-mutating clay_set_layer_mirror.
     func setMirror(axes: Int32, k: Float? = nil) {
@@ -1311,7 +1343,8 @@ final class ClayEngine {
     var isDirty: Bool { version != lastSavedVersion }
 
     private static let mirrorMagic: UInt32 = 0x4353_4D52 // "CSMR"
-    private static let mirrorFormat: UInt32 = 1
+    /// Format 2 appends the material preset; format-1 files load as Matte.
+    private static let mirrorFormat: UInt32 = 2
 
     /// The render mirror as blittable sidecar data — the C ABI has no scene
     /// enumeration, so the mirror persists alongside the document.
@@ -1324,7 +1357,8 @@ final class ClayEngine {
             Self.mirrorMagic, Self.mirrorFormat,
             UInt32(items.count), UInt32(strokePoints.count),
             UInt32(bitPattern: mirrorAxes), UInt32(bitPattern: radialCount),
-            mirrorK.bitPattern, UInt32(layer)
+            mirrorK.bitPattern, UInt32(layer),
+            UInt32(bitPattern: materialPreset.rawValue) // format 2
         ]
         append(header)
         append(items)
@@ -1401,9 +1435,14 @@ final class ClayEngine {
         }
 
         guard let header: [UInt32] = readArray(count: 8),
-              header[0] == Self.mirrorMagic, header[1] == Self.mirrorFormat else {
+              header[0] == Self.mirrorMagic,
+              header[1] == 1 || header[1] == Self.mirrorFormat else {
             clay_document_destroy(newDoc)
             return false
+        }
+        var loadedPreset = MaterialPreset.matte
+        if header[1] >= 2, let extra: [UInt32] = readArray(count: 1) {
+            loadedPreset = MaterialPreset(rawValue: Int32(bitPattern: extra[0])) ?? .matte
         }
         let itemCount = Int(header[2])
         let pointCount = Int(header[3])
@@ -1421,6 +1460,7 @@ final class ClayEngine {
         if let old = doc { clay_document_destroy(old) }
         doc = newDoc
         layer = clay_layer_id(header[7])
+        materialPreset = loadedPreset
         mirrorAxes = Int32(bitPattern: header[4])
         radialCount = Int32(bitPattern: header[5])
         mirrorK = Float(bitPattern: header[6])
@@ -1510,6 +1550,7 @@ final class ClayEngine {
         voxelMeshVersion += 1
         mirrorAxes = 0
         radialCount = 0
+        materialPreset = .matte
         guard let doc else { return }
         var layerId: clay_layer_id = 0
         guard check(clay_add_sdf_layer(doc, "Clay", &layerId)) else { return }

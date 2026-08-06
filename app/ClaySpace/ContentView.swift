@@ -235,6 +235,27 @@ struct ContentView: View {
             }
             .font(.system(size: 12.5))
             .foregroundStyle(.secondary)
+
+            // Surface preset + light dial (tasks 8.4, 4.2).
+            Picker("Surface", selection: Binding(
+                get: { state.engine.materialPreset },
+                set: { state.engine.setMaterialPreset($0) })) {
+                ForEach(ClayEngine.MaterialPreset.allCases) { preset in
+                    Text(preset.title).tag(preset)
+                }
+            }
+            .pickerStyle(.segmented)
+            .accessibilityIdentifier("materialPreset")
+            HStack(spacing: 8) {
+                Image(systemName: "sun.max")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                Slider(value: Binding(
+                    get: { Double(state.lightAngle) },
+                    set: { state.lightAngle = Float($0) }), in: 0...(2 * .pi))
+                    .tint(.orange)
+                    .accessibilityLabel("Light direction")
+            }
             EditListPanel(state: state)
             Spacer()
         }

@@ -285,6 +285,36 @@ final class CameraAndInputTests: XCTestCase {
         }
     }
 
+    func testFrameSelectionRetargetsTheCamera() {
+        let state = ViewportState()
+        state.viewportSize = CGSize(width: 800, height: 600)
+        _ = state.engine.addPrimitive(CLAY_PRIM_SPHERE, params: [0.3],
+                                      at: SIMD3(2.5, 1, 0), op: CLAY_OP_ADD,
+                                      blendK: 0, color: ClayEngine.clayColor)
+        state.selectedIndex = state.engine.items.count - 1
+        state.frameSelection()
+        // animateCamera runs async; the destination is what matters — poll
+        // briefly for the retarget to land.
+        let deadline = Date().addingTimeInterval(2)
+        while Date() < deadline, simd_distance(state.camera.target, SIMD3(2.5, 1, 0)) > 0.05 {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        XCTAssertEqual(state.camera.target.x, 2.5, accuracy: 0.05,
+                       "camera orbits the framed item")
+        XCTAssertLessThan(state.camera.distance, 3.2, "distance tightens to the bound")
+    }
+
+    func testLightDialDefaultMatchesTheOriginalKeyLight() {
+        let state = ViewportState()
+        let dir = state.lightDirection
+        let reference = simd_normalize(SIMD3<Float>(0.5, 0.8, 0.3))
+        XCTAssertEqual(simd_dot(dir, reference), 1.0, accuracy: 0.01,
+                       "default dial reproduces the pre-dial light")
+        state.lightAngle += .pi
+        XCTAssertLessThan(simd_dot(state.lightDirection, reference), 0.5,
+                          "turning the dial moves the light")
+    }
+
     func testHapticsFireOnStrokeEndAndRespectTheToggle() {
         let state = ViewportState()
         state.viewportSize = CGSize(width: 800, height: 600)

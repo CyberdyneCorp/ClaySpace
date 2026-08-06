@@ -27,6 +27,8 @@ final class Renderer {
         var gridOrigin: SIMD4<Float>    // xyz origin; w = cache enabled (0/1)
         var gridInvExtent: SIMD4<Float> // xyz = 1/extent; w = normal epsilon
         var gridScale: SIMD4<Float>     // xyz = dims/maxResolution
+        var lightDir: SIMD4<Float>      // xyz normalized (light dial)
+        var material: SIMD4<Float>      // spec strength, shininess, metalness
     }
 
     static let maxItems = 256
@@ -164,7 +166,8 @@ final class Renderer {
     }
 
     func draw(to drawable: CAMetalDrawable, time: Float, camera: OrbitCamera,
-              engine: ClayEngine, selectedIndex: Int) {
+              engine: ClayEngine, selectedIndex: Int,
+              lightDir: SIMD3<Float> = simd_normalize(SIMD3(0.5, 0.8, 0.3))) {
         let items = engine.items
         let strokePoints = engine.strokePoints
         if engine.version != uploadedVersion {
@@ -243,7 +246,9 @@ final class Renderer {
                 ? SIMD4(Float(cache!.dims.x) / Float(FieldCache.maxResolution),
                         Float(cache!.dims.y) / Float(FieldCache.maxResolution),
                         Float(cache!.dims.z) / Float(FieldCache.maxResolution), 0)
-                : SIMD4(1, 1, 1, 0)
+                : SIMD4(1, 1, 1, 0),
+            lightDir: SIMD4(lightDir.x, lightDir.y, lightDir.z, 0),
+            material: engine.materialPreset.shadingParams
         )
 
         encoder.setRenderPipelineState(pipeline)
@@ -264,6 +269,7 @@ final class Renderer {
             encoder.setVertexBuffer(normals, offset: 0, index: 1)
             encoder.setVertexBuffer(colors, offset: 0, index: 2)
             encoder.setVertexBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 3)
+            encoder.setFragmentBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 0)
             encoder.drawIndexedPrimitives(type: .triangle, indexCount: voxelIndexCount,
                                           indexType: .uint32, indexBuffer: indices,
                                           indexBufferOffset: 0)

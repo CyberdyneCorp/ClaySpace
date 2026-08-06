@@ -157,16 +157,26 @@ struct EditListPanel: View {
                 }
             }
 
-            Button(role: .destructive) {
-                if engine.deleteItem(index: index) {
-                    state.selectedIndex = nil
-                    state.showToast("Deleted shape \(index)")
+            HStack {
+                Button {
+                    state.frameSelection()
+                } label: {
+                    Label("Frame", systemImage: "viewfinder")
+                        .font(.system(size: 12))
                 }
-            } label: {
-                Label("Delete", systemImage: "trash")
-                    .font(.system(size: 12))
+                .accessibilityIdentifier("editFrame")
+                Spacer()
+                Button(role: .destructive) {
+                    if engine.deleteItem(index: index) {
+                        state.selectedIndex = nil
+                        state.showToast("Deleted shape \(index)")
+                    }
+                } label: {
+                    Label("Delete", systemImage: "trash")
+                        .font(.system(size: 12))
+                }
+                .accessibilityIdentifier("editDelete")
             }
-            .accessibilityIdentifier("editDelete")
         }
         .font(.system(size: 12))
     }
