@@ -240,6 +240,15 @@ final class ViewportState {
 
     var shapeKind: PrimKind = .sphere
     var shapeOp: ShapeOp = .add
+    /// Voxel sculpt verb applied by the Sculpt tool in Voxels mode.
+    var voxelVerb: ClayEngine.VoxelVerb = .place
+    /// Spray-tool stroke feel (ZBrush-style stamp engine).
+    var sprayFeel = ClayEngine.SprayFeel()
+    fileprivate var voxelStrokeNormal = SIMD3<Float>(0, 1, 0)
+    fileprivate var voxelDragPlane: (point: SIMD3<Float>, normal: SIMD3<Float>)?
+    fileprivate var lastVoxelDragPoint: SIMD3<Float>?
+    fileprivate var spraySamples: [(position: SIMD3<Float>, pressure: Float, tilt: Float)] = []
+    fileprivate var sprayPlane: (point: SIMD3<Float>, normal: SIMD3<Float>)?
     var shapeBlendProfile: BlendProfile = .smooth
     /// Blend radius k in world units (the bar's slider); support reach is
     /// the profile's multiple of it.
@@ -523,13 +532,48 @@ extension ViewportState: PencilToolSink {
               let ray = ray(through: point),
               let pick = engine.voxelPick(origin: ray.origin, direction: ray.direction,
                                           buildPlane: buildPlane) else { return }
-        let cell = activeTool == .sculpt ? pick.adjacent : pick.hit
-        if cell == lastVoxelCell { return }
-        lastVoxelCell = cell
-        let brushSize = Int32(max(1, min(3, 1 + Int(pressure * 2.4))))
-        let edit: ClayEngine.VoxelEdit =
-            activeTool == .erase ? .erase : (activeTool == .paint ? .paint : .place)
-        engine.voxelStamp(edit, at: cell, brushSize: brushSize, color: activeColor)
+
+        if activeTool == .erase || activeTool == .paint {
+            let cell = pick.hit
+            if cell == lastVoxelCell { return }
+            lastVoxelCell = cell
+            let brushSize = Int32(max(1, min(3, 1 + Int(pressure * 2.4))))
+            engine.voxelStamp(activeTool == .erase ? .erase : .paint,
+                              at: cell, brushSize: brushSize, color: activeColor)
+            return
+        }
+
+        // Sculpt tool: the picked verb (3DCoat-style).
+        if voxelVerb == .place {
+            let cell = pick.adjacent
+            if cell == lastVoxelCell { return }
+            lastVoxelCell = cell
+            let brushSize = Int32(max(1, min(3, 1 + Int(pressure * 2.4))))
+            engine.voxelStamp(.place, at: cell, brushSize: brushSize, color: activeColor)
+            return
+        }
+        let brushSize = Int32(max(3, min(7, 3 + Int(pressure * 4))))
+        if voxelVerb.needsDisplacement {
+            // Grab/smudge follow the pencil's world motion on the view
+            // plane through the first contact.
+            guard let plane = voxelDragPlane,
+                  let current = intersect(ray: ray, plane: plane) else { return }
+            guard let last = lastVoxelDragPoint else {
+                lastVoxelDragPoint = current
+                return
+            }
+            let displacement = current - last
+            guard simd_length(displacement) > 0.004 else { return }
+            lastVoxelDragPoint = current
+            engine.voxelSculpt(voxelVerb, at: pick.hit, brushSize: brushSize,
+                               displacement: displacement, color: activeColor)
+        } else {
+            let cell = pick.hit
+            if cell == lastVoxelCell { return }
+            lastVoxelCell = cell
+            engine.voxelSculpt(voxelVerb, at: cell, brushSize: brushSize,
+                               normal: voxelStrokeNormal, color: activeColor)
+        }
     }
 
     func pencilBegan(at point: CGPoint, pressure: Float, altitude: Float = .pi / 2) {
@@ -538,13 +582,25 @@ extension ViewportState: PencilToolSink {
         hoverGhost = nil // the pencil is down; the preview did its job
 
         if mode == .voxel {
-            if activeTool == .select || activeTool == .move || activeTool == .shape {
-                showToast(activeTool == .shape ? "Shapes work in Smooth mode"
-                                               : "Select works in Smooth mode")
+            if activeTool == .select || activeTool == .move
+                || activeTool == .shape || activeTool == .spray {
+                showToast(activeTool == .select || activeTool == .move
+                          ? "Select works in Smooth mode"
+                          : "Shapes work in Smooth mode")
                 return
             }
             lastVoxelCell = nil
             engine.beginVoxelEdits() // the whole drag = one undo step
+            if let ray = ray(through: point),
+               let pick = engine.voxelPick(origin: ray.origin,
+                                           direction: ray.direction,
+                                           buildPlane: buildPlane) {
+                voxelStrokeNormal = pick.normal
+                let world = (SIMD3<Float>(pick.hit) + SIMD3(repeating: 0.5))
+                    * ClayEngine.voxelSize
+                voxelDragPlane = (world, camera.basis.forward)
+                lastVoxelDragPoint = nil
+            }
             voxelEdit(at: point, pressure: max(pressure, 0.1))
             return
         }
@@ -660,6 +716,16 @@ extension ViewportState: PencilToolSink {
             return
         }
 
+        // Spray tool: collect the drag; stamps resolve on lift.
+        if activeTool == .spray {
+            guard let ray = ray(through: point) else { return }
+            let hit = engine.raycast(origin: ray.origin, direction: ray.direction)
+            guard let start = hit?.position ?? groundPoint(on: ray) else { return }
+            sprayPlane = (start, camera.basis.forward)
+            spraySamples = [(start, max(pressure, 0.1), altitude)]
+            return
+        }
+
         // Select/Move: pick the item under the pencil for a one-undo-step
         // move session; tapping empty space deselects.
         if activeTool == .select || activeTool == .move {
@@ -718,6 +784,13 @@ extension ViewportState: PencilToolSink {
         pencilPeakPressure = max(pencilPeakPressure, pressure)
         if mode == .sdf, activeTool == .shape, gizmoDrag == nil {
             updateShapePreview(at: point)
+            return
+        }
+        if mode == .sdf, activeTool == .spray, gizmoDrag == nil, !spraySamples.isEmpty {
+            guard spraySamples.count < 512, let plane = sprayPlane,
+                  let ray = ray(through: point),
+                  let p = intersect(ray: ray, plane: plane) else { return }
+            spraySamples.append((p, max(pressure, 0.1), altitude))
             return
         }
 
@@ -871,6 +944,7 @@ extension ViewportState: PencilToolSink {
         dragStartHit = nil
         gizmoDrag = nil
         shapePreview = nil
+        if !spraySamples.isEmpty { applySpray(at: pencilStart ?? .zero) }
         engine.endVoxelEdits() // commit a cancelled voxel drag's step
         if engine.isEditingParams {
             engine.endParamEdit() // commit the drag so far
@@ -894,6 +968,10 @@ extension ViewportState: PencilToolSink {
             _ = start // the preview followed the pencil; place where it shows
             placeShape(at: point)
             shapePreview = nil
+            return
+        }
+        if activeTool == .spray, gizmoDrag == nil, !spraySamples.isEmpty {
+            applySpray(at: point)
             return
         }
         if engine.isEditingParams {
@@ -950,6 +1028,26 @@ extension ViewportState: PencilToolSink {
         default: break
         }
         return Array(p.prefix(max(ClayEngine.paramCount(forPrim: prim), 1)))
+    }
+
+    /// Resolves the collected spray samples into stamps of the current
+    /// shape-bar primitive — one undo step for the whole stroke.
+    fileprivate func applySpray(at point: CGPoint) {
+        defer { spraySamples = []; sprayPlane = nil }
+        let radius = 0.09 + pencilPeakPressure * 0.25
+        let stamped = engine.sprayStroke(samples: spraySamples,
+                                         prim: shapeKind.clayPrim,
+                                         templateParams: shapeKind.params(size: 1),
+                                         op: shapeOp.clayOp,
+                                         blendK: shapeBlendProfile == .hard ? 0 : shapeBlendK,
+                                         blend: shapeBlendProfile.clayBlend,
+                                         color: activeColor,
+                                         radius: radius, feel: sprayFeel)
+        if stamped > 0 {
+            emitHaptic(.completed, at: point)
+        } else if let error = engine.lastError {
+            showToast("Spray failed: \(error)")
+        }
     }
 
     /// Where a shape-tool press would land, or nil (carve ops off-surface).
@@ -1035,7 +1133,8 @@ extension ViewportState: PencilToolSink {
                 hoverGhost = nil
                 return
             }
-            let cell = activeTool == .sculpt ? pick.adjacent : pick.hit
+            let cell = activeTool == .sculpt && voxelVerb == .place
+                ? pick.adjacent : pick.hit
             let world = (SIMD3<Float>(cell) + 0.5) * ClayEngine.voxelSize
             hoverGhost = ghost(at: world, worldRadius: ClayEngine.voxelSize * 0.5,
                                isVoxel: true)
@@ -1044,13 +1143,14 @@ extension ViewportState: PencilToolSink {
         let hoverPressure: Float = 0.35 // preview at a middling press
         let hit = engine.raycast(origin: ray.origin, direction: ray.direction)
         switch activeTool {
-        case .sculpt, .shape:
+        case .sculpt, .shape, .spray:
             guard let target = hit?.position ?? groundPoint(on: ray) else {
                 hoverGhost = nil
                 return
             }
             let r = activeTool == .shape ? 0.14 + hoverPressure * 0.42
-                                         : radius(for: hoverPressure, altitude: altitude)
+                : activeTool == .spray ? 0.09 + hoverPressure * 0.25
+                : radius(for: hoverPressure, altitude: altitude)
             hoverGhost = ghost(at: target, worldRadius: r, isVoxel: false)
         case .erase, .paint:
             guard let hit else { hoverGhost = nil; return }

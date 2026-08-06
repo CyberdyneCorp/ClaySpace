@@ -221,6 +221,7 @@ final class ClayEngine {
         case layerVisibility(slot: Int, before: Bool, after: Bool)
         case voxelStep // grid diff lives in ClayCore's journal (ABI 0.20)
         case reparam(index: Int, before: SIMD4<Float>, after: SIMD4<Float>)
+        case addBatch(count: Int) // spray stroke: N stamps, one clay step
     }
     private enum RedoOp {
         case add(item: SceneItem, points: [SIMD4<Float>],
@@ -238,6 +239,7 @@ final class ClayEngine {
         case layerVisibility(slot: Int, before: Bool, after: Bool)
         case voxelStep
         case reparam(index: Int, before: SIMD4<Float>, after: SIMD4<Float>)
+        case addBatch(rows: [LayerRow])
     }
     private var undoLog: [UndoKind] = []
     private var redoOps: [RedoOp] = []
@@ -514,6 +516,108 @@ final class ClayEngine {
         return placed
     }
 
+    // MARK: Spray strokes (ZBrush-style stamp engine, task 3.4 follow-up)
+
+    /// App-facing stroke feel: maps onto clay_stroke_preset over the
+    /// engine defaults. Sliders in the shape bar.
+    struct SprayFeel {
+        var spacing: Float = 1.2   // stamp spacing, fraction of the diameter
+        var jitter: Float = 0      // position jitter, fraction of the radius
+        var steady: Float = 0      // lazy-mouse lag, 0…0.9
+    }
+
+    /// Resolves a drag into stamps of the given primitive template and
+    /// applies them as ONE undo step (clay_layer_apply_stroke). The mirror
+    /// reconstructs each stamp exactly: position/rotation from the stamp,
+    /// scale = stamp radius (template authored at unit size).
+    @discardableResult
+    func sprayStroke(samples: [(position: SIMD3<Float>, pressure: Float, tilt: Float)],
+                     prim: clay_prim, templateParams: [Float], op: clay_op,
+                     blendK: Float, blend: clay_blend, color: SIMD3<Float>,
+                     radius: Float, feel: SprayFeel) -> Int {
+        guard let doc, !samples.isEmpty, activeStroke == nil,
+              transformIndex == nil, items.count < Renderer.maxItems else { return 0 }
+
+        var preset = clay_stroke_preset()
+        guard clay_stroke_preset_defaults(&preset) == CLAY_OK else { return 0 }
+        preset.radius = max(radius, 0.01)
+        preset.spacing = max(feel.spacing, 0.1)
+        preset.jitter_position = max(feel.jitter, 0)
+        preset.jitter_rotation = feel.jitter > 0 ? .pi : 0
+        preset.steady = min(max(feel.steady, 0), 0.95)
+        preset.pressure_size = 0.7
+        preset.rotate_along_stroke = 1
+
+        var flat = [Float]()
+        flat.reserveCapacity(samples.count * 5)
+        for sample in samples {
+            flat.append(contentsOf: [sample.position.x, sample.position.y,
+                                     sample.position.z, sample.pressure, sample.tilt])
+        }
+
+        // Pure resolve first: the mirror needs each stamp's placement.
+        var count: size_t = 0
+        guard clay_stroke_resolve(flat, samples.count, &preset, nil, &count) == CLAY_OK,
+              count > 0 else { return 0 }
+        count = min(count, size_t(Renderer.maxItems - items.count))
+        var stamps = [clay_stamp](repeating: clay_stamp(), count: count)
+        var stampCount = count
+        guard clay_stroke_resolve(flat, samples.count, &preset, &stamps,
+                                  &stampCount) == CLAY_OK else { return 0 }
+
+        let effectiveBlend = blendK > 0 ? blend : CLAY_BLEND_HARD
+        guard let template = clay_item_create(Int32(prim.rawValue),
+                                              templateParams,
+                                              templateParams.count) else {
+            lastError = String(cString: clay_last_error())
+            return 0
+        }
+        clay_item_set_op(template, Int32(op.rawValue))
+        clay_item_set_blend(template, Int32(effectiveBlend.rawValue), blendK)
+        clay_item_set_color(template, [color.x, color.y, color.z])
+        clay_item_set_mirror(template, mirrorAxes != 0 ? 1 : 0)
+        var nodes = [clay_node_id](repeating: 0, count: Int(stampCount))
+        var applied: size_t = size_t(stampCount)
+        let ok = check(clay_layer_apply_stroke(doc, layer, flat, samples.count,
+                                               &preset, template, nil, &nodes, &applied))
+        clay_item_destroy(template)
+        guard ok, applied > 0 else { return 0 }
+
+        // Mirror rows, exactly as brush::stamps_to_nodes builds the nodes.
+        let geo = Self.geometricRadius(prim: prim, params: templateParams)
+            + Self.blendSupport(effectiveBlend, blendK) + 0.02
+        var p = SIMD4<Float>(repeating: 0)
+        for (i, value) in templateParams.prefix(4).enumerated() { p[i] = value }
+        let used = min(Int(applied), Int(stampCount))
+        for i in 0..<used {
+            let stamp = stamps[i]
+            let position = SIMD3(stamp.position.0, stamp.position.1, stamp.position.2)
+            let rotation = SIMD4(stamp.rotation.0, stamp.rotation.1,
+                                 stamp.rotation.2, stamp.rotation.3)
+            let worldRadius = geo * max(stamp.radius, 0.01)
+            items.append(SceneItem(
+                position: position, scale: max(stamp.radius, 0.01),
+                rotation: rotation, params: p,
+                color: color, blendK: blendK,
+                prim: Int32(prim.rawValue), op: Int32(op.rawValue),
+                blend: Int32(effectiveBlend.rawValue), rounding: 0,
+                boundCenter: position, boundRadius: worldRadius,
+                mirrorFlag: mirrorAxes != 0 ? 1 : 0,
+                radialCount: 0,
+                layerSlot: Float(activeLayerSlot)))
+            itemAABBs.append((position - SIMD3(repeating: worldRadius),
+                              position + SIMD3(repeating: worldRadius)))
+            nodeIDs.append(nodes[i])
+            localBounds.append((SIMD3.zero, geo))
+            itemLayers.append(Int32(activeLayerSlot))
+        }
+        undoLog.append(.addBatch(count: used))
+        redoOps.removeAll()
+        commit()
+        scheduleBake()
+        return used
+    }
+
     // MARK: Sculpt strokes (Pencil smear — task 3.4)
 
     var isStroking: Bool { activeStroke != nil }
@@ -695,6 +799,21 @@ final class ClayEngine {
         case .reparam(let index, let before, let after):
             replayParamsMirror(before, at: index)
             redoOps.append(.reparam(index: index, before: before, after: after))
+        case .addBatch(let count):
+            var rows: [LayerRow] = []
+            for _ in 0..<min(count, items.count) {
+                let index = items.count - 1
+                rows.append(LayerRow(index: index, item: items[index],
+                                     node: nodeIDs[index], aabb: itemAABBs[index],
+                                     local: localBounds[index],
+                                     slot: itemLayers[index]))
+                items.removeLast()
+                itemAABBs.removeLast()
+                nodeIDs.removeLast()
+                localBounds.removeLast()
+                itemLayers.removeLast()
+            }
+            redoOps.append(.addBatch(rows: rows.reversed()))
         case .add, .none: // .none: history predating the log — treat as add
             if let last = items.popLast() {
                 var points: [SIMD4<Float>] = []
@@ -781,6 +900,15 @@ final class ClayEngine {
         case .reparam(let index, let before, let after):
             replayParamsMirror(after, at: index)
             undoLog.append(.reparam(index: index, before: before, after: after))
+        case .addBatch(let rows):
+            for row in rows {
+                items.append(row.item)
+                itemAABBs.append(row.aabb)
+                nodeIDs.append(row.node)
+                localBounds.append(row.local)
+                itemLayers.append(row.slot)
+            }
+            undoLog.append(.addBatch(count: rows.count))
         case .none:
             break
         }
@@ -1477,6 +1605,85 @@ final class ClayEngine {
         return index
     }
 
+    /// 3DCoat-style voxel sculpt verbs (task 6.2 follow-up). Place routes
+    /// to the stamp brush; the rest call clay_voxel_sculpt_*.
+    enum VoxelVerb: String, CaseIterable, Identifiable {
+        case place, smooth, inflate, deflate, flatten, scrape, pinch, grab,
+             smudge, fill
+
+        var id: String { rawValue }
+        var title: String { rawValue.capitalized }
+        var symbol: String {
+            switch self {
+            case .place: "square.grid.3x3.fill.square"
+            case .smooth: "drop"
+            case .inflate: "arrow.up.left.and.arrow.down.right.circle"
+            case .deflate: "arrow.down.right.and.arrow.up.left.circle"
+            case .flatten: "square.bottomthird.inset.filled"
+            case .scrape: "scissors"
+            case .pinch: "arrow.right.and.line.vertical.and.arrow.left"
+            case .grab: "hand.draw"
+            case .smudge: "hand.point.up.left.and.text"
+            case .fill: "drop.fill"
+            }
+        }
+        /// Flatten/scrape act against the surface plane hit at stroke start.
+        var needsNormal: Bool { self == .flatten || self == .scrape }
+        /// Grab/smudge displace by the pencil's world-space motion.
+        var needsDisplacement: Bool { self == .grab || self == .smudge }
+    }
+
+    /// Applies one sculpt verb at a cell (smooth falloff sphere brush).
+    /// Journaled as undo steps when the linked ClayCore supports it, like
+    /// the stamp brushes.
+    @discardableResult
+    func voxelSculpt(_ verb: VoxelVerb, at cell: SIMD3<Int32>, brushSize: Int32,
+                     normal: SIMD3<Float> = SIMD3(0, 1, 0),
+                     displacement: SIMD3<Float> = .zero,
+                     color: SIMD3<Float>) -> Bool {
+        if verb == .place {
+            voxelStamp(.place, at: cell, brushSize: brushSize, color: color)
+            return true
+        }
+        guard ensureVoxelLayer(), let voxelGrid else { return false }
+        let selfBracketed = Self.voxelUndoAvailable && !voxelSessionOpen
+        if selfBracketed { beginVoxelEdits() }
+        defer { if selfBracketed { endVoxelEdits() } }
+
+        var brush = voxelBrush(size: brushSize)
+        brush.falloff = Int32(CLAY_BRUSH_FALLOFF_SMOOTH.rawValue)
+        let at: [Int32] = [cell.x, cell.y, cell.z]
+        let n: [Float] = [normal.x, normal.y, normal.z]
+        let d: [Float] = [displacement.x, displacement.y, displacement.z]
+        let ok: Bool
+        switch verb {
+        case .place:
+            ok = true // unreachable; handled above
+        case .smooth:
+            ok = clay_voxel_sculpt_smooth(voxelGrid, at, &brush) == CLAY_OK
+        case .inflate:
+            ok = clay_voxel_sculpt_inflate(voxelGrid, at, &brush, 1) == CLAY_OK
+        case .deflate:
+            ok = clay_voxel_sculpt_inflate(voxelGrid, at, &brush, -1) == CLAY_OK
+        case .flatten:
+            ok = clay_voxel_sculpt_flatten(voxelGrid, at, &brush, n, 0) == CLAY_OK
+        case .scrape:
+            ok = clay_voxel_sculpt_scrape(voxelGrid, at, &brush, n, 0) == CLAY_OK
+        case .pinch:
+            ok = clay_voxel_sculpt_pinch(voxelGrid, at, &brush) == CLAY_OK
+        case .grab:
+            ok = clay_voxel_sculpt_grab(voxelGrid, at, &brush, d, 1) == CLAY_OK
+        case .smudge:
+            ok = clay_voxel_sculpt_smudge(voxelGrid, at, &brush, d) == CLAY_OK
+        case .fill:
+            ok = clay_voxel_sculpt_fill_cavities(voxelGrid, at, &brush, 2) == CLAY_OK
+        }
+        rebuildVoxelMesh()
+        commit()
+        scheduleAutosave()
+        return ok
+    }
+
     private func voxelBrush(size: Int32) -> clay_brush_params {
         var brush = clay_brush_params()
         brush.struct_size = UInt32(MemoryLayout<clay_brush_params>.size)
@@ -1630,8 +1837,14 @@ final class ClayEngine {
 
     /// Ray → first occupied cell, its entry face's neighbor (where a placed
     /// voxel goes), or the build-plane cell when the ray hits nothing.
-    func voxelPick(origin: SIMD3<Float>, direction: SIMD3<Float>,
-                   buildPlane: Int32) -> (hit: SIMD3<Int32>, adjacent: SIMD3<Int32>)? {
+    /// clay_voxel_face → outward normal.
+    static let faceNormals: [SIMD3<Float>] = [
+        SIMD3(1, 0, 0), SIMD3(-1, 0, 0), SIMD3(0, 1, 0),
+        SIMD3(0, -1, 0), SIMD3(0, 0, 1), SIMD3(0, 0, -1)
+    ]
+
+    func voxelPick(origin: SIMD3<Float>, direction: SIMD3<Float>, buildPlane: Int32)
+        -> (hit: SIMD3<Int32>, adjacent: SIMD3<Int32>, normal: SIMD3<Float>)? {
         guard ensureVoxelLayer(), let voxelGrid else { return nil }
         var hit: Int32 = 0
         var cell = [Int32](repeating: 0, count: 3)
@@ -1642,13 +1855,14 @@ final class ClayEngine {
         let d: [Float] = [direction.x, direction.y, direction.z]
         if clay_voxel_raycast(voxelGrid, o, d, &hit, &cell, &face, &adjacent, &t) == CLAY_OK,
            hit == 1 {
+            let normal = Self.faceNormals[(0..<6).contains(Int(face)) ? Int(face) : 2]
             return (SIMD3(cell[0], cell[1], cell[2]),
-                    SIMD3(adjacent[0], adjacent[1], adjacent[2]))
+                    SIMD3(adjacent[0], adjacent[1], adjacent[2]), normal)
         }
         if clay_voxel_build_plane_pick(voxelGrid, o, d, buildPlane, &hit, &cell) == CLAY_OK,
            hit == 1 {
             let c = SIMD3(cell[0], cell[1], cell[2])
-            return (c, c)
+            return (c, c, SIMD3(0, 1, 0))
         }
         return nil
     }

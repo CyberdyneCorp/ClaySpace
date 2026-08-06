@@ -6,6 +6,7 @@ import Foundation
 enum Tool: String, CaseIterable, Identifiable {
     case sculpt
     case shape
+    case spray
     case erase
     case paint
     case select
@@ -19,6 +20,7 @@ enum Tool: String, CaseIterable, Identifiable {
         switch self {
         case .sculpt: "shippingbox"
         case .shape: "cube"
+        case .spray: "wand.and.rays"
         case .erase: "eraser"
         case .paint: "paintbrush.pointed"
         case .select: "square.dashed"

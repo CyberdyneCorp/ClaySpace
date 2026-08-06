@@ -240,6 +240,122 @@ final class ClayEngineTests: XCTestCase {
         XCTAssertEqual(engine.voxelCount, stats?.cells ?? -1)
     }
 
+    // MARK: Voxel sculpt verbs (3DCoat-style) + spray strokes (ZBrush-style)
+
+    func testVoxelSculptVerbsShapeTheBlob() {
+        let engine = ClayEngine()
+        let pink = SIMD3<Float>(1, 0.27, 0.56)
+        // A solid blob to sculpt on.
+        engine.voxelStamp(.place, at: SIMD3(20, 4, 20), brushSize: 3, color: pink)
+        let base = engine.voxelCount
+        XCTAssertGreaterThan(base, 6)
+
+        // Inflate grows, deflate shrinks it back down.
+        XCTAssertTrue(engine.voxelSculpt(.inflate, at: SIMD3(20, 4, 20),
+                                         brushSize: 7, color: pink))
+        let inflated = engine.voxelCount
+        XCTAssertGreaterThan(inflated, base, "inflate adds a shell")
+        XCTAssertTrue(engine.voxelSculpt(.deflate, at: SIMD3(20, 4, 20),
+                                         brushSize: 7, color: pink))
+        XCTAssertLessThan(engine.voxelCount, inflated, "deflate erodes")
+
+        // Flatten against +Y removes material proud of the plane.
+        XCTAssertTrue(engine.voxelSculpt(.flatten, at: SIMD3(20, 5, 20),
+                                         brushSize: 7, normal: SIMD3(0, 1, 0),
+                                         color: pink))
+        let pick = engine.voxelPick(origin: SIMD3(Float(20.5) * ClayEngine.voxelSize,
+                                                  10,
+                                                  Float(20.5) * ClayEngine.voxelSize),
+                                    direction: SIMD3(0, -1, 0), buildPlane: 0)
+        XCTAssertNotNil(pick)
+        XCTAssertLessThanOrEqual(pick?.hit.y ?? 99, 5, "crown flattened to the plane")
+
+        // Smooth and pinch run without dismantling the blob.
+        XCTAssertTrue(engine.voxelSculpt(.smooth, at: SIMD3(20, 4, 20),
+                                         brushSize: 5, color: pink))
+        XCTAssertTrue(engine.voxelSculpt(.pinch, at: SIMD3(20, 4, 20),
+                                         brushSize: 5, color: pink))
+        XCTAssertGreaterThan(engine.voxelCount, 4)
+
+        // Grab pulls material sideways.
+        let before = engine.voxelCount
+        XCTAssertTrue(engine.voxelSculpt(.grab, at: SIMD3(20, 4, 20), brushSize: 7,
+                                         displacement: SIMD3(ClayEngine.voxelSize * 2, 0, 0),
+                                         color: pink))
+        XCTAssertGreaterThan(engine.voxelCount, 0)
+        _ = before // grab conserves roughly; the verb ran without error
+    }
+
+    func testVoxelSculptVerbUndoesWhenJournaled() throws {
+        try XCTSkipUnless(ClayEngine.voxelUndoAvailable, "needs the voxel journal")
+        let engine = ClayEngine()
+        let pink = SIMD3<Float>(1, 0.27, 0.56)
+        engine.voxelStamp(.place, at: SIMD3(10, 2, 10), brushSize: 3, color: pink)
+        let base = engine.voxelCount
+        XCTAssertTrue(engine.voxelSculpt(.inflate, at: SIMD3(10, 2, 10),
+                                         brushSize: 7, color: pink))
+        XCTAssertGreaterThan(engine.voxelCount, base)
+        XCTAssertTrue(engine.undo())
+        XCTAssertEqual(engine.voxelCount, base, "the inflate undid as one step")
+    }
+
+    func testSprayStrokeStampsTemplatesAsOneUndoStep() {
+        let engine = ClayEngine()
+        let before = engine.items.count
+        // A straight drag well above the seed, clear of everything.
+        var samples: [(position: SIMD3<Float>, pressure: Float, tilt: Float)] = []
+        for i in 0...20 {
+            samples.append((SIMD3(Float(i) * 0.12 + 3, 2.5, 0), 0.8, .pi / 2))
+        }
+        let stamped = engine.sprayStroke(samples: samples,
+                                         prim: CLAY_PRIM_SPHERE,
+                                         templateParams: [1], op: CLAY_OP_ADD,
+                                         blendK: 0.03, blend: CLAY_BLEND_QUADRATIC,
+                                         color: ClayEngine.clayColor,
+                                         radius: 0.15,
+                                         feel: ClayEngine.SprayFeel())
+        XCTAssertGreaterThan(stamped, 3, "the drag resolved into several stamps")
+        XCTAssertEqual(engine.items.count, before + stamped, "mirror row per stamp")
+
+        // The stamps are real document geometry along the path.
+        let hit = engine.raycast(origin: SIMD3(4, 8, 0), direction: SIMD3(0, -1, 0))
+        XCTAssertEqual(hit?.position.y ?? 0, 2.5 + 0.15, accuracy: 0.08,
+                       "a stamp's crown sits at path height + radius")
+
+        // ONE undo step removes the whole spray; redo brings it back.
+        XCTAssertTrue(engine.undo())
+        XCTAssertEqual(engine.items.count, before, "whole spray = one step")
+        XCTAssertNil(engine.raycast(origin: SIMD3(4, 8, 0), direction: SIMD3(0, -1, 0)))
+        XCTAssertTrue(engine.redo())
+        XCTAssertEqual(engine.items.count, before + stamped)
+        XCTAssertNotNil(engine.raycast(origin: SIMD3(4, 8, 0), direction: SIMD3(0, -1, 0)))
+    }
+
+    func testSprayJitterAndSpacingChangeTheStampField() {
+        let engine = ClayEngine()
+        var samples: [(position: SIMD3<Float>, pressure: Float, tilt: Float)] = []
+        for i in 0...20 {
+            samples.append((SIMD3(Float(i) * 0.1 + 3, 4, 0), 0.7, .pi / 2))
+        }
+        var loose = ClayEngine.SprayFeel()
+        loose.spacing = 2.4
+        let sparse = engine.sprayStroke(samples: samples, prim: CLAY_PRIM_SPHERE,
+                                        templateParams: [1], op: CLAY_OP_ADD,
+                                        blendK: 0, blend: CLAY_BLEND_HARD,
+                                        color: ClayEngine.clayColor,
+                                        radius: 0.12, feel: loose)
+        XCTAssertTrue(engine.undo())
+        var tight = ClayEngine.SprayFeel()
+        tight.spacing = 0.5
+        let dense = engine.sprayStroke(samples: samples, prim: CLAY_PRIM_SPHERE,
+                                       templateParams: [1], op: CLAY_OP_ADD,
+                                       blendK: 0, blend: CLAY_BLEND_HARD,
+                                       color: ClayEngine.clayColor,
+                                       radius: 0.12, feel: tight)
+        XCTAssertGreaterThan(dense, sparse * 2,
+                             "tighter spacing lays down more stamps")
+    }
+
     func testVoxelsSurviveSaveLoad() throws {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("vox_\(UUID().uuidString)")

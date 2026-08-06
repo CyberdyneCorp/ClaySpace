@@ -46,7 +46,8 @@ struct ContentView: View {
                 VStack {
                     Spacer()
                     VStack(spacing: 8) {
-                        if state.mode == .sdf && state.activeTool == .shape {
+                        if state.mode == .sdf
+                            && (state.activeTool == .shape || state.activeTool == .spray) {
                             ShapeBar(state: state)
                         }
                         PaletteBar(state: state)

@@ -69,11 +69,34 @@ struct ShapeBar: View {
                 .accessibilityIdentifier("blendProfile")
             }
 
-            if state.shapeBlendProfile != .hard || state.shapeOp == .paint {
+            // Spray swaps the blend slider for the stroke-feel sliders —
+            // both at once overflow portrait width (rail-offscreen class).
+            if state.activeTool != .spray,
+               state.shapeBlendProfile != .hard || state.shapeOp == .paint {
                 Slider(value: $state.shapeBlendK, in: 0.0...0.15)
                     .frame(width: 90)
                     .tint(.orange)
                     .accessibilityLabel("Blend radius")
+            }
+
+            if state.activeTool == .spray {
+                Divider().frame(height: 18)
+                // Stroke feel (clay_stroke_preset): spacing, jitter, steady.
+                Image(systemName: "ruler")
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+                Slider(value: $state.sprayFeel.spacing, in: 0.5...2.5)
+                    .frame(width: 56).tint(.orange)
+                    .accessibilityLabel("Stamp spacing")
+                Image(systemName: "dice")
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+                Slider(value: $state.sprayFeel.jitter, in: 0...1)
+                    .frame(width: 56).tint(.orange)
+                    .accessibilityLabel("Jitter")
+                Image(systemName: "scribble.variable")
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+                Slider(value: $state.sprayFeel.steady, in: 0...0.9)
+                    .frame(width: 56).tint(.orange)
+                    .accessibilityLabel("Steady stroke")
             }
         }
         .padding(.horizontal, 12)
