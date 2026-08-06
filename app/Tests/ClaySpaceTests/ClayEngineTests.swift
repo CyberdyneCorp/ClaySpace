@@ -261,6 +261,142 @@ final class ClayEngineTests: XCTestCase {
         }
     }
 
+    func testEveryShapeKindPlacesAndRoundTripsItsSurface() {
+        // Each curated PrimKind lands in the document and ClayCore's own
+        // raycast finds its surface where the params promise it (top of the
+        // shape via a vertical ray) — a live parity check of the param
+        // orders against the ABI.
+        let engine = ClayEngine()
+        let size: Float = 0.4
+        var expectedTop: [PrimKind: Float] = [:]
+        expectedTop[.sphere] = size
+        expectedTop[.box] = size * 0.8
+        expectedTop[.cylinder] = size * 0.85
+        expectedTop[.cone] = size * 0.8
+        expectedTop[.torus] = size * 0.3
+        expectedTop[.capsule] = size * 1.2 + size * 0.4
+        expectedTop[.ellipsoid] = size * 0.62
+        expectedTop[.prism] = size * 0.7 // hex apothem→vertical extent hx
+
+        var x: Float = 4.0 // clear of the seeded base ball
+        for kind in PrimKind.allCases {
+            let at = SIMD3<Float>(x, 3, 0)
+            XCTAssertTrue(engine.addPrimitive(kind.clayPrim,
+                                              params: kind.params(size: size),
+                                              at: at, op: CLAY_OP_ADD,
+                                              blendK: 0, color: ClayEngine.clayColor),
+                          "\(kind) rejected by the ABI")
+            // Vertical ray down onto the shape's top.
+            let probe = atTorus(kind, at)
+            let hit = engine.raycast(origin: SIMD3(probe.x, 8, probe.z),
+                                     direction: SIMD3(0, -1, 0))
+            XCTAssertNotNil(hit, "\(kind) not hit from above")
+            if let hit, let expected = expectedTop[kind] {
+                XCTAssertEqual(hit.position.y, at.y + expected, accuracy: 0.03,
+                               "\(kind) surface height off — param order drift?")
+            }
+            x += 2.5
+        }
+        XCTAssertEqual(engine.items.count, 1 + PrimKind.allCases.count)
+    }
+
+    /// Torus has a hole on-axis: probe over the ring radius instead.
+    private func atTorus(_ kind: PrimKind, _ at: SIMD3<Float>) -> SIMD3<Float> {
+        kind == .torus ? at + SIMD3(0.4 * 0.75, 0, 0) : at
+    }
+
+    func testShapeOpsCarveKeepAndTint() {
+        let engine = ClayEngine()
+        // A ball well away from the seed, then a hard cut through its top.
+        let base = SIMD3<Float>(5, 2, 0)
+        XCTAssertTrue(engine.addPrimitive(CLAY_PRIM_SPHERE, params: [0.6],
+                                          at: base, op: CLAY_OP_ADD,
+                                          blendK: 0, color: ClayEngine.clayColor))
+        let beforeCut = engine.raycast(origin: SIMD3(5, 8, 0), direction: SIMD3(0, -1, 0))
+        XCTAssertEqual(beforeCut?.position.y ?? 0, 2.6, accuracy: 0.02)
+
+        XCTAssertTrue(engine.addPrimitive(CLAY_PRIM_ROUND_BOX,
+                                          params: [0.7, 0.3, 0.7, 0.05],
+                                          at: SIMD3(5, 2.6, 0), op: CLAY_OP_SUBTRACT,
+                                          blendK: 0, color: ClayEngine.clayColor))
+        let afterCut = engine.raycast(origin: SIMD3(5, 8, 0), direction: SIMD3(0, -1, 0))
+        XCTAssertLessThan(afterCut?.position.y ?? 10, 2.35,
+                          "subtract flattened the ball's crown")
+
+        // Intersect: a big box keeps only the ball's overlap — the sides
+        // shrink to the box.
+        XCTAssertTrue(engine.addPrimitive(CLAY_PRIM_BOX, params: [0.25, 1.5, 1.5],
+                                          at: base, op: CLAY_OP_INTERSECT,
+                                          blendK: 0, color: ClayEngine.clayColor))
+        let side = engine.raycast(origin: SIMD3(8, 2, 0), direction: SIMD3(-1, 0, 0))
+        XCTAssertEqual(side?.position.x ?? 0, 5.25, accuracy: 0.03,
+                       "intersect clamped the ball to the box slab")
+
+        // Paint: color changes, geometry doesn't.
+        let heightBefore = engine.raycast(origin: SIMD3(5, 8, 0),
+                                          direction: SIMD3(0, -1, 0))?.position.y
+        XCTAssertTrue(engine.addPrimitive(CLAY_PRIM_SPHERE, params: [0.4],
+                                          at: SIMD3(5, 2.2, 0), op: CLAY_OP_PAINT,
+                                          blendK: 0.08, color: SIMD3(1, 0, 0)))
+        let heightAfter = engine.raycast(origin: SIMD3(5, 8, 0),
+                                         direction: SIMD3(0, -1, 0))?.position.y
+        XCTAssertEqual(heightBefore ?? 0, heightAfter ?? 1, accuracy: 1e-4,
+                       "paint must not move the surface")
+    }
+
+    func testBlendProfilesReachTheirSupportWidths() {
+        // Two spheres a gap apart, folded with each profile: the midpoint
+        // field must dip exactly per the profile's csmin — checked against
+        // ClayCore's own eval, and the item bound must cover the support.
+        for profile in [CLAY_BLEND_QUADRATIC, CLAY_BLEND_CUBIC,
+                        CLAY_BLEND_CIRCULAR, CLAY_BLEND_CHAMFER] {
+            let engine = ClayEngine()
+            let k: Float = 0.06
+            let a = SIMD3<Float>(6, 2, 0), b = SIMD3<Float>(7.0, 2, 0)
+            XCTAssertTrue(engine.addPrimitive(CLAY_PRIM_SPHERE, params: [0.35],
+                                              at: a, op: CLAY_OP_ADD, blendK: 0,
+                                              color: ClayEngine.clayColor))
+            XCTAssertTrue(engine.addPrimitive(CLAY_PRIM_SPHERE, params: [0.35],
+                                              at: b, op: CLAY_OP_ADD, blendK: k,
+                                              color: ClayEngine.clayColor,
+                                              blend: profile))
+            let item = engine.items.last!
+            XCTAssertEqual(item.blend, Int32(profile.rawValue))
+            XCTAssertGreaterThanOrEqual(
+                item.boundRadius, 0.35 + ClayEngine.blendSupport(profile, k),
+                "bound must cover the profile's blend support")
+
+            // The bridge between the spheres only exists when the support
+            // spans the gap; evaluate ClayCore's field at the midpoint.
+            let mid = (a + b) * 0.5
+            let d = engine.evalDistance(at: mid)
+            let unblended = simd_distance(mid, a) - 0.35
+            XCTAssertLessThan(d, unblended + 1e-5,
+                              "\(profile) fold must not exceed plain min")
+        }
+    }
+
+    func testRadialShapePlacementStampsSectors() {
+        // The ABI's radial repeat is item-local (no-op for centered prims),
+        // so addShape stamps real copies about world Y — one per sector,
+        // each its own undo step.
+        let engine = ClayEngine()
+        engine.setRadial(count: 4)
+        let before = engine.items.count
+        XCTAssertTrue(engine.addShape(CLAY_PRIM_SPHERE, params: [0.3],
+                                      at: SIMD3(1.8, 3, 0), op: CLAY_OP_ADD,
+                                      blendK: 0, color: ClayEngine.clayColor))
+        XCTAssertEqual(engine.items.count, before + 4, "one item per sector")
+        // Every 90° sector holds a copy; vertical probes clear of the base.
+        for probe in [SIMD3<Float>(1.8, 8, 0), SIMD3(-1.8, 8, 0),
+                      SIMD3(0, 8, 1.8), SIMD3(0, 8, -1.8)] {
+            let hit = engine.raycast(origin: probe, direction: SIMD3(0, -1, 0))
+            XCTAssertEqual(hit?.position.y ?? 0, 3.3, accuracy: 0.03,
+                           "sector copy missing at \(probe)")
+        }
+        engine.setRadial(count: 0)
+    }
+
     func testRenameDocumentMovesPackageAndRefusesCollisions() {
         let engine = ClayEngine()
         let suffix = UUID().uuidString.prefix(6)

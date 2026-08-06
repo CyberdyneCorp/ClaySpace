@@ -87,6 +87,58 @@ static float sdTorus(float3 p, float2 t) {
     return length(q) - t.y;
 }
 
+// The primitives below are ClayCore kernel/prim3d.h mirrored EXACTLY
+// (kernel-parity rule, design Risks / ClayCore#3): any drift makes the
+// bake appear to change the sculpt.
+
+static float sdCappedCylinder(float3 p, float r, float h) {
+    float2 d = abs(float2(length(p.xz), p.y)) - float2(r, h);
+    return min(max(d.x, d.y), 0.0) + length(max(d, 0.0));
+}
+
+static float sdCappedCone(float3 p, float h, float r1, float r2) {
+    float2 q = float2(length(p.xz), p.y);
+    float2 k1 = float2(r2, h);
+    float2 k2 = float2(r2 - r1, 2.0 * h);
+    float2 ca = float2(q.x - min(q.x, (q.y < 0.0) ? r1 : r2), abs(q.y) - h);
+    float2 cb = q - k1 + k2 * clamp(dot(k1 - q, k2) / dot(k2, k2), 0.0, 1.0);
+    float s = (cb.x < 0.0 && ca.y < 0.0) ? -1.0 : 1.0;
+    return s * sqrt(min(dot(ca, ca), dot(cb, cb)));
+}
+
+// Sphere-swept cone along Y (sd_round_cone): base radius r1 at the origin,
+// top r2 at height h — the vertical prim, distinct from the stroke segment.
+static float sdRoundConeV(float3 p, float r1, float r2, float h) {
+    float b = (r1 - r2) / h;
+    float a = sqrt(1.0 - b * b);
+    float2 q = float2(length(p.xz), p.y);
+    float k = dot(q, float2(-b, a));
+    if (k < 0.0) return length(q) - r1;
+    if (k > a * h) return length(q - float2(0.0, h)) - r2;
+    return dot(q, float2(a, b)) - r1;
+}
+
+static float sdHexPrism(float3 p, float2 h) {
+    const float3 k = float3(-0.8660254, 0.5, 0.57735);
+    float3 q = abs(p);
+    float2 xy = q.xy;
+    xy = xy - 2.0 * min(dot(k.xy, xy), 0.0) * k.xy;
+    float2 d = float2(
+        length(xy - float2(clamp(xy.x, -k.z * h.x, k.z * h.x), h.x)) * sign(xy.y - h.x),
+        q.z - h.y);
+    return min(max(d.x, d.y), 0.0) + length(max(d, 0.0));
+}
+
+static float sdEllipsoidBound(float3 p, float3 r) {
+    float rmin = min(r.x, min(r.y, r.z));
+    float k0 = length(p / r);
+    if (k0 < 1e-6) return -rmin;
+    float k1 = length(p / (r * r));
+    float grad_est = k0 * (k0 - 1.0) / k1;
+    if (k0 < 1.0) return max(grad_est, (k0 - 1.0) * rmin);
+    return grad_est;
+}
+
 // Rotate by the inverse of quaternion q (x y z w).
 static float3 quatRotateInv(float4 q, float3 v) {
     float3 u = -q.xyz; // conjugate
@@ -98,6 +150,11 @@ constant int PRIM_SPHERE = 0;
 constant int PRIM_BOX = 1;
 constant int PRIM_ROUND_BOX = 2;
 constant int PRIM_TORUS = 4;
+constant int PRIM_CAPPED_CYLINDER = 6;
+constant int PRIM_CAPPED_CONE = 8;
+constant int PRIM_ROUND_CONE = 9;
+constant int PRIM_ELLIPSOID = 10;
+constant int PRIM_HEX_PRISM = 12;
 constant int PRIM_STROKE = 14;
 
 constant int OP_ADD = 0;
@@ -105,14 +162,86 @@ constant int OP_SUBTRACT = 1;
 constant int OP_INTERSECT = 2;
 constant int OP_PAINT = 3;
 
-// ClayCore's quadratic smin, mirrored EXACTLY (kernel/ops.h
-// csmin_quadratic): support is 4k, depth h²·k. The preview must match the
-// document's field or bakes appear to change the sculpt.
+constant int BLEND_QUADRATIC = 1;
+constant int BLEND_CUBIC = 2;
+constant int BLEND_CIRCULAR = 3;
+constant int BLEND_CHAMFER = 4;
+
+// ClayCore's blend profiles, mirrored EXACTLY (kernel/ops.h csmin_* and
+// their support widths). The preview must match the document's field or
+// bakes appear to change the sculpt.
+static float blendSupport(int blend, float k) {
+    switch (blend) {
+        case BLEND_QUADRATIC: return 4.0 * k;
+        case BLEND_CUBIC: return 6.0 * k;
+        case BLEND_CIRCULAR: return k / (1.0 - 0.70710678);
+        case BLEND_CHAMFER: return k;
+        default: return 0.0;
+    }
+}
+
 static float csminQ(float a, float b, float k) {
     float s = 4.0 * k;
     if (s <= 0.0) return min(a, b);
     float h = max(s - abs(a - b), 0.0) / s;
     return min(a, b) - h * h * s * 0.25;
+}
+
+static float csminC(float a, float b, float k) {
+    float s = 6.0 * k;
+    if (s <= 0.0) return min(a, b);
+    float h = max(s - abs(a - b), 0.0) / s;
+    return min(a, b) - h * h * h * s * (1.0 / 6.0);
+}
+
+static float csminCirc(float a, float b, float k) {
+    float s = k / (1.0 - 0.70710678);
+    if (s <= 0.0) return min(a, b);
+    float h = max(s - abs(a - b), 0.0) / s;
+    return min(a, b) - s * 0.5 * (1.0 + h - sqrt(1.0 - h * (h - 2.0)));
+}
+
+static float cchamfer(float a, float b, float k) {
+    return min(min(a, b), (a + b - k) * 0.70710678);
+}
+
+// Profile dispatch for the item fold (strokes' chains and the mirror seam
+// stay quadratic — that is what ClayCore emits for them).
+static float csminP(float a, float b, float k, int blend) {
+    switch (blend) {
+        case BLEND_QUADRATIC: return csminQ(a, b, k);
+        case BLEND_CUBIC: return csminC(a, b, k);
+        case BLEND_CIRCULAR: return csminCirc(a, b, k);
+        case BLEND_CHAMFER: return cchamfer(a, b, k);
+        default: return min(a, b);
+    }
+}
+
+// csmin_*_m mirrored exactly: x = folded distance, y = mix toward b.
+static float2 csminPM(float a, float b, float k, int blend) {
+    if (blend == 0 || k <= 0.0) return (b < a) ? float2(b, 1.0) : float2(a, 0.0);
+    float s = max(blendSupport(blend, k), 1e-20);
+    float h = 1.0 - min(abs(a - b) / s, 1.0);
+    switch (blend) {
+        case BLEND_CUBIC: {
+            float w = h * h * h;
+            float off = w * s * (1.0 / 6.0);
+            return (a < b) ? float2(a - off, w * 0.5) : float2(b - off, 1.0 - w * 0.5);
+        }
+        case BLEND_CIRCULAR: {
+            float d = min(a, b) - s * 0.5 * (1.0 + h - sqrt(1.0 - h * (h - 2.0)));
+            return (a < b) ? float2(d, h * 0.5) : float2(d, 1.0 - h * 0.5);
+        }
+        case BLEND_CHAMFER: {
+            float d = cchamfer(a, b, k);
+            return (a < b) ? float2(d, h * 0.5) : float2(d, 1.0 - h * 0.5);
+        }
+        default: {
+            float w = h * h;
+            float off = w * s * 0.25;
+            return (a < b) ? float2(a - off, w * 0.5) : float2(b - off, 1.0 - w * 0.5);
+        }
+    }
 }
 
 // Sphere-swept cone between two points with per-end radii (docs/01 §1.1,
@@ -188,6 +317,11 @@ static float sdItemSingle(float3 p, constant SceneItem &it, constant float4 *pts
         case PRIM_BOX: d = sdBox(q, it.params.xyz); break;
         case PRIM_ROUND_BOX: d = sdRoundBox(q, it.params.xyz, it.params.w); break;
         case PRIM_TORUS: d = sdTorus(q, it.params.xy); break;
+        case PRIM_CAPPED_CYLINDER: d = sdCappedCylinder(q, it.params.x, it.params.y); break;
+        case PRIM_CAPPED_CONE: d = sdCappedCone(q, it.params.x, it.params.y, it.params.z); break;
+        case PRIM_ROUND_CONE: d = sdRoundConeV(q, it.params.x, it.params.y, it.params.z); break;
+        case PRIM_ELLIPSOID: d = sdEllipsoidBound(q, it.params.xyz); break;
+        case PRIM_HEX_PRISM: d = sdHexPrism(q, it.params.xy); break;
         case PRIM_SPHERE:
         default: d = length(q) - it.params.x; break;
     }
@@ -286,11 +420,11 @@ static float mapDist(float3 p, FieldCtx ctx) {
         float di = sdItemMirrored(p, it, ctx);
         float k = (it.blend != 0) ? it.blendK : 0.0;
         if (it.op == OP_ADD) {
-            d = csminQ(d, di, k);
+            d = csminP(d, di, k, it.blend);
         } else if (it.op == OP_SUBTRACT) {
-            d = -csminQ(-d, di, k); // op_ssubtract: item carved from accum
+            d = -csminP(-d, di, k, it.blend); // op_ssubtract: item carved from accum
         } else if (it.op == OP_INTERSECT) {
-            d = -csminQ(-d, -di, k);
+            d = -csminP(-d, -di, k, it.blend);
         }
     }
     return d;
@@ -317,21 +451,17 @@ static float4 mapShade(float3 p, FieldCtx ctx) {
         float di = sdItemMirrored(p, it, ctx);
         float k = (it.blend != 0) ? it.blendK : 0.0;
         if (it.op == OP_ADD) {
-            // csmin_quadratic_m: h² drives the material mix.
-            float sup = max(4.0 * k, 1e-9);
-            float hh = 1.0 - min(abs(d - di) / sup, 1.0);
-            float w = hh * hh;
-            float m = (di < d) ? 1.0 - w * 0.5 : w * 0.5;
-            if (k <= 0.0) m = (di < d) ? 1.0 : 0.0;
-            col = mix(col, it.color, m);
-            d = csminQ(d, di, k);
+            // csmin_*_m: the profile's h-power drives the material mix.
+            float2 dm = csminPM(d, di, k, it.blend);
+            col = mix(col, it.color, dm.y);
+            d = dm.x;
         } else if (it.op == OP_SUBTRACT) {
-            d = -csminQ(-d, di, k);
+            d = -csminP(-d, di, k, it.blend);
         } else if (it.op == OP_INTERSECT) {
-            d = -csminQ(-d, -di, k);
+            d = -csminP(-d, -di, k, it.blend);
         } else if (it.op == OP_PAINT) {
             // ccombine_paint: color-only, field untouched.
-            float support = max(4.0 * k, k);
+            float support = max(blendSupport(it.blend, k), k);
             float w = 1.0 - clamp(di / max(support, 1e-6), 0.0, 1.0);
             col = mix(col, it.color, w);
         }

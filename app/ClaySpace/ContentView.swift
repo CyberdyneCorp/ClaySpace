@@ -43,6 +43,9 @@ struct ContentView: View {
                 VStack {
                     Spacer()
                     VStack(spacing: 8) {
+                        if state.mode == .sdf && state.activeTool == .shape {
+                            ShapeBar(state: state)
+                        }
                         PaletteBar(state: state)
                         if state.mode == .voxel {
                             VoxelBar(state: state)

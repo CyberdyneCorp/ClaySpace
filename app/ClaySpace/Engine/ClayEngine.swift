@@ -156,13 +156,37 @@ final class ClayEngine {
 
     /// Geometric bounding radius (before blend margin) per primitive kind.
     private static func geometricRadius(prim: clay_prim, params: [Float]) -> Float {
-        if prim == CLAY_PRIM_SPHERE { return params.first ?? 1 }
-        if prim == CLAY_PRIM_BOX || prim == CLAY_PRIM_ROUND_BOX {
+        switch prim {
+        case CLAY_PRIM_SPHERE: return params.first ?? 1
+        case CLAY_PRIM_BOX, CLAY_PRIM_ROUND_BOX:
             return simd_length(SIMD3(params[0], params[1], params[2]))
+        case CLAY_PRIM_TORUS: return params[0] + params[1]
+        case CLAY_PRIM_CAPPED_CYLINDER:
+            return simd_length(SIMD2(params[0], params[1]))
+        case CLAY_PRIM_CAPPED_CONE: // params h r1 r2, spans ±h
+            return simd_length(SIMD2(max(params[1], params[2]), params[0]))
+        case CLAY_PRIM_ROUND_CONE: // params r1 r2 h, spans 0…h + end radii
+            return params[2] + params[0] + params[1]
+        case CLAY_PRIM_ELLIPSOID:
+            return max(params[0], max(params[1], params[2]))
+        case CLAY_PRIM_HEX_PRISM: // hex circumradius 2/√3·hx, half-depth hy
+            return simd_length(SIMD2(params[0] * 1.1547005, params[1]))
+        default:
+            // Conservative fallback for anything else the UI may place later.
+            return ((params.map { abs($0) }.max()) ?? 1) * 2 + 0.5
         }
-        if prim == CLAY_PRIM_TORUS { return params[0] + params[1] }
-        // Conservative fallback for anything else the UI may place later.
-        return ((params.map { abs($0) }.max()) ?? 1) * 2 + 0.5
+    }
+
+    /// Blend influence reach per profile — ClayCore ops.h support widths
+    /// (csmin_*_support), mirrored exactly for bound padding.
+    static func blendSupport(_ blend: clay_blend, _ k: Float) -> Float {
+        switch blend {
+        case CLAY_BLEND_QUADRATIC: return 4 * k
+        case CLAY_BLEND_CUBIC: return 6 * k
+        case CLAY_BLEND_CIRCULAR: return k / (1 - 0.70710678)
+        case CLAY_BLEND_CHAMFER: return k
+        default: return 0
+        }
     }
 
     private func strokeBound(chainK: Float, blendK: Float) -> (SIMD3<Float>, Float) {
@@ -265,58 +289,88 @@ final class ClayEngine {
     // MARK: Edits
 
     /// Adds one primitive through the ABI and mirrors it for rendering.
+    /// NOTE: the ABI's radial repeat is item-LOCAL (about the item's own
+    /// axis) — a no-op for centered prims — so placed shapes do not use it;
+    /// see addShape for world-axis radial stamping.
     @discardableResult
     func addPrimitive(_ prim: clay_prim, params: [Float],
                       at position: SIMD3<Float>, op: clay_op,
                       blendK: Float, color: SIMD3<Float>,
+                      blend: clay_blend = CLAY_BLEND_QUADRATIC,
+                      yaw: Float = 0,
                       recordMirror: Bool = true) -> Bool {
         guard let doc else { return false }
+        let effectiveBlend = blendK > 0 ? blend : CLAY_BLEND_HARD
 
-        var desc = clay_item_desc()
-        desc.struct_size = UInt32(MemoryLayout<clay_item_desc>.size)
-        desc.prim = Int32(prim.rawValue)
-        withUnsafeMutableBytes(of: &desc.params) { raw in
-            let dst = raw.bindMemory(to: Float.self)
-            for (i, v) in params.prefix(7).enumerated() { dst[i] = v }
+        guard let item = clay_item_create(Int32(prim.rawValue), params, params.count) else {
+            lastError = String(cString: clay_last_error())
+            return false
         }
-        desc.position = (position.x, position.y, position.z)
-        desc.rotation = (0, 0, 0, 1)
-        desc.scale = 1
-        desc.op = Int32(op.rawValue)
-        desc.blend = Int32((blendK > 0 ? CLAY_BLEND_QUADRATIC : CLAY_BLEND_HARD).rawValue)
-        desc.blend_k = blendK
-        desc.rounding = 0
-        desc.color = (color.x, color.y, color.z)
-        desc.mirror = mirrorAxes != 0 ? 1 : 0
+        clay_item_set_position(item, [position.x, position.y, position.z])
+        if yaw != 0 { clay_item_set_rotation(item, [0, 1, 0], yaw) }
+        clay_item_set_op(item, Int32(op.rawValue))
+        clay_item_set_blend(item, Int32(effectiveBlend.rawValue), blendK)
+        clay_item_set_color(item, [color.x, color.y, color.z])
+        clay_item_set_mirror(item, mirrorAxes != 0 ? 1 : 0)
 
         var node: clay_node_id = 0
-        guard check(clay_add_item(doc, layer, &desc, &node)) else { return false }
+        let added = check(clay_layer_add_item(doc, layer, item, &node))
+        clay_item_destroy(item)
+        guard added else { return false }
 
         if recordMirror {
             var p = SIMD4<Float>(repeating: 0)
             for (i, v) in params.prefix(4).enumerated() { p[i] = v }
-            let bound = Self.geometricRadius(prim: prim, params: params) + blendK * 4 + 0.02
+            let spin = simd_quatf(angle: yaw, axis: SIMD3(0, 1, 0))
+            let radius = Self.geometricRadius(prim: prim, params: params)
+                + Self.blendSupport(effectiveBlend, blendK) + 0.02
             items.append(SceneItem(
                 position: position, scale: 1,
-                rotation: SIMD4(0, 0, 0, 1),
+                rotation: SIMD4(spin.imag.x, spin.imag.y, spin.imag.z, spin.real),
                 params: p,
                 color: color, blendK: blendK,
                 prim: Int32(prim.rawValue), op: Int32(op.rawValue),
-                blend: desc.blend, rounding: 0,
-                boundCenter: position, boundRadius: bound,
-                mirrorFlag: desc.mirror,
+                blend: Int32(effectiveBlend.rawValue), rounding: 0,
+                boundCenter: position, boundRadius: radius,
+                mirrorFlag: mirrorAxes != 0 ? 1 : 0,
                 radialCount: 0
             ))
-            itemAABBs.append((position - SIMD3(repeating: bound),
-                              position + SIMD3(repeating: bound)))
+            itemAABBs.append((position - SIMD3(repeating: radius),
+                              position + SIMD3(repeating: radius)))
             nodeIDs.append(node)
-            localBounds.append((SIMD3.zero, bound))
+            localBounds.append((SIMD3.zero, radius))
             undoLog.append(.add)
             redoOps.removeAll()
             version += 1
             scheduleBake()
         }
         return true
+    }
+
+    /// Shape-tool entry point: places the primitive honoring radial
+    /// symmetry by stamping one oriented copy per sector about world Y.
+    /// Real copies rather than the ABI's item-local repeat: each is its own
+    /// item (and undo step), and the preview needs no radial special case.
+    @discardableResult
+    func addShape(_ prim: clay_prim, params: [Float],
+                  at position: SIMD3<Float>, op: clay_op,
+                  blendK: Float, color: SIMD3<Float>,
+                  blend: clay_blend = CLAY_BLEND_QUADRATIC) -> Bool {
+        guard radialCount >= 2 else {
+            return addPrimitive(prim, params: params, at: position, op: op,
+                                blendK: blendK, color: color, blend: blend)
+        }
+        var placed = true
+        for i in 0..<Int(radialCount) {
+            let angle = Float(i) * 2 * .pi / Float(radialCount)
+            let c = cos(angle), s = sin(angle)
+            let p = SIMD3(c * position.x + s * position.z, position.y,
+                          -s * position.x + c * position.z)
+            placed = addPrimitive(prim, params: params, at: p, op: op,
+                                  blendK: blendK, color: color, blend: blend,
+                                  yaw: angle) && placed
+        }
+        return placed
     }
 
     // MARK: Sculpt strokes (Pencil smear — task 3.4)
@@ -861,6 +915,16 @@ final class ClayEngine {
         version += 1
         scheduleBake()
         return true
+    }
+
+    /// Field distance at a point (tests and future probes).
+    func evalDistance(at p: SIMD3<Float>) -> Float {
+        guard let doc else { return .infinity }
+        var distance: Float = 0
+        var rgb = [Float](repeating: 0, count: 3)
+        guard clay_eval_points(doc, nil, [p.x, p.y, p.z], 1, &distance, &rgb) == CLAY_OK
+        else { return .infinity }
+        return distance
     }
 
     /// Field color at a point (tests and future eyedropper).

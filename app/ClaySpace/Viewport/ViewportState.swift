@@ -92,6 +92,15 @@ final class ViewportState {
     fileprivate var strokePlane: (point: SIMD3<Float>, normal: SIMD3<Float>)?
     fileprivate var lastStrokePoint: SIMD3<Float>?
 
+    // MARK: Shape placement (tasks 7.1/7.2)
+
+    var shapeKind: PrimKind = .sphere
+    var shapeOp: ShapeOp = .add
+    var shapeBlendProfile: BlendProfile = .smooth
+    /// Blend radius k in world units (the bar's slider); support reach is
+    /// the profile's multiple of it.
+    var shapeBlendK: Float = 0.05
+
     // MARK: Tools
 
     var activeTool: Tool = .sculpt
@@ -347,14 +356,18 @@ extension ViewportState: PencilToolSink {
         pencilPeakPressure = max(pressure, 0.1)
 
         if mode == .voxel {
-            if activeTool == .select || activeTool == .move {
-                showToast("Select works in Smooth mode")
+            if activeTool == .select || activeTool == .move || activeTool == .shape {
+                showToast(activeTool == .shape ? "Shapes work in Smooth mode"
+                                               : "Select works in Smooth mode")
                 return
             }
             lastVoxelCell = nil
             voxelEdit(at: point, pressure: max(pressure, 0.1))
             return
         }
+
+        // Shape tool places on lift (pencilEnded), sized by peak pressure.
+        if activeTool == .shape { return }
 
         // Select/Move: pick the item under the pencil and open a
         // one-undo-step move session; tapping empty space deselects.
@@ -465,9 +478,14 @@ extension ViewportState: PencilToolSink {
     }
 
     func pencilEnded(at point: CGPoint) {
+        let start = pencilStart
         pencilStart = nil
         if mode == .voxel {
             lastVoxelCell = nil
+            return
+        }
+        if activeTool == .shape {
+            placeShape(at: start ?? point)
             return
         }
         if engine.isTransforming {
@@ -494,6 +512,34 @@ extension ViewportState: PencilToolSink {
         }
         strokePlane = nil
         lastStrokePoint = nil
+    }
+
+    /// Tap-to-place (task 7.1): the tapped surface point (or ground for
+    /// Add), sized by the tap's peak pressure, using the shape bar's
+    /// kind/op/blend.
+    private func placeShape(at point: CGPoint) {
+        guard let ray = ray(through: point) else { return }
+        let hit = engine.raycast(origin: ray.origin, direction: ray.direction)
+        let target: SIMD3<Float>?
+        if shapeOp == .add {
+            target = hit?.position ?? groundPoint(on: ray)
+        } else {
+            target = hit?.position // carving/keeping/tinting need a surface
+        }
+        guard let target else {
+            showToast("\(shapeOp.title) needs a surface")
+            return
+        }
+        let size = 0.14 + pencilPeakPressure * 0.42
+        let k = shapeBlendProfile == .hard ? 0 : shapeBlendK
+        if !engine.addShape(shapeKind.clayPrim,
+                            params: shapeKind.params(size: size),
+                            at: target, op: shapeOp.clayOp,
+                            blendK: k, color: activeColor,
+                            blend: shapeBlendProfile.clayBlend),
+           let error = engine.lastError {
+            showToast("Shape failed: \(error)")
+        }
     }
 
     private func intersect(ray: (origin: SIMD3<Float>, direction: SIMD3<Float>),

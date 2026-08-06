@@ -5,6 +5,7 @@ import Foundation
 /// the identity the tool rail, radial menu, and Pencil interactions agree on.
 enum Tool: String, CaseIterable, Identifiable {
     case sculpt
+    case shape
     case erase
     case paint
     case select
@@ -17,6 +18,7 @@ enum Tool: String, CaseIterable, Identifiable {
     var symbol: String {
         switch self {
         case .sculpt: "shippingbox"
+        case .shape: "cube"
         case .erase: "eraser"
         case .paint: "paintbrush.pointed"
         case .select: "square.dashed"

@@ -104,6 +104,29 @@ final class SculptUITests: XCTestCase {
     }
 
     @MainActor
+    func testShapeToolBarPlacesPrimitives() throws {
+        try XCTSkipUnless(isSimulator, "finger-tap shim is simulator-only")
+        let app = launch()
+        let count = app.staticTexts["shapeCount"]
+        XCTAssertTrue(count.waitForExistence(timeout: 10))
+
+        app.buttons["Shape"].tap() // tool rail
+        XCTAssertTrue(app.buttons["Shape Box"].waitForExistence(timeout: 3),
+                      "shape bar appears for the Shape tool")
+        app.buttons["Shape Box"].tap()
+        app.buttons["Shape Torus"].tap()
+        XCTAssertEqual(count.label, "1",
+                       "bar taps are chrome — they must not place shapes")
+
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.45, dy: 0.5)).tap()
+        XCTAssertTrue(count.wait(for: \.label, toEqual: "2", timeout: 5),
+                      "viewport tap placed the picked primitive")
+        app.buttons["Undo"].tap()
+        XCTAssertTrue(count.wait(for: \.label, toEqual: "1", timeout: 5),
+                      "placement undoes as one step")
+    }
+
+    @MainActor
     func testTapOnViewportAddsAShape() throws {
         try XCTSkipUnless(isSimulator, "finger-tap sculpt shim is simulator-only")
         let app = launch()
