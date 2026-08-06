@@ -102,6 +102,64 @@ final class ClayEngineTests: XCTestCase {
                           cache.voxelSize * 2, "trilinear surface within two voxels")
     }
 
+    func testSaveLoadRestoresSculptAndStaysEditable() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("persist_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let docURL = dir.appendingPathComponent("t.clayspace")
+        let mirrorURL = dir.appendingPathComponent("t.claymirror")
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        // Sculpt: a mirrored arm and a carve, then save.
+        let first = ClayEngine()
+        first.setMirror(axes: 1)
+        first.beginStroke(at: SIMD3(1.3, 0.8, 0), radius: 0.18,
+                          op: CLAY_OP_ADD, blendK: 0.02, color: ClayEngine.clayColor)
+        first.appendStrokePoint(SIMD3(1.7, 0.9, 0), radius: 0.18)
+        first.endStroke()
+        first.addPrimitive(CLAY_PRIM_SPHERE, params: [0.25],
+                           at: SIMD3(0, 1.5, 0.6), op: CLAY_OP_SUBTRACT,
+                           blendK: 0, color: ClayEngine.clayColor)
+        XCTAssertTrue(first.saveDocument(documentURL: docURL, mirrorURL: mirrorURL),
+                      first.lastError ?? "")
+        XCTAssertFalse(first.isDirty)
+
+        // A fresh engine restores the document AND the render mirror.
+        let second = ClayEngine()
+        XCTAssertTrue(second.loadDocument(documentURL: docURL, mirrorURL: mirrorURL))
+        XCTAssertEqual(second.items.count, first.items.count)
+        XCTAssertEqual(second.strokePoints.count, first.strokePoints.count)
+        XCTAssertEqual(second.mirrorAxes, 1, "layer mirror state restored")
+
+        // The restored document answers like the original — both sides.
+        XCTAssertNotNil(second.raycast(origin: SIMD3(1.7, 3, 0), direction: SIMD3(0, -1, 0)))
+        XCTAssertNotNil(second.raycast(origin: SIMD3(-1.7, 3, 0), direction: SIMD3(0, -1, 0)),
+                        "mirrored side survives the round trip")
+
+        // Node ids survive serialization: picking still maps to the mirror.
+        let picked = try XCTUnwrap(second.pick(origin: SIMD3(1.7, 3, 0),
+                                               direction: SIMD3(0, -1, 0)))
+        XCTAssertEqual(picked.index, 1, "old items remain selectable after load")
+
+        // Editing continues, and undo stops at the load point.
+        second.beginStroke(at: SIMD3(0, 1.8, 0), radius: 0.15,
+                           op: CLAY_OP_ADD, blendK: 0.02, color: ClayEngine.clayColor)
+        second.endStroke()
+        XCTAssertEqual(second.items.count, first.items.count + 1)
+        XCTAssertTrue(second.undo(), "the new edit undoes")
+        XCTAssertFalse(second.undo(), "pre-load history is not undoable (fresh session)")
+        XCTAssertEqual(second.items.count, first.items.count)
+    }
+
+    func testLoadRejectsMissingOrCorruptSidecar() {
+        let engine = ClayEngine()
+        let bogus = FileManager.default.temporaryDirectory
+            .appendingPathComponent("missing_\(UUID().uuidString)")
+        XCTAssertFalse(engine.loadDocument(documentURL: bogus.appendingPathExtension("clayspace"),
+                                           mirrorURL: bogus.appendingPathExtension("claymirror")))
+        XCTAssertEqual(engine.items.count, 1, "failed load leaves the session untouched")
+    }
+
     func testPickMoveUndoRoundTrip() throws {
         let engine = ClayEngine()
         // A blob clear of the base ball.

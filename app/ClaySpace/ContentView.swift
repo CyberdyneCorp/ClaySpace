@@ -6,8 +6,11 @@ import claycore
 /// right-edge swipe per the input-gestures spec). Tool rail and
 /// contextual bars arrive with their own tasks (groups 5–8).
 struct ContentView: View {
-    @State private var state = ViewportState()
+    // UI tests launch with -resetDocument for a deterministic fresh session.
+    @State private var state = ViewportState(
+        restoreDocument: !ProcessInfo.processInfo.arguments.contains("-resetDocument"))
     @State private var showGestures = false
+    @Environment(\.scenePhase) private var scenePhase
     @AppStorage("hasSeenGesturesSheet") private var hasSeenGestures = false
     private let coreVersion: String = {
         var major: Int32 = 0, minor: Int32 = 0, patch: Int32 = 0
@@ -59,6 +62,11 @@ struct ContentView: View {
         }
         .animation(.easeOut(duration: 0.2), value: state.inspectorVisible)
         .sheet(isPresented: $showGestures) { GesturesSheet() }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .background || phase == .inactive {
+                state.engine.saveNow()
+            }
+        }
         .onAppear {
             if !hasSeenGestures {
                 hasSeenGestures = true
@@ -72,8 +80,14 @@ struct ContentView: View {
             Rectangle()
                 .fill(.orange)
                 .frame(width: 11, height: 11)
-            Text("ClaySpace")
-                .font(.system(size: 19, weight: .semibold, design: .serif))
+            VStack(alignment: .leading, spacing: 0) {
+                Text("ClaySpace")
+                    .font(.system(size: 19, weight: .semibold, design: .serif))
+                Text(state.engine.isDirty ? "edited" : "saved")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("saveStatus")
+            }
             Spacer()
             Text(coreVersion)
                 .font(.system(size: 11, design: .monospaced))

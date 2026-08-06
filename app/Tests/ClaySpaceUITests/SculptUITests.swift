@@ -15,8 +15,8 @@ final class SculptUITests: XCTestCase {
     private func launch() -> XCUIApplication {
         let app = XCUIApplication()
         // Suppress the first-launch gestures sheet via the defaults
-        // argument domain.
-        app.launchArguments += ["-hasSeenGesturesSheet", "YES"]
+        // argument domain; start from a fresh document, not the autosave.
+        app.launchArguments += ["-hasSeenGesturesSheet", "YES", "-resetDocument"]
         app.launch()
         return app
     }

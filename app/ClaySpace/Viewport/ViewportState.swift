@@ -9,8 +9,12 @@ import claycore
 @MainActor
 @Observable
 final class ViewportState {
-    let engine = ClayEngine()
+    let engine: ClayEngine
     var camera = OrbitCamera()
+
+    init(restoreDocument: Bool = false) {
+        engine = ClayEngine(restoreFromDefault: restoreDocument)
+    }
     var toast: String?
     var inspectorVisible = true
 

@@ -217,7 +217,12 @@ final class ClayEngine {
         scheduleBake()
     }
 
-    init() {
+    init(restoreFromDefault: Bool = false) {
+        if restoreFromDefault,
+           loadDocument(documentURL: Self.defaultDocumentURL,
+                        mirrorURL: Self.defaultMirrorURL) {
+            return
+        }
         doc = clay_document_create()
         guard let doc else { return }
 
@@ -233,6 +238,7 @@ final class ClayEngine {
                      blendK: 0, color: Self.clayColor, recordMirror: true)
 
         _ = check(clay_document_enable_undo(doc))
+        lastSavedVersion = version
         scheduleBake(debounceMilliseconds: 10)
     }
 
@@ -590,6 +596,7 @@ final class ClayEngine {
     /// thread against an independently loaded snapshot of the document, so
     /// the main thread (and ClayCore's live doc) is never touched.
     func scheduleBake(debounceMilliseconds: Int = 200) {
+        scheduleAutosave()
         bakeTask?.cancel()
         let editVersion = version
         bakeTask = Task { [weak self] in
@@ -659,6 +666,153 @@ final class ClayEngine {
             }
         }
         return (mn, mx)
+    }
+
+    // MARK: Persistence (project-documents spec: autosave, restore)
+
+    static var defaultDocumentURL: URL {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Current.clayspace")
+    }
+    static var defaultMirrorURL: URL {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Current.claymirror")
+    }
+
+    private(set) var lastSavedVersion = -1
+    private(set) var lastSavedAt: Date?
+    private var autosaveTask: Task<Void, Never>?
+    var isDirty: Bool { version != lastSavedVersion }
+
+    private static let mirrorMagic: UInt32 = 0x4353_4D52 // "CSMR"
+    private static let mirrorFormat: UInt32 = 1
+
+    /// The render mirror as blittable sidecar data — the C ABI has no scene
+    /// enumeration, so the mirror persists alongside the document.
+    private func mirrorData() -> Data {
+        var data = Data()
+        func append<T>(_ array: [T]) {
+            array.withUnsafeBytes { data.append(contentsOf: $0) }
+        }
+        let header: [UInt32] = [
+            Self.mirrorMagic, Self.mirrorFormat,
+            UInt32(items.count), UInt32(strokePoints.count),
+            UInt32(bitPattern: mirrorAxes), UInt32(bitPattern: radialCount),
+            mirrorK.bitPattern, UInt32(layer)
+        ]
+        append(header)
+        append(items)
+        append(strokePoints)
+        append(nodeIDs)
+        append(itemAABBs.map(\.min))
+        append(itemAABBs.map(\.max))
+        append(localBounds.map(\.center))
+        append(localBounds.map(\.radius))
+        return data
+    }
+
+    /// Saves the document + mirror sidecar. Refused mid-gesture (an open
+    /// undo group must not hit disk).
+    @discardableResult
+    func saveDocument(documentURL: URL = ClayEngine.defaultDocumentURL,
+                      mirrorURL: URL = ClayEngine.defaultMirrorURL) -> Bool {
+        guard let doc, !isStroking, !isTransforming else { return false }
+        guard check(clay_document_save(doc, documentURL.path)) else { return false }
+        do {
+            try mirrorData().write(to: mirrorURL, options: .atomic)
+        } catch {
+            lastError = error.localizedDescription
+            return false
+        }
+        lastSavedVersion = version
+        lastSavedAt = Date()
+        return true
+    }
+
+    /// Replaces the live document with a saved one and restores the mirror.
+    /// Undo history starts fresh at the load point (in-session semantics).
+    @discardableResult
+    func loadDocument(documentURL: URL, mirrorURL: URL) -> Bool {
+        var loaded: OpaquePointer?
+        guard clay_document_load(documentURL.path, &loaded) == CLAY_OK,
+              let newDoc = loaded,
+              let data = try? Data(contentsOf: mirrorURL) else {
+            if let stale = loaded { clay_document_destroy(stale) }
+            return false
+        }
+
+        var offset = 0
+        func readArray<T>(count: Int) -> [T]? {
+            let bytes = MemoryLayout<T>.stride * count
+            guard offset + bytes <= data.count else { return nil }
+            var out = [T]()
+            out.reserveCapacity(count)
+            data.withUnsafeBytes { raw in
+                for i in 0..<count {
+                    out.append(raw.loadUnaligned(fromByteOffset: offset + i * MemoryLayout<T>.stride, as: T.self))
+                }
+            }
+            offset += bytes
+            return out
+        }
+
+        guard let header: [UInt32] = readArray(count: 8),
+              header[0] == Self.mirrorMagic, header[1] == Self.mirrorFormat else {
+            clay_document_destroy(newDoc)
+            return false
+        }
+        let itemCount = Int(header[2])
+        let pointCount = Int(header[3])
+        guard let newItems: [SceneItem] = readArray(count: itemCount),
+              let newPoints: [SIMD4<Float>] = readArray(count: pointCount),
+              let newNodes: [clay_node_id] = readArray(count: itemCount),
+              let aabbMins: [SIMD3<Float>] = readArray(count: itemCount),
+              let aabbMaxs: [SIMD3<Float>] = readArray(count: itemCount),
+              let localCenters: [SIMD3<Float>] = readArray(count: itemCount),
+              let localRadii: [Float] = readArray(count: itemCount) else {
+            clay_document_destroy(newDoc)
+            return false
+        }
+
+        if let old = doc { clay_document_destroy(old) }
+        doc = newDoc
+        layer = clay_layer_id(header[7])
+        mirrorAxes = Int32(bitPattern: header[4])
+        radialCount = Int32(bitPattern: header[5])
+        mirrorK = Float(bitPattern: header[6])
+        items = newItems
+        strokePoints = newPoints
+        nodeIDs = newNodes
+        itemAABBs = zip(aabbMins, aabbMaxs).map { ($0, $1) }
+        localBounds = zip(localCenters, localRadii).map { ($0, $1) }
+        undoLog.removeAll()
+        redoOps.removeAll()
+        activeStroke = nil
+        transformIndex = nil
+        fieldCache = nil
+        fieldCacheVersion += 1
+        _ = check(clay_document_enable_undo(newDoc))
+        version += 1
+        lastSavedVersion = version
+        lastSavedAt = Date()
+        scheduleBake(debounceMilliseconds: 10)
+        return true
+    }
+
+    /// Debounced autosave, armed by the same commits that trigger bakes.
+    private func scheduleAutosave() {
+        autosaveTask?.cancel()
+        autosaveTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(2))
+            guard !Task.isCancelled, let self, self.isDirty else { return }
+            self.saveDocument()
+        }
+    }
+
+    /// Immediate save (app backgrounding).
+    func saveNow() {
+        autosaveTask?.cancel()
+        if isDirty { saveDocument() }
     }
 
     nonisolated private static func bakeField(documentPath: String,
