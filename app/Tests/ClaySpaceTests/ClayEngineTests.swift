@@ -102,6 +102,26 @@ final class ClayEngineTests: XCTestCase {
                           cache.voxelSize * 2, "trilinear surface within two voxels")
     }
 
+    func testExportProducesFilesInEveryFormat() async throws {
+        let engine = ClayEngine()
+        engine.beginStroke(at: SIMD3(1.2, 0.8, 0), radius: 0.2,
+                           op: CLAY_OP_ADD, blendK: 0.05, color: ClayEngine.clayColor)
+        engine.appendStrokePoint(SIMD3(1.6, 1.0, 0), radius: 0.18)
+        engine.endStroke()
+
+        for format in ClayEngine.ExportFormat.allCases {
+            let exported = await engine.exportMesh(format: format, resolution: 96)
+            let result = try XCTUnwrap(exported, "\(format.title): \(engine.lastError ?? "")")
+            XCTAssertGreaterThan(result.triangleCount, 100, format.title)
+            XCTAssertTrue(result.watertight, "\(format.title) mesh is watertight")
+            let size = try XCTUnwrap(FileManager.default
+                .attributesOfItem(atPath: result.url.path)[.size] as? Int)
+            XCTAssertGreaterThan(size, 1000, "\(format.title) file landed on disk")
+            XCTAssertEqual(result.url.pathExtension, format.rawValue)
+            try? FileManager.default.removeItem(at: result.url)
+        }
+    }
+
     func testSaveLoadRestoresSculptAndStaysEditable() throws {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("persist_\(UUID().uuidString)")

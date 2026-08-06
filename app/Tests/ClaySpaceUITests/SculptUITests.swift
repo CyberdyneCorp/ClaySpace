@@ -61,6 +61,21 @@ final class SculptUITests: XCTestCase {
     }
 
     @MainActor
+    func testExportFlowProducesAShareableMesh() throws {
+        let app = launch()
+        XCTAssertTrue(app.staticTexts["shapeCount"].waitForExistence(timeout: 10))
+        app.buttons["exportButton"].tap()
+        let run = app.buttons["exportRun"]
+        XCTAssertTrue(run.waitForExistence(timeout: 5))
+        run.tap()
+        XCTAssertTrue(app.otherElements["exportStats"].waitForExistence(timeout: 30)
+                        || app.staticTexts["exportStats"].waitForExistence(timeout: 5),
+                      "mesh stats appear after the background export")
+        XCTAssertTrue(app.buttons.matching(NSPredicate(format: "label CONTAINS 'Share'"))
+                        .firstMatch.exists, "share affordance offered")
+    }
+
+    @MainActor
     func testTapOnViewportAddsAShape() throws {
         try XCTSkipUnless(isSimulator, "finger-tap sculpt shim is simulator-only")
         let app = launch()

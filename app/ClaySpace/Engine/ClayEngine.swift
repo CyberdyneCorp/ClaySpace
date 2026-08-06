@@ -668,6 +668,76 @@ final class ClayEngine {
         return (mn, mx)
     }
 
+    // MARK: Mesh export (import-export spec; task 9.1/9.8 core)
+
+    enum ExportFormat: String, CaseIterable, Identifiable {
+        case obj, fbx, glb, ply
+        var id: String { rawValue }
+        var title: String { rawValue.uppercased() }
+        var note: String {
+            switch self {
+            case .obj: "everything opens it"
+            case .fbx: "Unity · Unreal"
+            case .glb: "glTF binary"
+            case .ply: "vertex colors"
+            }
+        }
+    }
+
+    struct ExportResult {
+        var url: URL
+        var vertexCount: Int
+        var triangleCount: Int
+        var watertight: Bool
+        var manifold: Bool
+    }
+
+    /// Meshes and saves the document on a background thread (independent
+    /// snapshot copy, like bakes) and returns the file plus its stats.
+    func exportMesh(format: ExportFormat, resolution: Int32) async -> ExportResult? {
+        guard let doc, !isStroking, !isTransforming else { return nil }
+        let snapshot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("clayspace-export-src.clayspace").path
+        guard check(clay_document_save(doc, snapshot)) else { return nil }
+
+        let stamp = DateFormatter()
+        stamp.dateFormat = "yyyyMMdd-HHmm"
+        let name = "ClaySpace-\(stamp.string(from: Date())).\(format.rawValue)"
+        let outURL = FileManager.default.temporaryDirectory.appendingPathComponent(name)
+
+        let result = await Task.detached(priority: .userInitiated) {
+            Self.exportSnapshot(documentPath: snapshot, to: outURL, resolution: resolution)
+        }.value
+        if result == nil { lastError = "export failed" }
+        return result
+    }
+
+    nonisolated private static func exportSnapshot(documentPath: String, to url: URL,
+                                                   resolution: Int32) -> ExportResult? {
+        var loaded: OpaquePointer?
+        guard clay_document_load(documentPath, &loaded) == CLAY_OK, let doc = loaded
+        else { return nil }
+        defer { clay_document_destroy(doc) }
+
+        var params = clay_mesh_params()
+        params.struct_size = UInt32(MemoryLayout<clay_mesh_params>.size)
+        params.resolution = resolution
+        var mesh: OpaquePointer?
+        guard clay_document_mesh(doc, &params, &mesh) == CLAY_OK, mesh != nil
+        else { return nil }
+        defer { clay_mesh_destroy(mesh) }
+
+        var watertight: Int32 = 0, manifold: Int32 = 0
+        _ = clay_mesh_validate(mesh, &watertight, &manifold)
+        guard clay_mesh_save(mesh, url.path) == CLAY_OK else { return nil }
+
+        return ExportResult(url: url,
+                            vertexCount: clay_mesh_vertex_count(mesh),
+                            triangleCount: clay_mesh_index_count(mesh) / 3,
+                            watertight: watertight == 1,
+                            manifold: manifold == 1)
+    }
+
     // MARK: Persistence (project-documents spec: autosave, restore)
 
     static var defaultDocumentURL: URL {
