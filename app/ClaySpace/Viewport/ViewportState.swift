@@ -34,6 +34,32 @@ final class ViewportState {
     /// Selected item's mirror index (Select/Move tools); nil = none.
     var selectedIndex: Int?
 
+    // MARK: Color (materials-color spec)
+
+    /// Starter palette from the UI study.
+    static let palette: [SIMD3<Float>] = [
+        SIMD3(1.00, 0.27, 0.56), // cap magenta
+        SIMD3(0.67, 0.04, 0.34), // deep magenta
+        SIMD3(0.22, 0.65, 0.81), // clay cyan
+        SIMD3(0.00, 0.40, 0.53), // deep cyan
+        SIMD3(0.93, 0.73, 0.00), // press yellow
+        SIMD3(0.97, 0.96, 0.96), // paper
+        SIMD3(0.61, 0.59, 0.59), // newsprint
+        SIMD3(0.18, 0.17, 0.17)  // ink
+    ]
+    var activeColor: SIMD3<Float> = ClayEngine.clayColor
+
+    /// Swatch tap: sets the brush color; with a selection, recolors it too
+    /// (one undoable step).
+    func pickColor(_ color: SIMD3<Float>) {
+        activeColor = color
+        if let index = selectedIndex, engine.items.indices.contains(index) {
+            if engine.setColor(index: index, color: color) {
+                showToast("Recolored")
+            }
+        }
+    }
+
     // Transform-drag session state.
     fileprivate var dragStartItemPosition: SIMD3<Float>?
     fileprivate var dragStartHit: SIMD3<Float>?
@@ -304,24 +330,29 @@ extension ViewportState: PencilToolSink {
             return
         }
 
-        // Sculpt/Erase begin a stroke immediately — a tap is just a
+        // Sculpt/Erase/Paint begin a stroke immediately — a tap is just a
         // one-point stroke, so the preview responds on touch-down.
-        guard activeTool == .sculpt || activeTool == .erase,
+        guard activeTool == .sculpt || activeTool == .erase || activeTool == .paint,
               let ray = ray(through: point) else { return }
         let hit = engine.raycast(origin: ray.origin, direction: ray.direction)
 
         let start: SIMD3<Float>?
         switch activeTool {
         case .sculpt: start = hit?.position ?? groundPoint(on: ray)
-        default: start = hit?.position // carving needs a surface
+        default: start = hit?.position // carving and painting need a surface
         }
         guard let start else { return }
 
         let r = radius(for: max(pressure, 0.1))
-        let op: clay_op = activeTool == .erase ? CLAY_OP_SUBTRACT : CLAY_OP_ADD
-        let blend = activeTool == .erase ? r * 0.09 : r * 0.14
+        let op: clay_op
+        let blend: Float
+        switch activeTool {
+        case .erase: op = CLAY_OP_SUBTRACT; blend = r * 0.09
+        case .paint: op = CLAY_OP_PAINT; blend = r * 0.25 // support ≈ brush radius
+        default: op = CLAY_OP_ADD; blend = r * 0.14
+        }
         if engine.beginStroke(at: start, radius: r, op: op,
-                              blendK: blend, color: ClayEngine.clayColor) {
+                              blendK: blend, color: activeColor) {
             // Later moves project onto the view-parallel plane through the
             // start point: predictable smears that don't chase their own
             // freshly-built surface.
@@ -396,12 +427,12 @@ extension ViewportState: PencilToolSink {
             lastStrokePoint = nil
             return
         }
-        // Non-stroke tools: tap feedback (paint still pending its task).
+        // Tap feedback for strokes that could not start.
         switch activeTool {
         case .erase where strokePlane == nil:
             showToast("Nothing to carve there")
-        case .paint:
-            showToast("Paint lands with a later task")
+        case .paint where strokePlane == nil:
+            showToast("Paint needs a surface")
         default:
             break
         }

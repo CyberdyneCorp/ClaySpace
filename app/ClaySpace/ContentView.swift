@@ -41,11 +41,14 @@ struct ContentView: View {
                 }
                 VStack {
                     Spacer()
-                    MirrorBar(state: state)
-                        .padding(.bottom, 16)
-                        .onGeometryChange(for: CGRect.self) {
-                            $0.frame(in: .global)
-                        } action: { state.chromeRects["mirrorBar"] = $0 }
+                    VStack(spacing: 8) {
+                        PaletteBar(state: state)
+                        MirrorBar(state: state)
+                    }
+                    .padding(.bottom, 16)
+                    .onGeometryChange(for: CGRect.self) {
+                        $0.frame(in: .global)
+                    } action: { state.chromeRects["bottomBars"] = $0 }
                 }
                 if let anchor = state.radialMenuLocation {
                     RadialMenu(

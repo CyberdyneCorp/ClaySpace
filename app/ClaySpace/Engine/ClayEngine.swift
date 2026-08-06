@@ -131,12 +131,14 @@ final class ClayEngine {
     private enum UndoKind {
         case add
         case transform(index: Int, before: Placement, after: Placement)
+        case recolor(index: Int, before: SIMD3<Float>, after: SIMD3<Float>)
     }
     private enum RedoOp {
         case add(item: SceneItem, points: [SIMD4<Float>],
                  aabb: (min: SIMD3<Float>, max: SIMD3<Float>),
                  node: clay_node_id, localBound: (center: SIMD3<Float>, radius: Float))
         case transform(index: Int, before: Placement, after: Placement)
+        case recolor(index: Int, before: SIMD3<Float>, after: SIMD3<Float>)
     }
     private var undoLog: [UndoKind] = []
     private var redoOps: [RedoOp] = []
@@ -436,6 +438,9 @@ final class ClayEngine {
         case .transform(let index, let before, let after):
             apply(before, to: index)
             redoOps.append(.transform(index: index, before: before, after: after))
+        case .recolor(let index, let before, let after):
+            if items.indices.contains(index) { items[index].color = before }
+            redoOps.append(.recolor(index: index, before: before, after: after))
         case .add, .none: // .none: history predating the log — treat as add
             if let last = items.popLast() {
                 var points: [SIMD4<Float>] = []
@@ -475,6 +480,9 @@ final class ClayEngine {
         case .transform(let index, let before, let after):
             apply(after, to: index)
             undoLog.append(.transform(index: index, before: before, after: after))
+        case .recolor(let index, let before, let after):
+            if items.indices.contains(index) { items[index].color = after }
+            undoLog.append(.recolor(index: index, before: before, after: after))
         case .none:
             break
         }
@@ -666,6 +674,34 @@ final class ClayEngine {
             }
         }
         return (mn, mx)
+    }
+
+    // MARK: Color (materials-color spec; tasks 8.1/8.2)
+
+    /// Recolors an item (undoable SetColorCmd in ClayCore).
+    @discardableResult
+    func setColor(index: Int, color: SIMD3<Float>) -> Bool {
+        guard let doc, items.indices.contains(index),
+              !isStroking, !isTransforming else { return false }
+        let before = items[index].color
+        guard check(clay_layer_set_color(doc, layer, nodeIDs[index],
+                                         [color.x, color.y, color.z])) else { return false }
+        items[index].color = color
+        undoLog.append(.recolor(index: index, before: before, after: color))
+        redoOps.removeAll()
+        version += 1
+        scheduleBake()
+        return true
+    }
+
+    /// Field color at a point (tests and future eyedropper).
+    func colorAt(_ p: SIMD3<Float>) -> SIMD3<Float>? {
+        guard let doc else { return nil }
+        var distance: Float = 0
+        var rgb = [Float](repeating: 0, count: 3)
+        guard clay_eval_points(doc, nil, [p.x, p.y, p.z], 1, &distance, &rgb) == CLAY_OK
+        else { return nil }
+        return SIMD3(rgb[0], rgb[1], rgb[2])
     }
 
     // MARK: Mesh export (import-export spec; task 9.1/9.8 core)

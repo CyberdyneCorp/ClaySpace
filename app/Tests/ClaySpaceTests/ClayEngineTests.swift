@@ -102,6 +102,49 @@ final class ClayEngineTests: XCTestCase {
                           cache.voxelSize * 2, "trilinear surface within two voxels")
     }
 
+    func testPaintStrokeStainsColorWithoutChangingGeometry() throws {
+        let engine = ClayEngine()
+        let front = SIMD3<Float>(0, 0.8, 0.8) // base ball surface point
+        let before = try XCTUnwrap(engine.raycast(origin: SIMD3(0, 0.8, 3),
+                                                  direction: SIMD3(0, 0, -1)))
+
+        let red = SIMD3<Float>(1, 0.2, 0.2)
+        XCTAssertTrue(engine.beginStroke(at: front, radius: 0.2,
+                                         op: CLAY_OP_PAINT, blendK: 0.05, color: red))
+        engine.endStroke()
+
+        let after = try XCTUnwrap(engine.raycast(origin: SIMD3(0, 0.8, 3),
+                                                 direction: SIMD3(0, 0, -1)))
+        XCTAssertEqual(after.position.z, before.position.z, accuracy: 1e-4,
+                       "paint never moves the surface")
+        let stained = try XCTUnwrap(engine.colorAt(front))
+        XCTAssertGreaterThan(stained.x, 0.8, "stained red at the stroke")
+        let back = try XCTUnwrap(engine.colorAt(SIMD3(0, 0.8, -0.8)))
+        XCTAssertLessThan(back.x, 0.5, "far side keeps the clay color")
+    }
+
+    func testRecolorSelectionIsUndoable() throws {
+        let engine = ClayEngine()
+        engine.beginStroke(at: SIMD3(1.3, 0.8, 0), radius: 0.2,
+                           op: CLAY_OP_ADD, blendK: 0.02, color: ClayEngine.clayColor)
+        engine.endStroke()
+
+        let yellow = SIMD3<Float>(0.93, 0.73, 0)
+        XCTAssertTrue(engine.setColor(index: 1, color: yellow))
+        XCTAssertEqual(engine.items[1].color.x, 0.93, accuracy: 1e-4)
+        var probe = try XCTUnwrap(engine.colorAt(SIMD3(1.3, 0.8, 0)))
+        XCTAssertGreaterThan(probe.x, 0.8, "document color followed")
+
+        XCTAssertTrue(engine.undo(), "recolor is one undoable step")
+        XCTAssertEqual(engine.items.count, 2, "undo restored color, not removed the item")
+        XCTAssertEqual(engine.items[1].color.x, ClayEngine.clayColor.x, accuracy: 1e-4)
+        probe = try XCTUnwrap(engine.colorAt(SIMD3(1.3, 0.8, 0)))
+        XCTAssertLessThan(probe.x, 0.5)
+
+        XCTAssertTrue(engine.redo())
+        XCTAssertEqual(engine.items[1].color.x, 0.93, accuracy: 1e-4)
+    }
+
     func testExportProducesFilesInEveryFormat() async throws {
         let engine = ClayEngine()
         engine.beginStroke(at: SIMD3(1.2, 0.8, 0), radius: 0.2,

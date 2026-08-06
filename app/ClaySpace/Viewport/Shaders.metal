@@ -88,6 +88,7 @@ constant int PRIM_STROKE = 14;
 constant int OP_ADD = 0;
 constant int OP_SUBTRACT = 1;
 constant int OP_INTERSECT = 2;
+constant int OP_PAINT = 3;
 
 // ClayCore's quadratic smin, mirrored EXACTLY (kernel/ops.h
 // csmin_quadratic): support is 4k, depth h²·k. The preview must match the
@@ -313,6 +314,11 @@ static float4 mapShade(float3 p, FieldCtx ctx) {
             d = -csminQ(-d, di, k);
         } else if (it.op == OP_INTERSECT) {
             d = -csminQ(-d, -di, k);
+        } else if (it.op == OP_PAINT) {
+            // ccombine_paint: color-only, field untouched.
+            float support = max(4.0 * k, k);
+            float w = 1.0 - clamp(di / max(support, 1e-6), 0.0, 1.0);
+            col = mix(col, it.color, w);
         }
     }
     return float4(col, d);
