@@ -356,6 +356,126 @@ final class ClayEngineTests: XCTestCase {
                              "tighter spacing lays down more stamps")
     }
 
+    // MARK: Cut tool (ZBrush Trim) + masks (freeze)
+
+    func testCircleCutTrimsTheBallAndUndoes() {
+        let engine = ClayEngine()
+        // Frame facing -Z through the ball's crown: a circle of r=0.4 at
+        // height 1.4 sweeps a prism that shaves the top to y ≈ 1.0.
+        XCTAssertTrue(engine.applyCut(origin: SIMD3(0, 1.4, 0),
+                                      right: SIMD3(1, 0, 0), up: SIMD3(0, 1, 0),
+                                      forward: SIMD3(0, 0, -1),
+                                      shape: .circle(radius: 0.4), keep: false))
+        XCTAssertEqual(engine.items.count, 2, "the cut is an ordinary edit item")
+        XCTAssertEqual(engine.items.last?.prim, Int32(CLAY_PRIM_EXTRUDE.rawValue))
+        let trimmed = engine.raycast(origin: SIMD3(0, 8, 0), direction: SIMD3(0, -1, 0))
+        XCTAssertEqual(trimmed?.position.y ?? 0, 1.0, accuracy: 0.05,
+                       "crown shaved to the prism's wall")
+
+        XCTAssertTrue(engine.undo())
+        let restored = engine.raycast(origin: SIMD3(0, 8, 0), direction: SIMD3(0, -1, 0))
+        XCTAssertEqual(restored?.position.y ?? 0, 1.6, accuracy: 0.02,
+                       "one undo step brings the crown back")
+    }
+
+    func testRectAndLassoCutsAndKeepMode() {
+        let engine = ClayEngine()
+        // Keep mode: only the marked slab survives.
+        XCTAssertTrue(engine.applyCut(origin: SIMD3(0, 0.8, 0),
+                                      right: SIMD3(1, 0, 0), up: SIMD3(0, 1, 0),
+                                      forward: SIMD3(0, 0, -1),
+                                      shape: .rect(halfWidth: 0.2, halfHeight: 2),
+                                      keep: true))
+        XCTAssertNil(engine.raycast(origin: SIMD3(0.5, 0.8, 3), direction: SIMD3(0, 0, -1)),
+                     "material outside the kept slab is gone")
+        XCTAssertNotNil(engine.raycast(origin: SIMD3(0, 0.8, 3), direction: SIMD3(0, 0, -1)),
+                        "the slab itself survives")
+        XCTAssertTrue(engine.undo())
+
+        // Lasso: a triangle around the crown, remove mode.
+        let triangle: [Float] = [-0.5, -0.3, 0.5, -0.3, 0, 0.5]
+        XCTAssertTrue(engine.applyCut(origin: SIMD3(0, 1.5, 0),
+                                      right: SIMD3(1, 0, 0), up: SIMD3(0, 1, 0),
+                                      forward: SIMD3(0, 0, -1),
+                                      shape: .lasso(polygonXY: triangle), keep: false))
+        let after = engine.raycast(origin: SIMD3(0, 8, 0), direction: SIMD3(0, -1, 0))
+        XCTAssertLessThan(after?.position.y ?? 10, 1.55, "lasso carved the crown")
+    }
+
+    func testFrozenRegionsGateBrushesUntilThawed() {
+        let engine = ClayEngine()
+        let pink = SIMD3<Float>(1, 0.27, 0.56)
+        engine.voxelStamp(.place, at: SIMD3(10, 2, 10), brushSize: 3, color: pink)
+        let base = engine.voxelCount
+        let world = (SIMD3<Float>(10, 2, 10) + SIMD3(repeating: 0.5)) * ClayEngine.voxelSize
+
+        // Freeze the whole blob, then try to erase it: nothing may move.
+        XCTAssertTrue(engine.maskPaint(at: world, radius: 0.6, erase: false,
+                                       voxelContext: true))
+        XCTAssertGreaterThan(engine.maskPaintedCount(voxelContext: true), 0)
+        engine.voxelStamp(.erase, at: SIMD3(10, 2, 10), brushSize: 3, color: pink)
+        XCTAssertEqual(engine.voxelCount, base, "frozen cells refuse the eraser")
+        XCTAssertFalse(engine.voxelSculpt(.inflate, at: SIMD3(10, 2, 10),
+                                          brushSize: 5, color: pink)
+                        && engine.voxelCount != base,
+                       "sculpt verbs cannot grow a fully frozen blob")
+
+        // Thaw and the eraser works again.
+        engine.clearMask(voxelContext: true)
+        XCTAssertEqual(engine.maskPaintedCount(voxelContext: true), 0)
+        engine.voxelStamp(.erase, at: SIMD3(10, 2, 10), brushSize: 3, color: pink)
+        XCTAssertLessThan(engine.voxelCount, base, "thawed cells erase")
+    }
+
+    func testMaskGatesSprayStamps() {
+        let engine = ClayEngine()
+        var samples: [(position: SIMD3<Float>, pressure: Float, tilt: Float)] = []
+        for i in 0...10 {
+            samples.append((SIMD3(Float(i) * 0.15 + 3, 2, 0), 0.8, .pi / 2))
+        }
+        // Freeze the whole path on the ACTIVE SDF layer.
+        for i in 0...10 {
+            _ = engine.maskPaint(at: SIMD3(Float(i) * 0.15 + 3, 2, 0), radius: 0.5,
+                                 erase: false, voxelContext: false)
+        }
+        let stamped = engine.sprayStroke(samples: samples, prim: CLAY_PRIM_SPHERE,
+                                         templateParams: [1], op: CLAY_OP_ADD,
+                                         blendK: 0, blend: CLAY_BLEND_HARD,
+                                         color: ClayEngine.clayColor,
+                                         radius: 0.12, feel: ClayEngine.SprayFeel())
+        XCTAssertEqual(stamped, 0, "a fully frozen path emits no stamps")
+
+        engine.clearMask(voxelContext: false)
+        let unfrozen = engine.sprayStroke(samples: samples, prim: CLAY_PRIM_SPHERE,
+                                          templateParams: [1], op: CLAY_OP_ADD,
+                                          blendK: 0, blend: CLAY_BLEND_HARD,
+                                          color: ClayEngine.clayColor,
+                                          radius: 0.12, feel: ClayEngine.SprayFeel())
+        XCTAssertGreaterThan(unfrozen, 3, "thawed, the spray lands")
+    }
+
+    func testMasksSurviveSaveLoad() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mask_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("m.clayspace")
+
+        let first = ClayEngine()
+        _ = first.ensureVoxelLayer()
+        XCTAssertTrue(first.maskPaint(at: SIMD3(1, 1, 1), radius: 0.4,
+                                      erase: false, voxelContext: true))
+        let painted = first.maskPaintedCount(voxelContext: true)
+        XCTAssertGreaterThan(painted, 0)
+        XCTAssertTrue(first.saveDocument(documentURL: url))
+
+        let second = ClayEngine()
+        XCTAssertTrue(second.loadDocument(documentURL: url, mirrorURL: url))
+        _ = second.ensureVoxelLayer()
+        XCTAssertEqual(second.maskPaintedCount(voxelContext: true), painted,
+                       "the freeze mask rides the document")
+    }
+
     func testVoxelsSurviveSaveLoad() throws {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("vox_\(UUID().uuidString)")

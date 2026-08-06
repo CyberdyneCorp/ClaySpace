@@ -516,6 +516,97 @@ final class ClayEngine {
         return placed
     }
 
+    // MARK: Cut tool (ZBrush Trim / 3DCoat Cut Off — clay_cut_create)
+
+    enum CutShape {
+        case rect(halfWidth: Float, halfHeight: Float)
+        case circle(radius: Float)
+        case lasso(polygonXY: [Float]) // pairs in cut-plane world units
+    }
+
+    /// Public scene bounds for sizing cut frames.
+    func sceneAABB() -> (min: SIMD3<Float>, max: SIMD3<Float>) {
+        let bounds = sceneBounds()
+        return (bounds.0, bounds.1)
+    }
+
+    /// Resolves a drawn shape into a prism cut through the scene. keep =
+    /// false removes what the shape covers (SUBTRACT), true keeps only it
+    /// (INTERSECT). One undo step; the preview shows the result at the
+    /// next bake (the cut item is an extrude the raymarcher does not
+    /// evaluate analytically).
+    @discardableResult
+    func applyCut(origin: SIMD3<Float>, right: SIMD3<Float>, up: SIMD3<Float>,
+                  forward: SIMD3<Float>, shape: CutShape, keep: Bool) -> Bool {
+        guard let doc, activeStroke == nil, transformIndex == nil,
+              items.count < Renderer.maxItems else { return false }
+        let bounds = sceneAABB()
+
+        var desc = clay_cut_desc()
+        desc.struct_size = UInt32(MemoryLayout<clay_cut_desc>.size)
+        desc.origin = (origin.x, origin.y, origin.z)
+        desc.right = (right.x, right.y, right.z)
+        desc.up = (up.x, up.y, up.z)
+        desc.forward = (forward.x, forward.y, forward.z)
+        desc.region_min = (bounds.min.x, bounds.min.y, bounds.min.z)
+        desc.region_max = (bounds.max.x, bounds.max.y, bounds.max.z)
+
+        var polygon: [Float] = []
+        switch shape {
+        case .rect(let halfWidth, let halfHeight):
+            desc.shape = Int32(CLAY_CUT_RECT.rawValue)
+            desc.half_width = halfWidth
+            desc.half_height = halfHeight
+        case .circle(let radius):
+            desc.shape = Int32(CLAY_CUT_CIRCLE.rawValue)
+            desc.radius = radius
+        case .lasso(let polygonXY):
+            guard polygonXY.count >= 6 else { return false }
+            desc.shape = Int32(CLAY_CUT_POLYGON.rawValue)
+            polygon = polygonXY
+        }
+
+        guard let item = clay_cut_create(&desc, polygon, polygon.count / 2) else {
+            lastError = String(cString: clay_last_error())
+            return false
+        }
+        let op = keep ? CLAY_OP_INTERSECT : CLAY_OP_SUBTRACT
+        clay_item_set_op(item, Int32(op.rawValue))
+        clay_item_set_color(item, [ClayEngine.clayColor.x, ClayEngine.clayColor.y,
+                                   ClayEngine.clayColor.z])
+        var node: clay_node_id = 0
+        let added = check(clay_layer_add_item(doc, layer, item, &node))
+        clay_item_destroy(item)
+        guard added else { return false }
+
+        // Mirror row: the raymarcher has no extrude kernel, so the item
+        // contributes nothing analytically (a cut appears when the bake
+        // lands, ~250 ms). Bound = the region's circumsphere: any point of
+        // the scene may be affected.
+        let center = (bounds.min + bounds.max) * 0.5
+        let radius = simd_length(bounds.max - bounds.min) * 0.5 + 0.1
+        items.append(SceneItem(
+            position: origin, scale: 1, rotation: SIMD4(0, 0, 0, 1),
+            params: SIMD4(repeating: 0), color: ClayEngine.clayColor,
+            blendK: 0, prim: Int32(CLAY_PRIM_EXTRUDE.rawValue),
+            op: Int32(op.rawValue), blend: 0, rounding: 0,
+            boundCenter: center, boundRadius: radius,
+            mirrorFlag: 0, radialCount: 0,
+            layerSlot: Float(activeLayerSlot)))
+        itemAABBs.append((center - SIMD3(repeating: radius),
+                          center + SIMD3(repeating: radius)))
+        nodeIDs.append(node)
+        localBounds.append((SIMD3.zero, radius))
+        itemLayers.append(Int32(activeLayerSlot))
+        undoLog.append(.add)
+        redoOps.removeAll()
+        fieldCache = nil // the cut reaches everything baked
+        fieldCacheVersion += 1
+        commit()
+        scheduleBake()
+        return true
+    }
+
     // MARK: Spray strokes (ZBrush-style stamp engine, task 3.4 follow-up)
 
     /// App-facing stroke feel: maps onto clay_stroke_preset over the
@@ -578,8 +669,10 @@ final class ClayEngine {
         clay_item_set_mirror(template, mirrorAxes != 0 ? 1 : 0)
         var nodes = [clay_node_id](repeating: 0, count: Int(stampCount))
         var applied: size_t = size_t(stampCount)
+        let sprayMask = gatingMask(voxelContext: false)
         let ok = check(clay_layer_apply_stroke(doc, layer, flat, samples.count,
-                                               &preset, template, nil, &nodes, &applied))
+                                               &preset, template, sprayMask,
+                                               &nodes, &applied))
         clay_item_destroy(template)
         guard ok, applied > 0 else { return 0 }
 
@@ -1313,6 +1406,7 @@ final class ClayEngine {
     /// its mirror/radial settings.
     func activateLayer(slot: Int) {
         guard sdfLayers.indices.contains(slot) else { return }
+        maskHandles.removeAll() // borrowed per-layer handles refetch lazily
         activeLayerSlot = slot
         layer = sdfLayers[slot].id
         mirrorAxes = sdfLayers[slot].mirrorAxes
@@ -1605,6 +1699,96 @@ final class ClayEngine {
         return index
     }
 
+    // MARK: Masks (freeze regions — clay_mask, gates brushes and spray)
+
+    /// Borrowed mask handles per layer, fetched lazily. Mask painting is
+    /// tool state like mirror toggles: ClayCore does not journal mask ops,
+    /// so neither does the op-log.
+    @ObservationIgnored private var maskHandles: [clay_layer_id: OpaquePointer] = [:]
+    /// Bumped on every mask change (UI + mesh tint refresh).
+    private(set) var maskVersion = 0
+
+    private func mask(for layerId: clay_layer_id, create: Bool) -> OpaquePointer? {
+        if let cached = maskHandles[layerId] { return cached }
+        guard let doc else { return nil }
+        var handle: OpaquePointer?
+        if clay_document_mask(doc, layerId, &handle) == CLAY_OK, let handle {
+            maskHandles[layerId] = handle
+            return handle
+        }
+        guard create else { return nil }
+        guard clay_document_add_mask(doc, layerId, Self.voxelSize, &handle) == CLAY_OK,
+              let handle else { return nil }
+        maskHandles[layerId] = handle
+        return handle
+    }
+
+    /// The mask gating edits in the current context: the voxel layer's in
+    /// Voxels mode, the active SDF layer's in Smooth mode.
+    private func contextMask(voxelContext: Bool, create: Bool) -> OpaquePointer? {
+        if voxelContext {
+            guard ensureVoxelLayer() else { return nil }
+            return mask(for: voxelLayer, create: create)
+        }
+        return mask(for: layer, create: create)
+    }
+
+    /// A non-empty mask for brush gating, or nil (empty masks gate nothing).
+    private func gatingMask(voxelContext: Bool) -> OpaquePointer? {
+        guard let handle = contextMask(voxelContext: voxelContext, create: false)
+        else { return nil }
+        var empty: Int32 = 1
+        _ = clay_mask_empty(handle, &empty)
+        return empty == 0 ? handle : nil
+    }
+
+    /// Paints (or erases) freeze weight in a world-space sphere brush.
+    @discardableResult
+    func maskPaint(at world: SIMD3<Float>, radius: Float, erase: Bool,
+                   voxelContext: Bool) -> Bool {
+        guard let handle = contextMask(voxelContext: voxelContext, create: true)
+        else { return false }
+        // Hard-edged freeze (constant falloff): a soft edge leaves cells
+        // PARTIALLY frozen, and partial weight dithers edits through — the
+        // opposite of what "frozen" promises.
+        var brush = voxelBrush(size: Int32(max(1, min(15, radius / Self.voxelSize * 2))))
+        guard clay_mask_paint(handle, [world.x, world.y, world.z], &brush,
+                              erase ? 0 : 1) == CLAY_OK else { return false }
+        maskVersion += 1
+        if voxelContext { rebuildVoxelMesh() } // refresh the freeze tint
+        commit()
+        scheduleAutosave()
+        return true
+    }
+
+    func maskPaintedCount(voxelContext: Bool) -> Int {
+        guard let handle = contextMask(voxelContext: voxelContext, create: false)
+        else { return 0 }
+        var count: size_t = 0
+        _ = clay_mask_painted_count(handle, &count)
+        return count
+    }
+
+    func clearMask(voxelContext: Bool) {
+        guard let handle = contextMask(voxelContext: voxelContext, create: false)
+        else { return }
+        _ = clay_mask_clear(handle)
+        maskVersion += 1
+        if voxelContext { rebuildVoxelMesh() }
+        commit()
+        scheduleAutosave()
+    }
+
+    func invertMask(voxelContext: Bool) {
+        guard let handle = contextMask(voxelContext: voxelContext, create: false)
+        else { return }
+        _ = clay_mask_invert(handle)
+        maskVersion += 1
+        if voxelContext { rebuildVoxelMesh() }
+        commit()
+        scheduleAutosave()
+    }
+
     /// 3DCoat-style voxel sculpt verbs (task 6.2 follow-up). Place routes
     /// to the stamp brush; the rest call clay_voxel_sculpt_*.
     enum VoxelVerb: String, CaseIterable, Identifiable {
@@ -1652,6 +1836,7 @@ final class ClayEngine {
 
         var brush = voxelBrush(size: brushSize)
         brush.falloff = Int32(CLAY_BRUSH_FALLOFF_SMOOTH.rawValue)
+        brush.mask = gatingMask(voxelContext: true)
         let at: [Int32] = [cell.x, cell.y, cell.z]
         let n: [Float] = [normal.x, normal.y, normal.z]
         let d: [Float] = [displacement.x, displacement.y, displacement.z]
@@ -1722,6 +1907,7 @@ final class ClayEngine {
         if selfBracketed { beginVoxelEdits() }
         defer { if selfBracketed { endVoxelEdits() } }
         var brush = voxelBrush(size: brushSize)
+        brush.mask = gatingMask(voxelContext: true)
         let index = paletteIndex(for: color)
         for target in mirrorCells(of: cell) {
             let cellArray: [Int32] = [target.x, target.y, target.z]
@@ -1899,6 +2085,20 @@ final class ClayEngine {
             } ?? [Float](repeating: 0.8, count: vertexCount * 3)
             voxelIndices = Array(UnsafeBufferPointer(start: clay_mesh_indices(mesh),
                                                      count: indexCount))
+            // Freeze tint: masked vertices shift toward ice blue so frozen
+            // regions read at a glance (3DCoat convention).
+            if let handle = gatingMask(voxelContext: true), vertexCount > 0 {
+                var weights = [Float](repeating: 0, count: vertexCount)
+                if clay_mask_sample_many(handle, voxelPositions, vertexCount,
+                                         &weights) == CLAY_OK {
+                    for i in 0..<vertexCount where weights[i] > 0.01 {
+                        let w = min(weights[i], 1) * 0.75
+                        voxelColors[i * 3] = voxelColors[i * 3] * (1 - w) + 0.45 * w
+                        voxelColors[i * 3 + 1] = voxelColors[i * 3 + 1] * (1 - w) + 0.75 * w
+                        voxelColors[i * 3 + 2] = voxelColors[i * 3 + 2] * (1 - w) + 1.0 * w
+                    }
+                }
+            }
         }
         voxelMeshVersion += 1
     }
@@ -2532,6 +2732,7 @@ final class ClayEngine {
         fieldCache = nil
         fieldCacheVersion += 1
         _ = check(clay_document_enable_undo(newDoc))
+        maskHandles.removeAll()
         voxelGrid = nil
         voxelLayer = 0
         paletteIndexByColor.removeAll()

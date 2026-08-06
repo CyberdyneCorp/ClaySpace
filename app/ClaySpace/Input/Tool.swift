@@ -7,6 +7,8 @@ enum Tool: String, CaseIterable, Identifiable {
     case sculpt
     case shape
     case spray
+    case trim
+    case freeze
     case erase
     case paint
     case select
@@ -21,6 +23,8 @@ enum Tool: String, CaseIterable, Identifiable {
         case .sculpt: "shippingbox"
         case .shape: "cube"
         case .spray: "wand.and.rays"
+        case .trim: "scissors"
+        case .freeze: "snowflake"
         case .erase: "eraser"
         case .paint: "paintbrush.pointed"
         case .select: "square.dashed"

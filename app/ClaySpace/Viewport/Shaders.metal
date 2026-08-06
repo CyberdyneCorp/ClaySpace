@@ -326,8 +326,10 @@ static float sdItemSingle(float3 p, constant SceneItem &it, constant float4 *pts
         case PRIM_ROUND_CONE: d = sdRoundConeV(q, it.params.x, it.params.y, it.params.z); break;
         case PRIM_ELLIPSOID: d = sdEllipsoidBound(q, it.params.xyz); break;
         case PRIM_HEX_PRISM: d = sdHexPrism(q, it.params.xy); break;
-        case PRIM_SPHERE:
-        default: d = length(q) - it.params.x; break;
+        case PRIM_SPHERE: d = length(q) - it.params.x; break;
+        // Unknown prims (extrude cuts, revolves) have no analytic kernel
+        // here: contribute nothing and let the bake carry them.
+        default: return 1e9;
     }
     return d * s - it.rounding;
 }

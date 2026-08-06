@@ -203,12 +203,14 @@ struct EditListPanel: View {
 
     private func symbol(for item: SceneItem) -> String {
         if item.prim == 14 { return "scribble" }
+        if item.prim == 15 { return "scissors" } // cut prism (extrude)
         let prim = clay_prim(UInt32(max(item.prim, 0)))
         return PrimKind.allCases.first { $0.clayPrim == prim }?.symbol ?? "circle"
     }
 
     private func label(for item: SceneItem) -> String {
         if item.prim == 14 { return "Stroke · \(Int(item.params.y)) pts" }
+        if item.prim == 15 { return "Cut" }
         let prim = clay_prim(UInt32(max(item.prim, 0)))
         return PrimKind.allCases.first { $0.clayPrim == prim }?.title ?? "Shape"
     }

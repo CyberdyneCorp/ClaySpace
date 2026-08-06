@@ -244,6 +244,26 @@ final class ViewportState {
     var voxelVerb: ClayEngine.VoxelVerb = .place
     /// Spray-tool stroke feel (ZBrush-style stamp engine).
     var sprayFeel = ClayEngine.SprayFeel()
+
+    /// Trim tool (ZBrush Trim Rect/Circle/Lasso): marquee shape + side.
+    enum TrimShape: String, CaseIterable, Identifiable {
+        case rect, circle, lasso
+        var id: String { rawValue }
+        var title: String { rawValue.capitalized }
+    }
+    enum TrimOverlay: Equatable {
+        case rect(CGRect)
+        case circle(center: CGPoint, radius: CGFloat)
+        case lasso([CGPoint])
+    }
+    var trimShape: TrimShape = .rect
+    var trimKeep = false
+    var trimOverlay: TrimOverlay?
+    fileprivate var trimStart: CGPoint?
+    fileprivate var trimLassoPoints: [CGPoint] = []
+
+    /// Freeze (mask) tool: paint or erase frozen weight.
+    var freezeErase = false
     fileprivate var voxelStrokeNormal = SIMD3<Float>(0, 1, 0)
     fileprivate var voxelDragPlane: (point: SIMD3<Float>, normal: SIMD3<Float>)?
     fileprivate var lastVoxelDragPoint: SIMD3<Float>?
@@ -583,10 +603,15 @@ extension ViewportState: PencilToolSink {
 
         if mode == .voxel {
             if activeTool == .select || activeTool == .move
-                || activeTool == .shape || activeTool == .spray {
+                || activeTool == .shape || activeTool == .spray
+                || activeTool == .trim {
                 showToast(activeTool == .select || activeTool == .move
                           ? "Select works in Smooth mode"
                           : "Shapes work in Smooth mode")
+                return
+            }
+            if activeTool == .freeze {
+                freezePaint(at: point, pressure: max(pressure, 0.1))
                 return
             }
             lastVoxelCell = nil
@@ -716,6 +741,22 @@ extension ViewportState: PencilToolSink {
             return
         }
 
+        // Trim tool: marquee from touch-down; the cut resolves on lift.
+        if activeTool == .trim {
+            trimStart = point
+            trimLassoPoints = [point]
+            trimOverlay = trimShape == .lasso ? .lasso([point])
+                : trimShape == .circle ? .circle(center: point, radius: 0)
+                : .rect(CGRect(origin: point, size: .zero))
+            return
+        }
+
+        // Freeze tool: paint mask weight at the surface under the pencil.
+        if activeTool == .freeze {
+            freezePaint(at: point, pressure: max(pressure, 0.1))
+            return
+        }
+
         // Spray tool: collect the drag; stamps resolve on lift.
         if activeTool == .spray {
             guard let ray = ray(through: point) else { return }
@@ -784,6 +825,30 @@ extension ViewportState: PencilToolSink {
         pencilPeakPressure = max(pencilPeakPressure, pressure)
         if mode == .sdf, activeTool == .shape, gizmoDrag == nil {
             updateShapePreview(at: point)
+            return
+        }
+        if activeTool == .freeze, gizmoDrag == nil {
+            freezePaint(at: point, pressure: max(pressure, 0.1))
+            return
+        }
+        if mode == .sdf, activeTool == .trim, gizmoDrag == nil, let start = trimStart {
+            switch trimShape {
+            case .rect:
+                trimOverlay = .rect(CGRect(x: min(start.x, point.x),
+                                           y: min(start.y, point.y),
+                                           width: abs(point.x - start.x),
+                                           height: abs(point.y - start.y)))
+            case .circle:
+                trimOverlay = .circle(center: start,
+                                      radius: hypot(point.x - start.x,
+                                                    point.y - start.y))
+            case .lasso:
+                if let last = trimLassoPoints.last,
+                   hypot(point.x - last.x, point.y - last.y) > 6 {
+                    trimLassoPoints.append(point)
+                    trimOverlay = .lasso(trimLassoPoints)
+                }
+            }
             return
         }
         if mode == .sdf, activeTool == .spray, gizmoDrag == nil, !spraySamples.isEmpty {
@@ -945,6 +1010,9 @@ extension ViewportState: PencilToolSink {
         gizmoDrag = nil
         shapePreview = nil
         if !spraySamples.isEmpty { applySpray(at: pencilStart ?? .zero) }
+        trimStart = nil
+        trimLassoPoints = []
+        trimOverlay = nil
         engine.endVoxelEdits() // commit a cancelled voxel drag's step
         if engine.isEditingParams {
             engine.endParamEdit() // commit the drag so far
@@ -972,6 +1040,10 @@ extension ViewportState: PencilToolSink {
         }
         if activeTool == .spray, gizmoDrag == nil, !spraySamples.isEmpty {
             applySpray(at: point)
+            return
+        }
+        if activeTool == .trim, gizmoDrag == nil, trimStart != nil {
+            applyTrim(endingAt: point)
             return
         }
         if engine.isEditingParams {
@@ -1028,6 +1100,78 @@ extension ViewportState: PencilToolSink {
         default: break
         }
         return Array(p.prefix(max(ClayEngine.paramCount(forPrim: prim), 1)))
+    }
+
+    /// Paints freeze weight at the surface under the pencil (both modes).
+    fileprivate func freezePaint(at point: CGPoint, pressure: Float) {
+        guard let ray = ray(through: point) else { return }
+        let world: SIMD3<Float>?
+        if mode == .voxel {
+            world = engine.voxelPick(origin: ray.origin, direction: ray.direction,
+                                     buildPlane: buildPlane)
+                .map { (SIMD3<Float>($0.hit) + SIMD3(repeating: 0.5)) * ClayEngine.voxelSize }
+        } else {
+            world = engine.raycast(origin: ray.origin, direction: ray.direction)?.position
+                ?? groundPoint(on: ray)
+        }
+        guard let world else { return }
+        _ = engine.maskPaint(at: world, radius: radius(for: pressure),
+                             erase: freezeErase, voxelContext: mode == .voxel)
+    }
+
+    /// Unprojects the marquee onto the plane through the scene's center and
+    /// applies the prism cut.
+    fileprivate func applyTrim(endingAt point: CGPoint) {
+        defer { trimStart = nil; trimLassoPoints = []; trimOverlay = nil }
+        guard let start = trimStart else { return }
+        let bounds = engine.sceneAABB()
+        let planePoint = (bounds.min + bounds.max) * 0.5
+        let basis = camera.basis
+        let plane = (point: planePoint, normal: basis.forward)
+        func unproject(_ screen: CGPoint) -> SIMD3<Float>? {
+            guard let ray = ray(through: screen) else { return nil }
+            return intersect(ray: ray, plane: plane)
+        }
+
+        switch trimShape {
+        case .rect:
+            guard let a = unproject(start), let b = unproject(point) else { return }
+            let delta = b - a
+            let halfWidth = abs(simd_dot(delta, basis.right)) / 2
+            let halfHeight = abs(simd_dot(delta, basis.up)) / 2
+            guard halfWidth > 0.02, halfHeight > 0.02 else { return }
+            cut(shape: .rect(halfWidth: halfWidth, halfHeight: halfHeight),
+                origin: (a + b) * 0.5, basis: basis)
+        case .circle:
+            guard let center = unproject(start), let edge = unproject(point) else { return }
+            let radius = simd_distance(center, edge)
+            guard radius > 0.02 else { return }
+            cut(shape: .circle(radius: radius), origin: center, basis: basis)
+        case .lasso:
+            guard trimLassoPoints.count >= 3 else { return }
+            let worldPoints = trimLassoPoints.compactMap { unproject($0) }
+            guard worldPoints.count >= 3 else { return }
+            let centroid = worldPoints.reduce(SIMD3<Float>.zero, +)
+                / Float(worldPoints.count)
+            var polygon: [Float] = []
+            for p in worldPoints {
+                let d = p - centroid
+                polygon.append(simd_dot(d, basis.right))
+                polygon.append(simd_dot(d, basis.up))
+            }
+            cut(shape: .lasso(polygonXY: polygon), origin: centroid, basis: basis)
+        }
+    }
+
+    private func cut(shape: ClayEngine.CutShape, origin: SIMD3<Float>,
+                     basis: (right: SIMD3<Float>, up: SIMD3<Float>, forward: SIMD3<Float>)) {
+        if engine.applyCut(origin: origin, right: basis.right, up: basis.up,
+                           forward: basis.forward, shape: shape, keep: trimKeep) {
+            emitHaptic(.completed, at: trimStart ?? .zero)
+            showToast(trimKeep ? "Kept the marked region" : "Cut")
+        } else if let error = engine.lastError {
+            showToast("Cut failed: \(error)")
+        }
     }
 
     /// Resolves the collected spray samples into stamps of the current
@@ -1143,14 +1287,14 @@ extension ViewportState: PencilToolSink {
         let hoverPressure: Float = 0.35 // preview at a middling press
         let hit = engine.raycast(origin: ray.origin, direction: ray.direction)
         switch activeTool {
-        case .sculpt, .shape, .spray:
+        case .sculpt, .shape, .spray, .freeze:
             guard let target = hit?.position ?? groundPoint(on: ray) else {
                 hoverGhost = nil
                 return
             }
             let r = activeTool == .shape ? 0.14 + hoverPressure * 0.42
                 : activeTool == .spray ? 0.09 + hoverPressure * 0.25
-                : radius(for: hoverPressure, altitude: altitude)
+                : radius(for: hoverPressure, altitude: altitude) // sculpt/freeze
             hoverGhost = ghost(at: target, worldRadius: r, isVoxel: false)
         case .erase, .paint:
             guard let hit else { hoverGhost = nil; return }

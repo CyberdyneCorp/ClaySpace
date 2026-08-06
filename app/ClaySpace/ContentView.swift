@@ -27,6 +27,7 @@ struct ContentView: View {
                 MetalViewport(state: state)
                     .ignoresSafeArea()
                 hoverGhostOverlay
+                trimOverlay
                 gizmoOverlay
                 gizmoModePicker
                 topBar
@@ -49,6 +50,12 @@ struct ContentView: View {
                         if state.mode == .sdf
                             && (state.activeTool == .shape || state.activeTool == .spray) {
                             ShapeBar(state: state)
+                        }
+                        if state.mode == .sdf && state.activeTool == .trim {
+                            TrimBar(state: state)
+                        }
+                        if state.activeTool == .freeze {
+                            FreezeBar(state: state)
                         }
                         PaletteBar(state: state)
                         if state.mode == .voxel {
@@ -302,6 +309,40 @@ struct ContentView: View {
                     .frame(width: 16, height: 16)
                     .overlay(Circle().strokeBorder(.white, lineWidth: 1.5))
                     .position(gizmo.center)
+            }
+            .allowsHitTesting(false)
+        }
+    }
+
+    /// Trim marquee (rect/circle/lasso) while the pencil draws it.
+    @ViewBuilder
+    private var trimOverlay: some View {
+        if let overlay = state.trimOverlay {
+            ZStack(alignment: .topLeading) {
+                Color.clear
+                switch overlay {
+                case .rect(let rect):
+                    Rectangle()
+                        .strokeBorder(Color.orange,
+                                      style: StrokeStyle(lineWidth: 1.5, dash: [6, 4]))
+                        .frame(width: max(rect.width, 1), height: max(rect.height, 1))
+                        .position(x: rect.midX, y: rect.midY)
+                case .circle(let center, let radius):
+                    Circle()
+                        .strokeBorder(Color.orange,
+                                      style: StrokeStyle(lineWidth: 1.5, dash: [6, 4]))
+                        .frame(width: max(radius * 2, 1), height: max(radius * 2, 1))
+                        .position(center)
+                case .lasso(let points):
+                    Path { path in
+                        guard let first = points.first else { return }
+                        path.move(to: first)
+                        for p in points.dropFirst() { path.addLine(to: p) }
+                        path.closeSubpath()
+                    }
+                    .stroke(Color.orange,
+                            style: StrokeStyle(lineWidth: 1.5, dash: [6, 4]))
+                }
             }
             .allowsHitTesting(false)
         }

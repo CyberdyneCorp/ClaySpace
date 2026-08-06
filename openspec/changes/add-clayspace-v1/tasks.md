@@ -64,6 +64,10 @@
 - [ ] 7.4 Edit-list inspector panel: reorder, group/ungroup, per-item op/blend/color editing — IN PROGRESS: EditListPanel in the inspector (eval-order list, tap-select with viewport glow, drag-reorder via clay_layer_move, swipe/button delete via clay_remove_node, per-item op + blend profile/k via clay_layer_set_op_blend, color via palette recolor), all one-undo-step with mirror-replay undo/redo; group/ungroup pending (needs group nodes in the app model)
 - [x] 7.5 Stroke editing UI (select stroke, adjust radius/color/blend post-hoc) — thickness slider scales every point radius via clay_layer_set_stroke_points (commit-on-release, one undo step; deleted strokes orphan their pool slice to preserve the LIFO-tail undo invariant); color via palette, blend via the panel's profile/k controls
 
+### Brush suite follow-ups (post 6.x/7.x, from device use)
+- [x] Trim tool (ZBrush Trim Rect/Circle/Lasso via clay_cut_create): marquee overlay -> cut frame on the plane through the scene center, camera basis, prism cut as an ordinary undoable item; Remove|Keep = SUBTRACT|INTERSECT; preview inert until the bake lands (no analytic extrude kernel — unknown prims now contribute nothing instead of falling back to a sphere)
+- [x] Freeze tool (clay_mask): hard-edged world-space mask brush per layer (voxel layer in Voxels mode, active SDF layer in Smooth), gating stamp brushes, sculpt verbs and spray stamps; Invert/Clear; frozen voxels tint ice blue via clay_mask_sample_many at mesh rebuild; masks ride the document (verified save/load); mask paints are tool state (ClayCore does not journal mask ops)
+
 ## 8. Materials & color
 
 - [x] 8.1 Per-document palette with swatch editing; active-color plumbing to both modes — starter palette + active color drives SDF strokes and voxel stamps (swatch editing pending)
