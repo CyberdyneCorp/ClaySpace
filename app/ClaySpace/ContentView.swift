@@ -11,6 +11,7 @@ struct ContentView: View {
         restoreDocument: !ProcessInfo.processInfo.arguments.contains("-resetDocument"))
     @State private var showGestures = false
     @State private var showExport = false
+    @State private var showDocuments = false
     @Environment(\.scenePhase) private var scenePhase
     @AppStorage("hasSeenGesturesSheet") private var hasSeenGestures = false
     private let coreVersion: String = {
@@ -71,6 +72,9 @@ struct ContentView: View {
         .animation(.easeOut(duration: 0.2), value: state.inspectorVisible)
         .sheet(isPresented: $showGestures) { GesturesSheet() }
         .sheet(isPresented: $showExport) { ExportSheet(engine: state.engine) }
+        .sheet(isPresented: $showDocuments) {
+            DocumentsSheet(engine: state.engine) { state.showToast($0) }
+        }
         .onChange(of: scenePhase) { _, phase in
             if phase == .background || phase == .inactive {
                 state.engine.saveNow()
@@ -89,15 +93,26 @@ struct ContentView: View {
             Rectangle()
                 .fill(.orange)
                 .frame(width: 11, height: 11)
-            VStack(alignment: .leading, spacing: 0) {
-                Text("ClaySpace")
-                    .font(.system(size: 19, weight: .semibold, design: .serif))
-                    .fixedSize()
-                Text(state.engine.isDirty ? "edited" : "saved")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.secondary)
-                    .accessibilityIdentifier("saveStatus")
+            Button {
+                showDocuments = true
+            } label: {
+                VStack(alignment: .leading, spacing: 0) {
+                    HStack(spacing: 4) {
+                        Text(state.engine.documentName)
+                            .font(.system(size: 17, weight: .semibold, design: .serif))
+                            .foregroundStyle(.primary)
+                            .lineLimit(1)
+                        Image(systemName: "chevron.down")
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundStyle(.secondary)
+                    }
+                    Text(state.engine.isDirty ? "edited" : "saved")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("saveStatus")
+                }
             }
+            .accessibilityIdentifier("documentsButton")
             Spacer(minLength: 8)
             Picker("Mode", selection: Binding(
                 get: { state.mode },

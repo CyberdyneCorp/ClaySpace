@@ -225,6 +225,42 @@ final class ClayEngineTests: XCTestCase {
         }
     }
 
+    func testNewOpenDeleteDocumentRoundTrip() {
+        let engine = ClayEngine()
+        let suffix = UUID().uuidString.prefix(6)
+        // Work under unique names so parallel/leftover state can't collide.
+        engine.beginStroke(at: SIMD3(1.3, 0.8, 0), radius: 0.2,
+                           op: CLAY_OP_ADD, blendK: 0.02, color: ClayEngine.clayColor)
+        engine.endStroke()
+        let firstName = "Test-\(suffix)-A"
+        XCTAssertTrue(engine.saveDocument(documentURL: ClayEngine.documentURL(named: firstName),
+                                          mirrorURL: ClayEngine.mirrorURL(named: firstName)))
+
+        // New document: fresh seeded scene under a new name; old one on disk.
+        let newName = engine.newDocument()
+        XCTAssertEqual(engine.items.count, 1, "fresh sculpt has only the base ball")
+        XCTAssertNotEqual(newName, firstName)
+        XCTAssertTrue(ClayEngine.listDocuments().contains { $0.name == firstName })
+        XCTAssertTrue(ClayEngine.listDocuments().contains { $0.name == newName })
+
+        // Open the first again: the stroke is back.
+        XCTAssertTrue(engine.openDocument(named: firstName))
+        XCTAssertEqual(engine.items.count, 2)
+        XCTAssertEqual(engine.documentName, firstName)
+
+        // The open document refuses deletion; others delete.
+        XCTAssertFalse(engine.deleteDocument(named: firstName))
+        XCTAssertTrue(engine.deleteDocument(named: newName))
+        XCTAssertFalse(ClayEngine.listDocuments().contains { $0.name == newName })
+
+        // Cleanup.
+        _ = engine.newDocument()
+        _ = engine.deleteDocument(named: firstName)
+        for doc in ClayEngine.listDocuments() where doc.name.hasPrefix("Untitled") {
+            _ = engine.deleteDocument(named: doc.name)
+        }
+    }
+
     func testSaveLoadRestoresSculptAndStaysEditable() throws {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("persist_\(UUID().uuidString)")

@@ -24,7 +24,7 @@ final class SculptUITests: XCTestCase {
     @MainActor
     func testLaunchShowsShellAndSeededDocument() {
         let app = launch()
-        XCTAssertTrue(app.staticTexts["ClaySpace"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["documentsButton"].waitForExistence(timeout: 10))
         let count = app.staticTexts["shapeCount"]
         XCTAssertTrue(count.waitForExistence(timeout: 5))
         XCTAssertEqual(count.label, "1", "the seeded base ball")
@@ -56,7 +56,7 @@ final class SculptUITests: XCTestCase {
         XCTAssertTrue(count.wait(for: \.label, toEqual: "4", timeout: 6),
                       "stepper/mirror button taps must not sculpt (chrome swallow)")
         Thread.sleep(forTimeInterval: 1.5)
-        XCTAssertTrue(app.staticTexts["ClaySpace"].exists,
+        XCTAssertTrue(app.buttons["documentsButton"].exists,
                       "app is alive after radial+mirror renders and bakes")
     }
 
@@ -75,7 +75,7 @@ final class SculptUITests: XCTestCase {
         XCTAssertTrue(waitForNonZero(voxels, timeout: 5), "tap stamped voxels")
         app.coordinate(withNormalizedOffset: CGVector(dx: 0.2, dy: 0.7)).tap()
         app.coordinate(withNormalizedOffset: CGVector(dx: 0.24, dy: 0.72)).tap()
-        XCTAssertTrue(app.staticTexts["ClaySpace"].exists, "raster pass renders, app alive")
+        XCTAssertTrue(app.buttons["documentsButton"].exists, "raster pass renders, app alive")
         Thread.sleep(forTimeInterval: 2.6) // let autosave persist the grid
     }
 

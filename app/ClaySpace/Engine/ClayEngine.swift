@@ -220,10 +220,23 @@ final class ClayEngine {
     }
 
     init(restoreFromDefault: Bool = false) {
-        if restoreFromDefault,
-           loadDocument(documentURL: Self.defaultDocumentURL,
-                        mirrorURL: Self.defaultMirrorURL) {
-            return
+        if restoreFromDefault {
+            // Legacy migration: the pre-browser single working document.
+            let legacyDoc = Self.documentsDirectory.appendingPathComponent("Current.clayspace")
+            let legacyMirror = Self.documentsDirectory.appendingPathComponent("Current.claymirror")
+            if FileManager.default.fileExists(atPath: legacyDoc.path),
+               !FileManager.default.fileExists(atPath: Self.documentURL(named: "Untitled").path) {
+                try? FileManager.default.moveItem(at: legacyDoc,
+                                                  to: Self.documentURL(named: "Untitled"))
+                try? FileManager.default.moveItem(at: legacyMirror,
+                                                  to: Self.mirrorURL(named: "Untitled"))
+            }
+            let name = UserDefaults.standard.string(forKey: Self.lastDocumentKey) ?? "Untitled"
+            if loadDocument(documentURL: Self.documentURL(named: name),
+                            mirrorURL: Self.mirrorURL(named: name)) {
+                documentName = name
+                return
+            }
         }
         doc = clay_document_create()
         guard let doc else { return }
@@ -932,14 +945,22 @@ final class ClayEngine {
 
     // MARK: Persistence (project-documents spec: autosave, restore)
 
-    static var defaultDocumentURL: URL {
+    static var documentsDirectory: URL {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Current.clayspace")
     }
-    static var defaultMirrorURL: URL {
-        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Current.claymirror")
+    static func documentURL(named name: String) -> URL {
+        documentsDirectory.appendingPathComponent("\(name).clayspace")
     }
+    static func mirrorURL(named name: String) -> URL {
+        documentsDirectory.appendingPathComponent("\(name).claymirror")
+    }
+    private static let lastDocumentKey = "lastDocumentName"
+
+    /// The open document's name (its filename stem in Documents).
+    private(set) var documentName = "Untitled"
+
+    static var defaultDocumentURL: URL { documentURL(named: "Untitled") }
+    static var defaultMirrorURL: URL { mirrorURL(named: "Untitled") }
 
     private(set) var lastSavedVersion = -1
     private(set) var lastSavedAt: Date?
@@ -976,8 +997,9 @@ final class ClayEngine {
     /// Saves the document + mirror sidecar. Refused mid-gesture (an open
     /// undo group must not hit disk).
     @discardableResult
-    func saveDocument(documentURL: URL = ClayEngine.defaultDocumentURL,
-                      mirrorURL: URL = ClayEngine.defaultMirrorURL) -> Bool {
+    func saveDocument(documentURL: URL? = nil, mirrorURL: URL? = nil) -> Bool {
+        let documentURL = documentURL ?? Self.documentURL(named: documentName)
+        let mirrorURL = mirrorURL ?? Self.mirrorURL(named: documentName)
         guard let doc, !isStroking, !isTransforming else { return false }
         guard check(clay_document_save(doc, documentURL.path)) else { return false }
         do {
@@ -1075,6 +1097,109 @@ final class ClayEngine {
         return true
     }
 
+    // MARK: Document management (task 2.6 — new/open/list/delete)
+
+    struct DocumentInfo: Identifiable {
+        var name: String
+        var modified: Date
+        var id: String { name }
+    }
+
+    static func listDocuments() -> [DocumentInfo] {
+        let fm = FileManager.default
+        let urls = (try? fm.contentsOfDirectory(at: documentsDirectory,
+                                                includingPropertiesForKeys: [.contentModificationDateKey]))
+            ?? []
+        return urls.filter { $0.pathExtension == "clayspace" }
+            .map { url in
+                let date = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?
+                    .contentModificationDate ?? .distantPast
+                return DocumentInfo(name: url.deletingPathExtension().lastPathComponent,
+                                    modified: date)
+            }
+            .sorted { $0.modified > $1.modified }
+    }
+
+    private func rememberCurrentDocument() {
+        UserDefaults.standard.set(documentName, forKey: Self.lastDocumentKey)
+    }
+
+    /// Resets the engine to a fresh seeded document in memory.
+    private func resetToFreshDocument() {
+        if let old = doc { clay_document_destroy(old) }
+        doc = clay_document_create()
+        layer = 0
+        items = []
+        strokePoints = []
+        nodeIDs = []
+        itemAABBs = []
+        localBounds = []
+        undoLog = []
+        redoOps = []
+        activeStroke = nil
+        transformIndex = nil
+        fieldCache = nil
+        fieldCacheVersion += 1
+        voxelGrid = nil
+        voxelLayer = 0
+        paletteIndexByColor.removeAll()
+        voxelPositions = []; voxelNormals = []; voxelColors = []; voxelIndices = []
+        voxelMeshVersion += 1
+        mirrorAxes = 0
+        radialCount = 0
+        guard let doc else { return }
+        var layerId: clay_layer_id = 0
+        guard check(clay_add_sdf_layer(doc, "Clay", &layerId)) else { return }
+        layer = layerId
+        addPrimitive(CLAY_PRIM_SPHERE, params: [0.8],
+                     at: SIMD3(0, 0.8, 0), op: CLAY_OP_ADD,
+                     blendK: 0, color: Self.clayColor, recordMirror: true)
+        _ = check(clay_document_enable_undo(doc))
+        version += 1
+    }
+
+    /// Saves the current document, then starts a fresh one under a unique
+    /// name and saves it immediately so it appears in the list.
+    @discardableResult
+    func newDocument() -> String {
+        saveNow()
+        let existing = Set(Self.listDocuments().map(\.name))
+        var name = "Untitled"
+        var counter = 2
+        while existing.contains(name) {
+            name = "Untitled \(counter)"
+            counter += 1
+        }
+        resetToFreshDocument()
+        documentName = name
+        lastSavedVersion = -1
+        saveDocument()
+        rememberCurrentDocument()
+        scheduleBake(debounceMilliseconds: 10)
+        return name
+    }
+
+    /// Saves the current document and opens another by name.
+    @discardableResult
+    func openDocument(named name: String) -> Bool {
+        guard name != documentName else { return true }
+        saveNow()
+        guard loadDocument(documentURL: Self.documentURL(named: name),
+                           mirrorURL: Self.mirrorURL(named: name)) else { return false }
+        documentName = name
+        rememberCurrentDocument()
+        return true
+    }
+
+    /// Deletes a document's files. The open document cannot be deleted.
+    @discardableResult
+    func deleteDocument(named name: String) -> Bool {
+        guard name != documentName else { return false }
+        try? FileManager.default.removeItem(at: Self.documentURL(named: name))
+        try? FileManager.default.removeItem(at: Self.mirrorURL(named: name))
+        return true
+    }
+
     /// Debounced autosave, armed by the same commits that trigger bakes.
     private func scheduleAutosave() {
         autosaveTask?.cancel()
@@ -1089,6 +1214,7 @@ final class ClayEngine {
     func saveNow() {
         autosaveTask?.cancel()
         if isDirty { saveDocument() }
+        rememberCurrentDocument()
     }
 
     nonisolated private static func bakeField(documentPath: String,
