@@ -561,21 +561,29 @@ static float4 mapShade(float3 p, FieldCtx ctx) {
 // Field-derived AO (task 4.2): probe outward along the normal; occlusion
 // is how much the field undercuts the probe distances.
 static float calcAO(float3 p, float3 n, FieldCtx ctx) {
+    // Three taps (docs/06 §3.8): the two farthest of the original five
+    // contributed under 15% of the estimate at our scene scale.
     float occ = 0.0, sca = 1.0;
-    for (int i = 1; i <= 5; i++) {
+    for (int i = 1; i <= 3; i++) {
         float h = 0.012 + 0.11 * float(i);
         occ += (h - mapDist(p + n * h, ctx)) * sca;
         sca *= 0.72;
     }
-    return saturate(1.0 - 1.6 * occ);
+    return saturate(1.0 - 1.7 * occ);
 }
 
 // Soft shadow toward the light: penumbra from the closest-approach ratio.
+// With a cache, the march samples it alone (docs/06 §3.8) — the analytic
+// tail is the newest few items, whose shadows land one bake later.
+static float shadowDist(float3 p, FieldCtx ctx) {
+    return ctx.gridOrigin.w > 0.5 ? sampleCache(p, ctx) : mapDist(p, ctx);
+}
+
 static float softShadow(float3 ro, float3 rd, FieldCtx ctx) {
     float res = 1.0;
     float t = 0.04;
     for (int i = 0; i < 24 && t < 6.0; i++) {
-        float d = mapDist(ro + rd * t, ctx);
+        float d = shadowDist(ro + rd * t, ctx);
         if (d < 0.001) return 0.0;
         res = min(res, 8.0 * d / t);
         t += clamp(d, 0.02, 0.35);

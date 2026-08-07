@@ -1769,8 +1769,19 @@ final class ClayEngine {
         await performBake(editVersion: version)
     }
 
+    @ObservationIgnored private var bakeInFlight = false
+
     private func performBake(editVersion: Int) async {
         guard let doc, !isStroking, !isTransforming else { return }
+        // Single flight: performBake suspends at its awaits, and two
+        // interleaved instances (debounced task + bakeNow) would race for
+        // the pending flags and overwrite each other's result.
+        if bakeInFlight {
+            scheduleBakeKeepingDirty(debounceMilliseconds: 50)
+            return
+        }
+        bakeInFlight = true
+        defer { bakeInFlight = false }
         // Nothing pending and a current cache: this is a duplicate firing
         // (bakeNow already consumed the debounced task's work) — skip.
         if !pendingBakeAll, pendingBakeRegion == nil,
@@ -2975,10 +2986,10 @@ final class ClayEngine {
     static func mirrorURL(named name: String) -> URL {
         documentsDirectory.appendingPathComponent("\(name).claymirror")
     }
-    static func innerDocument(of package: URL) -> URL {
+    nonisolated static func innerDocument(of package: URL) -> URL {
         package.appendingPathComponent("scene.clay")
     }
-    static func innerMirror(of package: URL) -> URL {
+    nonisolated static func innerMirror(of package: URL) -> URL {
         package.appendingPathComponent("mirror.bin")
     }
 
@@ -3470,7 +3481,59 @@ final class ClayEngine {
         autosaveTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(2))
             guard !Task.isCancelled, let self, self.isDirty else { return }
-            self.saveDocument()
+            self.autosaveInBackground()
+        }
+    }
+
+    @ObservationIgnored private var saveIOTask: Task<Bool, Never>?
+
+    /// Autosave with the file IO off the main thread (docs/06 §3.7): the
+    /// document C-serializes to a temp file ON main (the doc pointer is
+    /// not thread-safe) — that is the cheap binary dump — while mkdir,
+    /// the move into the package, and the mirror write run detached.
+    /// isDirty clears only when the IO durably lands.
+    private func autosaveInBackground() {
+        guard let doc, !isStroking, !isTransforming, !isEditingParams else { return }
+        let signpost = Perf.signposter.beginInterval("save")
+        let temp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("autosave-\(UUID().uuidString).clay")
+        guard check(clay_document_save(doc, temp.path)) else {
+            Perf.signposter.endInterval("save", signpost)
+            return
+        }
+        let mirror = mirrorData()
+        let package = Self.documentURL(named: documentName)
+        let savedVersion = version
+        let previous = saveIOTask
+        saveIOTask = Task.detached(priority: .utility) {
+            _ = await previous?.value // saves land in order
+            do {
+                try FileManager.default.createDirectory(
+                    at: package, withIntermediateDirectories: true)
+                let scene = Self.innerDocument(of: package)
+                if FileManager.default.fileExists(atPath: scene.path) {
+                    _ = try FileManager.default.replaceItemAt(scene, withItemAt: temp)
+                } else {
+                    try FileManager.default.moveItem(at: temp, to: scene)
+                }
+                try mirror.write(to: Self.innerMirror(of: package), options: .atomic)
+                return true
+            } catch {
+                try? FileManager.default.removeItem(at: temp)
+                return false
+            }
+        }
+        Task { [weak self] in
+            let ok = await self?.saveIOTask?.value ?? false
+            guard let self else { return }
+            Perf.signposter.endInterval("save", signpost)
+            if ok, self.lastSavedVersion < savedVersion {
+                self.lastSavedVersion = savedVersion
+                self.lastSavedAt = Date()
+                self.uiVersion += 1 // saved/edited indicator flips
+            } else if !ok {
+                self.scheduleAutosave() // retry; the document stays dirty
+            }
         }
     }
 

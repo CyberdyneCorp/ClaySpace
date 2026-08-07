@@ -124,11 +124,21 @@ Effort: tiny each. Do after 2.1 (upscaling changes the budget math).
 - Caching `mapShade` colors between frames keyed on camera — invalidation
   complexity dwarfs the win once 2.1 lands.
 
-## 6. Suggested order
+## 6. Suggested order — EXECUTED 2026-08-07
 
-1. 4.12 instrumentation (half a day, makes the rest measurable)
-2. 2.3 safe-step scale (hours)
-3. 3.5 + 3.6 (hours each)
-4. 2.2 incremental bakes (the latency win users feel most)
-5. 2.1 MetalFX (spatial first, temporal after)
-6. 3.7, 3.8, then 2.4 if tail-heavy scenes still show up in signposts
+1. ~~4.12 instrumentation~~ — signposts (bake/bakePartial/voxelMesh/save)
+   + debug frame HUD (`-showPerfHUD YES`: draw cadence, GPU ms, items)
+2. ~~2.3 safe-step scale~~ — queried per bake/load, folded into the march
+3. ~~3.5 + 3.6~~ — session-throttled voxel mesh rebuilds; suffix-only
+   stroke-point uploads (4.9 hover-skip shipped alongside)
+4. ~~2.2 incremental bakes~~ — dirty-region slabs with full-bake safety
+   inversions; also fixed a pre-existing double-bake and a performBake
+   interleaving race (single flight now)
+5. ~~2.1 MetalFX spatial~~ — 0.72×/0.55× input reconstructed to native;
+   temporal (motion vectors) remains the open follow-up
+6. ~~3.7~~ off-main autosave IO (C serialize stays on main; dirty clears
+   on durable completion) · ~~3.8~~ cache-only shadows + 3-tap AO ·
+   **2.4 tile binning: deliberately not built** — re-evaluate from
+   signposts if long analytic tails still dominate after 2.2 shrank them
+
+Remaining engine-side headroom lives in ClayCore #3/#7 and task 3.1.
