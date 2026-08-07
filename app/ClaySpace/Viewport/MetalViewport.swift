@@ -356,9 +356,12 @@ final class MetalViewportView: UIView {
     /// itself shrinks (the pre-upscaler behavior).
     private var upscaling: Bool { renderer?.upscalingSupported ?? false }
     /// Offscreen input scale: below-native even idle — the scaler pays it
-    /// back — and lower still while touching.
+    /// back — and lower still while touching. Temporal reconstruction needs
+    /// a FIXED input size (resizing drops history), so it renders 0.64x
+    /// always: full-quality everywhere at roughly half the fragment cost.
     private var currentInputScale: CGFloat {
-        activeTouchCount > 0 ? 0.55 : 0.72
+        if renderer?.temporalSupported == true { return 0.64 }
+        return activeTouchCount > 0 ? 0.55 : 0.72
     }
 
     private func updateDrawableSize() {
@@ -372,6 +375,7 @@ final class MetalViewportView: UIView {
 
     private var lastDrawnInputScale: CGFloat = -1
     private var lastDrawnDarkMode: Bool?
+    private var settleFrames = 0
 
     @objc private func step(_ link: CADisplayLink) {
         let targetScale = activeTouchCount > 0 ? Self.interactionRenderScale : 1.0
@@ -387,15 +391,23 @@ final class MetalViewportView: UIView {
         let previewVersion = state.previewVersion
         let inputScale = upscaling ? currentInputScale : 1
         let darkMode = state.isDarkMode
-        guard camera != lastDrawnCamera
-                || inputScale != lastDrawnInputScale
-                || version != lastDrawnVersion
-                || selection != lastDrawnSelection
-                || light != lastDrawnLightAngle
-                || previewVersion != lastDrawnPreviewVersion
-                || state.engine.voxelMeshVersion != lastDrawnVoxelVersion
-                || darkMode != lastDrawnDarkMode
-                || metalLayer.drawableSize != lastDrawnSize else { return }
+        let changed = camera != lastDrawnCamera
+            || inputScale != lastDrawnInputScale
+            || version != lastDrawnVersion
+            || selection != lastDrawnSelection
+            || light != lastDrawnLightAngle
+            || previewVersion != lastDrawnPreviewVersion
+            || state.engine.voxelMeshVersion != lastDrawnVoxelVersion
+            || darkMode != lastDrawnDarkMode
+            || metalLayer.drawableSize != lastDrawnSize
+        if changed {
+            settleFrames = 8 // one full jitter cycle after motion stops
+        } else {
+            // Temporal history keeps sharpening for a few frames after the
+            // last real change; everything else stays strictly on-demand.
+            guard renderer?.temporalSupported == true, settleFrames > 0 else { return }
+            settleFrames -= 1
+        }
 
         state.engine.rebuildVoxelMeshIfDirty() // throttled voxel drags
 

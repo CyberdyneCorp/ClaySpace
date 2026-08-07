@@ -38,6 +38,11 @@ final class Renderer {
         var maskInvExtent: SIMD4<Float> // xyz = 1/extent
         var maskScale: SIMD4<Float>     // xyz = dims/maxResolution
         var previewBound: SIMD4<Float>  // xyz union-sphere center; w radius
+        var prevRight: SIMD4<Float> = .zero    // xyz prev basis; w = input width px
+        var prevUp: SIMD4<Float> = .zero       // xyz prev basis; w = input height px
+        var prevForward: SIMD4<Float> = .zero
+        var prevPosition: SIMD4<Float> = .zero // xyz prev camera; w = temporal active
+        var temporalInfo: SIMD4<Float> = .zero // xy jitter NDC; z prev lens; w prev ortho
     }
 
     static let maxItems = 256
@@ -84,6 +89,74 @@ final class Renderer {
     private var spatialScaler: MTLFXSpatialScaler?
     #endif
 
+    let temporalSupported: Bool
+    #if canImport(MetalFX)
+    private var temporalScaler: MTLFXTemporalScaler?
+    #endif
+    private var motionTexture: MTLTexture?
+    private var frameIndex = 0
+    private var pendingHistoryReset = true
+    private var prevCamera: (position: SIMD3<Float>, right: SIMD3<Float>,
+                             up: SIMD3<Float>, forward: SIMD3<Float>,
+                             lens: Float, ortho: Float)?
+
+    /// Radical-inverse (Halton) sequence: the 8-phase subpixel jitter the
+    /// temporal scaler integrates for detail reconstruction.
+    private static func halton(_ index: Int, _ base: Int) -> Float {
+        var result: Float = 0, f: Float = 1, i = index
+        while i > 0 {
+            f /= Float(base)
+            result += f * Float(i % base)
+            i /= base
+        }
+        return result
+    }
+
+    private func ensureTemporalScaler(inW: Int, inH: Int,
+                                      outW: Int, outH: Int) -> Bool {
+        #if canImport(MetalFX)
+        guard temporalSupported, inW > 0, inH > 0 else { return false }
+        if temporalScaler != nil, scalerSizes == (inW, inH, outW, outH) { return true }
+        let descriptor = MTLFXTemporalScalerDescriptor()
+        descriptor.inputWidth = inW
+        descriptor.inputHeight = inH
+        descriptor.outputWidth = outW
+        descriptor.outputHeight = outH
+        descriptor.colorTextureFormat = .bgra8Unorm
+        descriptor.depthTextureFormat = .depth32Float
+        descriptor.motionTextureFormat = .rg16Float
+        descriptor.outputTextureFormat = .bgra8Unorm
+        guard let scaler = descriptor.makeTemporalScaler(device: device) else {
+            return false
+        }
+        let colorDesc = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .bgra8Unorm, width: inW, height: inH, mipmapped: false)
+        colorDesc.usage = [.renderTarget, .shaderRead]
+        colorDesc.storageMode = .private
+        guard let color = device.makeTexture(descriptor: colorDesc) else { return false }
+        scaler.motionVectorScaleX = 1
+        scaler.motionVectorScaleY = 1
+        temporalScaler = scaler
+        offscreenColor = color
+        scalerSizes = (inW, inH, outW, outH)
+        pendingHistoryReset = true // fresh history for a fresh size
+        return true
+        #else
+        return false
+        #endif
+    }
+
+    private func ensureMotionTexture(width: Int, height: Int) -> MTLTexture? {
+        if let texture = motionTexture,
+           texture.width == width, texture.height == height { return texture }
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .rg16Float, width: width, height: height, mipmapped: false)
+        descriptor.usage = [.renderTarget, .shaderRead]
+        descriptor.storageMode = .private
+        motionTexture = device.makeTexture(descriptor: descriptor)
+        return motionTexture
+    }
+
     private func ensureUpscaler(inW: Int, inH: Int, outW: Int, outH: Int) -> Bool {
         #if canImport(MetalFX)
         guard upscalingSupported, inW > 0, inH > 0 else { return false }
@@ -115,8 +188,10 @@ final class Renderer {
         self.device = device
         #if canImport(MetalFX)
         self.upscalingSupported = MTLFXSpatialScalerDescriptor.supportsDevice(device)
+        self.temporalSupported = MTLFXTemporalScalerDescriptor.supportsDevice(device)
         #else
         self.upscalingSupported = false
+        self.temporalSupported = false
         #endif
         guard let queue = device.makeCommandQueue(),
               let library = device.makeDefaultLibrary(),
@@ -130,12 +205,14 @@ final class Renderer {
         descriptor.vertexFunction = vertexFn
         descriptor.fragmentFunction = fragmentFn
         descriptor.colorAttachments[0].pixelFormat = pixelFormat
+        descriptor.colorAttachments[1].pixelFormat = .rg16Float // motion
         descriptor.depthAttachmentPixelFormat = .depth32Float
 
         let voxelDescriptor = MTLRenderPipelineDescriptor()
         voxelDescriptor.vertexFunction = voxelVertexFn
         voxelDescriptor.fragmentFunction = voxelFragmentFn
         voxelDescriptor.colorAttachments[0].pixelFormat = pixelFormat
+        voxelDescriptor.colorAttachments[1].pixelFormat = .rg16Float // motion
         voxelDescriptor.depthAttachmentPixelFormat = .depth32Float
 
         let alwaysWrite = MTLDepthStencilDescriptor()
@@ -362,10 +439,12 @@ final class Renderer {
         let outW = drawable.texture.width
         let outH = drawable.texture.height
         let wantsUpscale = inputScale < 0.999
-        let upscaling = wantsUpscale && ensureUpscaler(
-            inW: max(Int(CGFloat(outW) * inputScale), 64),
-            inH: max(Int(CGFloat(outH) * inputScale), 64),
-            outW: outW, outH: outH)
+        let inW = max(Int(CGFloat(outW) * inputScale), 64)
+        let inH = max(Int(CGFloat(outH) * inputScale), 64)
+        let useTemporal = wantsUpscale && ensureTemporalScaler(
+            inW: inW, inH: inH, outW: outW, outH: outH)
+        let upscaling = useTemporal || (wantsUpscale && ensureUpscaler(
+            inW: inW, inH: inH, outW: outW, outH: outH))
         let target = upscaling ? offscreenColor! : drawable.texture
 
         let pass = MTLRenderPassDescriptor()
@@ -375,11 +454,16 @@ final class Renderer {
         pass.colorAttachments[0].clearColor = darkMode
             ? MTLClearColor(red: 0.012, green: 0.012, blue: 0.015, alpha: 1)
             : MTLClearColor(red: 0.86, green: 0.85, blue: 0.84, alpha: 1)
-        if let depth = ensureDepthTexture(width: target.width,
-                                          height: target.height) {
+        let motion = ensureMotionTexture(width: target.width, height: target.height)
+        pass.colorAttachments[1].texture = motion
+        pass.colorAttachments[1].loadAction = .clear
+        pass.colorAttachments[1].storeAction = useTemporal ? .store : .dontCare
+        pass.colorAttachments[1].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
+        let depthTex = ensureDepthTexture(width: target.width, height: target.height)
+        if let depth = depthTex {
             pass.depthAttachment.texture = depth
             pass.depthAttachment.loadAction = .clear
-            pass.depthAttachment.storeAction = .dontCare
+            pass.depthAttachment.storeAction = useTemporal ? .store : .dontCare
             pass.depthAttachment.clearDepth = 1.0
         }
 
@@ -390,6 +474,20 @@ final class Renderer {
         let width = Float(target.width)
         let height = Float(max(target.height, 1))
         let basis = camera.basis
+
+        // Temporal: 8-phase Halton subpixel jitter + last frame's camera for
+        // motion vectors. A projection flip has no valid history — reset.
+        var jitterPx = SIMD2<Float>(0, 0)
+        if useTemporal {
+            jitterPx = SIMD2(Self.halton((frameIndex % 8) + 1, 2) - 0.5,
+                             Self.halton((frameIndex % 8) + 1, 3) - 0.5)
+            frameIndex += 1
+        }
+        let prev = prevCamera ?? (camera.position, basis.right, basis.up,
+                                  basis.forward, camera.lens, camera.orthoHalfHeight)
+        if (prev.ortho > 0) != (camera.orthoHalfHeight > 0) {
+            pendingHistoryReset = true
+        }
         let cache = engine.fieldCache
         let cacheUsable = cache != nil && uploadedCacheVersion == engine.fieldCacheVersion
         var uniforms = Uniforms(
@@ -435,8 +533,16 @@ final class Renderer {
                 return SIMD4(Float($0.dims.x) / n, Float($0.dims.y) / n,
                              Float($0.dims.z) / n, 0)
             } ?? SIMD4(repeating: 0),
-            previewBound: previewBound
+            previewBound: previewBound,
+            prevRight: SIMD4(prev.right, width),
+            prevUp: SIMD4(prev.up, height),
+            prevForward: SIMD4(prev.forward, 0),
+            prevPosition: SIMD4(prev.position, useTemporal ? 1 : 0),
+            temporalInfo: SIMD4(2 * jitterPx.x / width, -2 * jitterPx.y / height,
+                                prev.lens, prev.ortho)
         )
+        prevCamera = (camera.position, basis.right, basis.up, basis.forward,
+                      camera.lens, camera.orthoHalfHeight)
 
         encoder.setRenderPipelineState(pipeline)
         encoder.setDepthStencilState(raymarchDepthState)
@@ -465,7 +571,18 @@ final class Renderer {
         encoder.endEncoding()
 
         #if canImport(MetalFX)
-        if upscaling, let scaler = spatialScaler {
+        if useTemporal, let scaler = temporalScaler, let depth = depthTex,
+           let motionTex = motion {
+            scaler.colorTexture = target
+            scaler.depthTexture = depth
+            scaler.motionTexture = motionTex
+            scaler.outputTexture = drawable.texture
+            scaler.jitterOffsetX = jitterPx.x
+            scaler.jitterOffsetY = jitterPx.y
+            scaler.reset = pendingHistoryReset
+            pendingHistoryReset = false
+            scaler.encode(commandBuffer: commands)
+        } else if upscaling, let scaler = spatialScaler {
             scaler.colorTexture = target
             scaler.outputTexture = drawable.texture
             scaler.encode(commandBuffer: commands)

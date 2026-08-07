@@ -28,6 +28,11 @@ struct Uniforms {
     float4 maskInvExtent; // xyz = 1/extent
     float4 maskScale;     // xyz = dims/maxResolution (texture sub-region)
     float4 previewBound;  // ghost union sphere: xyz center, w radius
+    float4 prevRight;     // xyz prev-frame camera right; w = input width px
+    float4 prevUp;        // xyz prev-frame camera up; w = input height px
+    float4 prevForward;   // xyz prev-frame camera forward
+    float4 prevPosition;  // xyz prev camera position; w = temporal active
+    float4 temporalInfo;  // xy = jitter (NDC, added to in.uv); z = prev lens; w = prev orthoHalfHeight
 };
 
 // Must match SceneItem in ClayEngine.swift (80 bytes).
@@ -67,8 +72,31 @@ static float depthFor(float viewZ, bool ortho) {
 
 struct FragOut {
     float4 color [[color(0)]];
+    float2 motion [[color(1)]]; // px to the PREVIOUS frame (MetalFX temporal)
     float depth [[depth(any)]];
 };
+
+/// Screen-space motion for MetalFX temporal: project the shaded world
+/// point through the PREVIOUS frame's camera (the exact inverse of ray
+/// generation) and return prevPixel - curPixel in input-resolution px.
+static float2 reprojectMotion(float3 world, float2 curPixel, constant Uniforms &u) {
+    if (u.prevPosition.w < 0.5) { return float2(0.0); }
+    const float aspect = u.params.x;
+    float3 d = world - u.prevPosition.xyz;
+    float2 ndc;
+    if (u.temporalInfo.w > 0.0) { // orthographic
+        ndc = float2(dot(d, u.prevRight.xyz) / (u.temporalInfo.w * aspect),
+                     dot(d, u.prevUp.xyz) / u.temporalInfo.w);
+    } else {
+        float z = dot(d, u.prevForward.xyz);
+        if (z < 1e-4) { return float2(0.0); } // behind the old camera
+        ndc = float2(u.temporalInfo.z * dot(d, u.prevRight.xyz) / (z * aspect),
+                     u.temporalInfo.z * dot(d, u.prevUp.xyz) / z);
+    }
+    float2 prevPixel = float2((ndc.x * 0.5 + 0.5) * u.prevRight.w,
+                              (0.5 - ndc.y * 0.5) * u.prevUp.w);
+    return prevPixel - curPixel;
+}
 
 vertex VertexOut fullscreen_vertex(uint vid [[vertex_id]]) {
     const float2 verts[3] = { float2(-1, -1), float2(3, -1), float2(-1, 3) };
@@ -615,7 +643,8 @@ fragment FragOut raymarch_fragment(VertexOut in [[stage_in]],
     const float aspect = u.params.x;
     const float lens = u.params.z;
     const float orthoHalfHeight = u.params.w;
-    float2 uv = float2(in.uv.x * aspect, in.uv.y);
+    float2 juv = in.uv + u.temporalInfo.xy; // temporal subpixel jitter
+    float2 uv = float2(juv.x * aspect, juv.y);
 
     float3 ro, rd;
     if (orthoHalfHeight > 0.0) {
@@ -813,6 +842,8 @@ fragment FragOut raymarch_fragment(VertexOut in [[stage_in]],
     FragOut out;
     out.color = float4(pow(color, 1.0 / 2.2), 1.0);
     out.depth = depth;
+    float tMotion = sceneWins ? t : (groundCloser ? tGround : 24.0);
+    out.motion = reprojectMotion(ro + rd * tMotion, in.position.xy, u);
     return out;
 }
 
@@ -823,8 +854,14 @@ fragment FragOut raymarch_fragment(VertexOut in [[stage_in]],
 
 struct VoxelVSOut {
     float4 position [[position]];
+    float3 world;
     float3 normal;
     float3 color;
+};
+
+struct VoxelFragOut {
+    float4 color [[color(0)]];
+    float2 motion [[color(1)]];
 };
 
 vertex VoxelVSOut voxel_vertex(uint vid [[vertex_id]],
@@ -847,16 +884,22 @@ vertex VoxelVSOut voxel_vertex(uint vid [[vertex_id]],
         float zc = kFar * (vz - kNear) / (kFar - kNear);
         out.position = float4(lens * vx / aspect, lens * vy, zc, vz);
     }
+    // Same subpixel jitter as the raymarcher so both passes shift together.
+    out.position.xy += u.temporalInfo.xy * out.position.w;
+    out.world = world;
     out.normal = float3(normals[vid * 3], normals[vid * 3 + 1], normals[vid * 3 + 2]);
     out.color = float3(colors[vid * 3], colors[vid * 3 + 1], colors[vid * 3 + 2]);
     return out;
 }
 
-fragment float4 voxel_fragment(VoxelVSOut in [[stage_in]],
-                               constant Uniforms &u [[buffer(0)]]) {
+fragment VoxelFragOut voxel_fragment(VoxelVSOut in [[stage_in]],
+                                     constant Uniforms &u [[buffer(0)]]) {
     float3 n = normalize(in.normal);
     float3 l = normalize(u.lightDir.xyz);
     float diffuse = saturate(dot(n, l));
     float3 color = in.color * (0.45 + 0.55 * diffuse);
-    return float4(pow(color, 1.0 / 2.2), 1.0);
+    VoxelFragOut out;
+    out.color = float4(pow(color, 1.0 / 2.2), 1.0);
+    out.motion = reprojectMotion(in.world, in.position.xy, u);
+    return out;
 }
