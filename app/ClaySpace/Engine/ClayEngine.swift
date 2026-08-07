@@ -38,7 +38,7 @@ struct SceneItem: Equatable {
 /// sampled onto a dense grid by ClayCore's CPU backend, rendered as a 3D
 /// texture at flat per-pixel cost. Items with index < bakedItemCount live in
 /// the cache; newer ones (the live stroke, post-bake edits) stay analytic.
-struct FieldCache {
+struct FieldCache: @unchecked Sendable {
     /// Texture allocation size per axis; actual grid dims are anisotropic —
     /// voxels are cubes sized by the longest axis, short axes use fewer
     /// cells, so elongated sculpts don't waste resolution on empty space.
@@ -50,6 +50,8 @@ struct FieldCache {
     var bakedItemCount: Int
     var distances: [Float16]  // dims.x*dims.y*dims.z, world-space distance
     var colors: [UInt8]       // same count × RGBA8
+    /// Set by a partial bake: the cell box the renderer may upload alone.
+    var dirtyCells: (min: SIMD3<Int32>, max: SIMD3<Int32>)?
 
     var voxelSize: Float {
         max(extent.x, max(extent.y, extent.z)) / Float(max(dims.x, max(dims.y, dims.z)))
@@ -493,7 +495,7 @@ final class ClayEngine {
             undoLog.append(.add)
             redoOps.removeAll()
             commit()
-            scheduleBake()
+            scheduleBakeDirty(dirtyRegion(forItem: items.count - 1))
         }
         return true
     }
@@ -757,7 +759,14 @@ final class ClayEngine {
         undoLog.append(.addBatch(count: used))
         redoOps.removeAll()
         commit()
-        scheduleBake()
+        var region: (min: SIMD3<Float>, max: SIMD3<Float>)?
+        for index in (items.count - used)..<items.count {
+            if let itemRegion = dirtyRegion(forItem: index) {
+                region = region.map { (simd_min($0.min, itemRegion.min),
+                                       simd_max($0.max, itemRegion.max)) } ?? itemRegion
+            }
+        }
+        scheduleBakeDirty(region)
         return used
     }
 
@@ -865,7 +874,7 @@ final class ClayEngine {
         _ = check(clay_document_end_undo_group(doc))
         activeStroke = nil
         commit() // the UI sees the finished stroke (appends were render-only)
-        scheduleBake()
+        scheduleBakeDirty(dirtyRegion(forItem: items.count - 1))
     }
 
     /// Aborts the in-flight stroke (touch cancelled by the system/UI): close
@@ -1212,7 +1221,13 @@ final class ClayEngine {
             undoLog.append(.transform(index: index, before: before,
                                       after: placement(of: index)))
             redoOps.removeAll()
-            scheduleBake()
+            let after = dirtyRegion(forItem: index)
+            var region = after
+            if let after {
+                region = (simd_min(after.min, before.aabbMin - SIMD3(repeating: 0.03)),
+                          simd_max(after.max, before.aabbMax + SIMD3(repeating: 0.03)))
+            }
+            scheduleBakeDirty(region)
         }
         transformIndex = nil
         transformBefore = nil
@@ -1370,10 +1385,15 @@ final class ClayEngine {
                           blend: Int32((blendK > 0 ? blend : CLAY_BLEND_HARD).rawValue),
                           blendK: blendK, rounding: before.rounding)
         guard after != before else { return true }
+        let regionBefore = dirtyRegion(forItem: index)
         guard applyStyle(after, to: index) else { return false }
         undoLog.append(.restyle(index: index, before: before, after: after))
         redoOps.removeAll()
-        scheduleBake()
+        var region = dirtyRegion(forItem: index)
+        if let before = regionBefore, let after = region {
+            region = (simd_min(before.min, after.min), simd_max(before.max, after.max))
+        }
+        scheduleBakeDirty(region)
         return true
     }
 
@@ -1415,10 +1435,16 @@ final class ClayEngine {
         guard let before = strokeRadii(of: index), factor > 0,
               activeStroke == nil, transformIndex == nil else { return false }
         let after = before.map { min(max($0 * factor, 0.005), 2.0) }
+        let regionBefore = dirtyRegion(forItem: index)
         guard applyStrokeRadii(after, to: index) else { return false }
         undoLog.append(.restroke(index: index, before: before, after: after))
         redoOps.removeAll()
-        scheduleBake()
+        var region = dirtyRegion(forItem: index)
+        if let regionBefore, let current = region {
+            region = (simd_min(regionBefore.min, current.min),
+                      simd_max(regionBefore.max, current.max))
+        }
+        scheduleBakeDirty(region)
         return true
     }
 
@@ -1435,6 +1461,7 @@ final class ClayEngine {
                                     aabb: itemAABBs[index],
                                     localBound: localBounds[index],
                                     slot: itemLayers[index])
+        let removedRegion = dirtyRegion(forItem: index)
         items.remove(at: index)
         itemAABBs.remove(at: index)
         nodeIDs.remove(at: index)
@@ -1445,7 +1472,7 @@ final class ClayEngine {
         redoOps.removeAll()
         dropCacheIfCovers(index)
         commit()
-        scheduleBake()
+        scheduleBakeDirty(removedRegion)
         return true
     }
 
@@ -1487,7 +1514,13 @@ final class ClayEngine {
         redoOps.removeAll()
         dropCacheIfCovers(range.lowerBound)
         commit()
-        scheduleBake()
+        var region: (min: SIMD3<Float>, max: SIMD3<Float>)?
+        for row in rows {
+            region = region.map { (simd_min($0.min, row.aabb.min),
+                                   simd_max($0.max, row.aabb.max)) }
+                ?? (row.aabb.min, row.aabb.max)
+        }
+        scheduleBakeDirty(region)
         return true
     }
 
@@ -1660,10 +1693,67 @@ final class ClayEngine {
         }
     }
 
+    // Dirty accounting (docs/06 §2.2): hot edit paths mark the region they
+    /// touched and schedule a PARTIAL bake; every plain scheduleBake()
+    /// stays a full one, so unattributed paths can never leave stale cells.
+    @ObservationIgnored private var pendingBakeAll = false
+    @ObservationIgnored private var pendingBakeRegion: (min: SIMD3<Float>, max: SIMD3<Float>)?
+    /// Test hook: whether the last completed bake took the partial path.
+    @ObservationIgnored private(set) var lastBakeWasPartial = false
+
+    /// The world region an item's field can influence: its AABB plus its
+    /// layer-mirror reflections, padded a little.
+    private func dirtyRegion(forItem index: Int) -> (min: SIMD3<Float>, max: SIMD3<Float>)? {
+        guard itemAABBs.indices.contains(index) else { return nil }
+        var aabb = itemAABBs[index]
+        let pad = SIMD3<Float>(repeating: 0.03)
+        aabb = (aabb.min - pad, aabb.max + pad)
+        let slot = Int(itemLayers.indices.contains(index) ? itemLayers[index] : 0)
+        let axes = sdfLayers.indices.contains(slot) ? sdfLayers[slot].mirrorAxes : 0
+        if axes != 0, items.indices.contains(index), items[index].mirrorFlag != 0 {
+            var mn = aabb.min, mx = aabb.max
+            let seam = SIMD3<Float>(repeating: 4 * mirrorK)
+            for axis in 0..<3 where (axes & (1 << axis)) != 0 {
+                var rMin = aabb.min, rMax = aabb.max
+                rMin[axis] = -aabb.max[axis]
+                rMax[axis] = -aabb.min[axis]
+                mn = simd_min(mn, rMin - seam)
+                mx = simd_max(mx, rMax + seam)
+            }
+            aabb = (mn, mx)
+        }
+        return aabb
+    }
+
+    private func markBakeDirty(_ region: (min: SIMD3<Float>, max: SIMD3<Float>)?) {
+        guard let region else {
+            pendingBakeAll = true
+            return
+        }
+        if let pending = pendingBakeRegion {
+            pendingBakeRegion = (simd_min(pending.min, region.min),
+                                 simd_max(pending.max, region.max))
+        } else {
+            pendingBakeRegion = region
+        }
+    }
+
+    /// Region-attributed rebake: eligible for the partial path.
+    func scheduleBakeDirty(_ region: (min: SIMD3<Float>, max: SIMD3<Float>)?,
+                           debounceMilliseconds: Int = 200) {
+        markBakeDirty(region)
+        scheduleBakeKeepingDirty(debounceMilliseconds: debounceMilliseconds)
+    }
+
     /// Debounced rebake after committed edits. The bake runs on a background
     /// thread against an independently loaded snapshot of the document, so
     /// the main thread (and ClayCore's live doc) is never touched.
     func scheduleBake(debounceMilliseconds: Int = 200) {
+        pendingBakeAll = true // unattributed edit: only a full bake is safe
+        scheduleBakeKeepingDirty(debounceMilliseconds: debounceMilliseconds)
+    }
+
+    private func scheduleBakeKeepingDirty(debounceMilliseconds: Int) {
         scheduleAutosave()
         bakeTask?.cancel()
         let editVersion = version
@@ -1681,11 +1771,69 @@ final class ClayEngine {
 
     private func performBake(editVersion: Int) async {
         guard let doc, !isStroking, !isTransforming else { return }
+        // Nothing pending and a current cache: this is a duplicate firing
+        // (bakeNow already consumed the debounced task's work) — skip.
+        if !pendingBakeAll, pendingBakeRegion == nil,
+           let cache = fieldCache, cache.bakedItemCount == items.count {
+            return
+        }
         let path = FileManager.default.temporaryDirectory
             .appendingPathComponent("clayspace-bake.clayspace").path
         guard check(clay_document_save(doc, path)) else { return }
         let itemCount = items.count
         let bounds = sceneBounds()
+
+        // Partial path (docs/06 §2.2): a region-attributed edit inside an
+        // unchanged grid re-evaluates just its slab; anything else — grid
+        // growth, unattributed edits, no cache yet — takes the full path.
+        let wantFull = pendingBakeAll
+        let region = pendingBakeRegion
+        pendingBakeAll = false
+        pendingBakeRegion = nil
+
+        if !wantFull, let region, var cache = fieldCache,
+           Self.gridLayout(boundsMin: bounds.0, boundsMax: bounds.1)
+               == (cache.origin, cache.extent, cache.dims),
+           let cellBox = Self.cellBox(of: region, in: cache) {
+            let snapshot = cache // immutable capture for the detached task
+            let slab = await Task.detached(priority: .userInitiated) {
+                Perf.interval("bakePartial") {
+                    Self.bakePartial(documentPath: path, cache: snapshot, cellBox: cellBox)
+                }
+            }.value
+            guard version == editVersion else {
+                markBakeDirty(region) // give the consumed region back
+                scheduleBakeKeepingDirty(debounceMilliseconds: 50)
+                return
+            }
+            guard let slab else {
+                scheduleBake() // partial failed: fall back hard
+                return
+            }
+            let nx = Int(cache.dims.x), ny = Int(cache.dims.y)
+            var di = 0
+            for z in Int(cellBox.min.z)...Int(cellBox.max.z) {
+                for y in Int(cellBox.min.y)...Int(cellBox.max.y) {
+                    let row = (z * ny + y) * nx
+                    for x in Int(cellBox.min.x)...Int(cellBox.max.x) {
+                        cache.distances[row + x] = slab.distances[di]
+                        let c = (row + x) * 4
+                        cache.colors[c] = slab.colors[di * 3]
+                        cache.colors[c + 1] = slab.colors[di * 3 + 1]
+                        cache.colors[c + 2] = slab.colors[di * 3 + 2]
+                        di += 1
+                    }
+                }
+            }
+            cache.bakedItemCount = itemCount
+            cache.dirtyCells = cellBox
+            fieldCache = cache
+            fieldCacheVersion += 1
+            lastBakeWasPartial = true
+            refreshSafeStepScale()
+            commit()
+            return
+        }
 
         let baked = await Task.detached(priority: .userInitiated) {
             Perf.interval("bake") {
@@ -1699,10 +1847,86 @@ final class ClayEngine {
         }
         guard var cache = baked else { return }
         cache.bakedItemCount = itemCount
+        cache.dirtyCells = nil
         fieldCache = cache
         fieldCacheVersion += 1
+        lastBakeWasPartial = false
         refreshSafeStepScale()
         commit() // wake the renderer
+    }
+
+    /// The grid a full bake of these bounds would produce — the partial
+    /// path requires an exact match with the live cache.
+    nonisolated static func gridLayout(boundsMin: SIMD3<Float>, boundsMax: SIMD3<Float>)
+        -> (SIMD3<Float>, SIMD3<Float>, SIMD3<Int32>) {
+        let margin: Float = 0.18
+        let mn = boundsMin - SIMD3(repeating: margin)
+        let extent = (boundsMax + SIMD3(repeating: margin)) - mn
+        let maxExtent = max(extent.x, max(extent.y, extent.z))
+        let voxel = maxExtent / Float(FieldCache.maxResolution)
+        func cells(_ e: Float) -> Int32 {
+            Int32(min(FieldCache.maxResolution, max(8, Int((e / voxel).rounded(.up)))))
+        }
+        return (mn, extent, SIMD3(cells(extent.x), cells(extent.y), cells(extent.z)))
+    }
+
+    /// World region → inclusive cell box in the cache grid, or nil when it
+    /// misses the grid entirely.
+    nonisolated static func cellBox(of region: (min: SIMD3<Float>, max: SIMD3<Float>),
+                                    in cache: FieldCache)
+        -> (min: SIMD3<Int32>, max: SIMD3<Int32>)? {
+        let rel0 = (region.min - cache.origin) / cache.extent
+        let rel1 = (region.max - cache.origin) / cache.extent
+        var lo = SIMD3<Int32>.zero
+        var hi = SIMD3<Int32>.zero
+        for axis in 0..<3 {
+            let n = Float(cache.dims[axis])
+            let a = Int32((rel0[axis] * n).rounded(.down)) - 1
+            let b = Int32((rel1[axis] * n).rounded(.up)) + 1
+            if b < 0 || a >= cache.dims[axis] { return nil }
+            lo[axis] = max(0, a)
+            hi[axis] = min(cache.dims[axis] - 1, b)
+        }
+        return (lo, hi)
+    }
+
+    /// Evaluate every cell of a slab exactly (no narrow band — slabs are
+    /// small) against a snapshot document.
+    nonisolated private static func bakePartial(
+        documentPath: String, cache: FieldCache,
+        cellBox: (min: SIMD3<Int32>, max: SIMD3<Int32>))
+        -> (distances: [Float16], colors: [UInt8])? {
+        var loaded: OpaquePointer?
+        guard clay_document_load(documentPath, &loaded) == CLAY_OK, let bakeDoc = loaded
+        else { return nil }
+        defer { clay_document_destroy(bakeDoc) }
+
+        let counts = SIMD3<Int>(Int(cellBox.max.x - cellBox.min.x) + 1,
+                                Int(cellBox.max.y - cellBox.min.y) + 1,
+                                Int(cellBox.max.z - cellBox.min.z) + 1)
+        let total = counts.x * counts.y * counts.z
+        var points = [Float]()
+        points.reserveCapacity(total * 3)
+        for z in 0..<counts.z {
+            let wz = cache.origin.z + cache.extent.z
+                * (Float(Int(cellBox.min.z) + z) + 0.5) / Float(cache.dims.z)
+            for y in 0..<counts.y {
+                let wy = cache.origin.y + cache.extent.y
+                    * (Float(Int(cellBox.min.y) + y) + 0.5) / Float(cache.dims.y)
+                for x in 0..<counts.x {
+                    points.append(cache.origin.x + cache.extent.x
+                        * (Float(Int(cellBox.min.x) + x) + 0.5) / Float(cache.dims.x))
+                    points.append(wy)
+                    points.append(wz)
+                }
+            }
+        }
+        var distances = [Float](repeating: 0, count: total)
+        var colors = [Float](repeating: 0, count: total * 3)
+        guard clay_eval_points(bakeDoc, nil, points, total,
+                               &distances, &colors) == CLAY_OK else { return nil }
+        return (distances.map { Float16(max(-60000, min(60000, $0))) },
+                colors.map { UInt8(max(0, min(255, $0 * 255))) })
     }
 
     /// Drops the cache when the edit list shrinks below the bake point
@@ -3265,18 +3489,9 @@ final class ClayEngine {
         else { return nil }
         defer { clay_document_destroy(bakeDoc) }
 
-        let margin: Float = 0.18
-        let mn = boundsMin - SIMD3(repeating: margin)
-        let extent = (boundsMax + SIMD3(repeating: margin)) - mn
-
-        // Cubic voxels sized by the longest axis at maxResolution; short
-        // axes take only the cells they need.
-        let maxExtent = max(extent.x, max(extent.y, extent.z))
-        let voxel = maxExtent / Float(FieldCache.maxResolution)
-        func cells(_ e: Float) -> Int {
-            min(FieldCache.maxResolution, max(8, Int((e / voxel).rounded(.up))))
-        }
-        let nx = cells(extent.x), ny = cells(extent.y), nz = cells(extent.z)
+        // Grid layout shared with the partial-bake match check.
+        let (mn, extent, dims) = gridLayout(boundsMin: boundsMin, boundsMax: boundsMax)
+        let nx = Int(dims.x), ny = Int(dims.y), nz = Int(dims.z)
 
         // Two-pass narrow-band bake: a coarse pass locates the surface, the
         // fine pass evaluates only cells near it (the shell is typically

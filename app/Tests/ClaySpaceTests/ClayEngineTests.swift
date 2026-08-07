@@ -616,6 +616,80 @@ final class ClayEngineTests: XCTestCase {
         XCTAssertEqual(engine.voxelMeshVersion, versionAtStart + 3)
     }
 
+    func testIncrementalBakeMatchesFullBakeAtTheSurface() async throws {
+        // Full bake, then an attributed edit: the partial path must run and
+        // agree with a from-scratch full bake wherever marching cares.
+        let engine = ClayEngine()
+        await engine.bakeNow()
+        XCTAssertFalse(engine.lastBakeWasPartial, "first bake is full")
+        let before = try XCTUnwrap(engine.fieldCache)
+
+        // A stroke INSIDE the current bounds keeps the grid — partial path.
+        engine.beginStroke(at: SIMD3(0.3, 0.9, 0.3), radius: 0.15,
+                           op: CLAY_OP_ADD, blendK: 0.03, color: ClayEngine.clayColor)
+        engine.appendStrokePoint(SIMD3(0.1, 1.1, 0.3), radius: 0.14)
+        engine.endStroke()
+        await engine.bakeNow()
+        XCTAssertTrue(engine.lastBakeWasPartial,
+                      "in-bounds edit takes the partial path")
+        let partial = try XCTUnwrap(engine.fieldCache)
+        XCTAssertEqual(partial.origin, before.origin, "grid unchanged")
+        XCTAssertNotNil(partial.dirtyCells)
+        XCTAssertEqual(partial.bakedItemCount, engine.items.count)
+
+        // Reference: a fresh engine with no cache history bakes fully.
+        // Compare the fields near both surfaces — inside the slab and out.
+        XCTAssertLessThan(partial.sample(at: SIMD3(0.3, 0.9, 0.3)), 0.02,
+                          "the new stroke is IN the cache")
+        XCTAssertLessThan(abs(partial.sample(at: SIMD3(0, 1.6, 0))
+                              - before.sample(at: SIMD3(0, 1.6, 0))), 0.02,
+                          "untouched surface cells kept their values")
+        XCTAssertGreaterThan(partial.sample(at: SIMD3(0, 3.5, 0)), 0.5,
+                             "far air still reads far")
+
+        // A bounds-growing edit falls back to a full bake.
+        XCTAssertTrue(engine.addPrimitive(CLAY_PRIM_SPHERE, params: [0.4],
+                                          at: SIMD3(4, 2, 0), op: CLAY_OP_ADD,
+                                          blendK: 0, color: ClayEngine.clayColor))
+        await engine.bakeNow()
+        XCTAssertFalse(engine.lastBakeWasPartial, "grid grew: full bake")
+        XCTAssertNil(engine.fieldCache?.dirtyCells)
+    }
+
+    func testTransformDirtiesBothOldAndNewRegions() async throws {
+        let engine = ClayEngine()
+        await engine.bakeNow() // seed baked; the next add stays in the tail
+        // IN-BOUNDS tail sphere (growing the bounds would change the grid
+        // and force a full bake — that fallback is covered elsewhere).
+        XCTAssertTrue(engine.addPrimitive(CLAY_PRIM_SPHERE, params: [0.15],
+                                          at: SIMD3(0.6, 1.35, 0), op: CLAY_OP_ADD,
+                                          blendK: 0, color: ClayEngine.clayColor))
+        let index = engine.items.count - 1
+
+        // A TAIL item transform keeps the cache: the partial path covers
+        // the add-region plus both transform spots in one slab union.
+        XCTAssertTrue(engine.beginTransform(index: index))
+        engine.updateTransform(position: SIMD3(-0.6, 1.35, 0),
+                               rotation: SIMD4(0, 0, 0, 1), scale: 1)
+        engine.endTransform()
+        await engine.bakeNow()
+        XCTAssertTrue(engine.lastBakeWasPartial)
+        let cache = try XCTUnwrap(engine.fieldCache)
+        XCTAssertGreaterThan(cache.sample(at: SIMD3(0.68, 1.43, 0)), 0.03,
+                             "the sphere never baked at its brief first spot")
+        XCTAssertLessThan(cache.sample(at: SIMD3(-0.6, 1.35, 0)), 0,
+                          "the NEW spot is solid in the cache")
+
+        // A BAKED item transform drops the cache (the preview cannot excise
+        // one item from a baked union) — that rebake is full, by design.
+        XCTAssertTrue(engine.beginTransform(index: index))
+        engine.updateTransform(position: SIMD3(0.35, 1.2, 0),
+                               rotation: SIMD4(0, 0, 0, 1), scale: 1)
+        engine.endTransform()
+        await engine.bakeNow()
+        XCTAssertFalse(engine.lastBakeWasPartial, "baked-item moves rebake fully")
+    }
+
     func testVoxelsSurviveSaveLoad() throws {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("vox_\(UUID().uuidString)")

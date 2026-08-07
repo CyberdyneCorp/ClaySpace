@@ -222,16 +222,48 @@ final class Renderer {
 
         if let cache = engine.fieldCache, engine.fieldCacheVersion != uploadedCacheVersion {
             let nx = Int(cache.dims.x), ny = Int(cache.dims.y), nz = Int(cache.dims.z)
-            let region = MTLRegionMake3D(0, 0, 0, nx, ny, nz)
-            cache.distances.withUnsafeBytes { src in
-                distanceTexture.replace(region: region, mipmapLevel: 0, slice: 0,
-                                        withBytes: src.baseAddress!,
-                                        bytesPerRow: nx * 2, bytesPerImage: nx * ny * 2)
-            }
-            cache.colors.withUnsafeBytes { src in
-                colorTexture.replace(region: region, mipmapLevel: 0, slice: 0,
-                                     withBytes: src.baseAddress!,
-                                     bytesPerRow: nx * 4, bytesPerImage: nx * ny * 4)
+            // A partial bake on top of the texture we already uploaded only
+            // needs its slab (docs/06 §2.2); anything else re-uploads whole.
+            if let dirty = cache.dirtyCells,
+               uploadedCacheVersion == engine.fieldCacheVersion - 1 {
+                let cx = Int(dirty.max.x - dirty.min.x) + 1
+                let cy = Int(dirty.max.y - dirty.min.y) + 1
+                let cz = Int(dirty.max.z - dirty.min.z) + 1
+                var slabDistances = [Float16]()
+                slabDistances.reserveCapacity(cx * cy * cz)
+                var slabColors = [UInt8]()
+                slabColors.reserveCapacity(cx * cy * cz * 4)
+                for z in Int(dirty.min.z)...Int(dirty.max.z) {
+                    for y in Int(dirty.min.y)...Int(dirty.max.y) {
+                        let row = (z * ny + y) * nx + Int(dirty.min.x)
+                        slabDistances.append(contentsOf: cache.distances[row..<(row + cx)])
+                        slabColors.append(contentsOf: cache.colors[(row * 4)..<((row + cx) * 4)])
+                    }
+                }
+                let region = MTLRegionMake3D(Int(dirty.min.x), Int(dirty.min.y),
+                                             Int(dirty.min.z), cx, cy, cz)
+                slabDistances.withUnsafeBytes { src in
+                    distanceTexture.replace(region: region, mipmapLevel: 0, slice: 0,
+                                            withBytes: src.baseAddress!,
+                                            bytesPerRow: cx * 2, bytesPerImage: cx * cy * 2)
+                }
+                slabColors.withUnsafeBytes { src in
+                    colorTexture.replace(region: region, mipmapLevel: 0, slice: 0,
+                                         withBytes: src.baseAddress!,
+                                         bytesPerRow: cx * 4, bytesPerImage: cx * cy * 4)
+                }
+            } else {
+                let region = MTLRegionMake3D(0, 0, 0, nx, ny, nz)
+                cache.distances.withUnsafeBytes { src in
+                    distanceTexture.replace(region: region, mipmapLevel: 0, slice: 0,
+                                            withBytes: src.baseAddress!,
+                                            bytesPerRow: nx * 2, bytesPerImage: nx * ny * 2)
+                }
+                cache.colors.withUnsafeBytes { src in
+                    colorTexture.replace(region: region, mipmapLevel: 0, slice: 0,
+                                         withBytes: src.baseAddress!,
+                                         bytesPerRow: nx * 4, bytesPerImage: nx * ny * 4)
+                }
             }
             uploadedCacheVersion = engine.fieldCacheVersion
         }
