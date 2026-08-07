@@ -12,6 +12,8 @@ struct ContentView: View {
     @State private var showGestures = false
     @State private var showExport = false
     @State private var showDocuments = false
+    @State private var showBrushDials = false
+    @State private var topBarWidth: CGFloat = 0
     @Environment(\.scenePhase) private var scenePhase
     @AppStorage("hasSeenGesturesSheet") private var hasSeenGestures = false
     private let coreVersion: String = {
@@ -65,6 +67,18 @@ struct ContentView: View {
                     .onGeometryChange(for: CGRect.self) {
                         $0.frame(in: .global)
                     } action: { state.chromeRects["bottomBars"] = $0 }
+                }
+                VStack {
+                    Spacer()
+                    HStack {
+                        Spacer()
+                        utilityCluster
+                            .padding(.trailing, 14)
+                            .padding(.bottom, 16)
+                            .onGeometryChange(for: CGRect.self) {
+                                $0.frame(in: .global)
+                            } action: { state.chromeRects["utilityCluster"] = $0 }
+                    }
                 }
                 if let anchor = state.radialMenuLocation {
                     RadialMenu(
@@ -131,6 +145,7 @@ struct ContentView: View {
                             .font(.system(size: 17, weight: .semibold, design: .serif))
                             .foregroundStyle(.primary)
                             .lineLimit(1)
+                            .frame(minWidth: 70, maxWidth: 150, alignment: .leading)
                         Image(systemName: "chevron.down")
                             .font(.system(size: 9, weight: .bold))
                             .foregroundStyle(.secondary)
@@ -149,33 +164,51 @@ struct ContentView: View {
                 Text("Voxels").tag(ViewportState.EditorMode.voxel)
             }
             .pickerStyle(.segmented)
-            .frame(width: 140)
+            .frame(width: 118)
             .accessibilityIdentifier("modeSwitch")
             .padding(.leading, 6)
             Spacer(minLength: 8)
-            MirrorControls(state: state)
-            Spacer(minLength: 8)
-            ViewThatFits(in: .horizontal) {
-                HStack(spacing: 8) {
-                    Text(coreVersion)
-                        .font(.system(size: 11, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                    gesturesButton
-                    exportButton
-                }
-                HStack(spacing: 8) {
-                    gesturesButton
-                    exportButton
-                }
-                exportButton
+            // ViewThatFits would measure these variants off the main actor
+            // (MainActor-isolated state crash); pick by measured bar width
+            // instead — all variants are fixed-width, thresholds static.
+            if topBarWidth >= 750 {
+                MirrorControls(state: state)
+                Divider().frame(height: 18)
+                brushDials(sliderWidth: 62)
+            } else if topBarWidth >= 670 {
+                MirrorControls(state: state)
+                Divider().frame(height: 18)
+                brushDials(sliderWidth: 44)
+            } else {
+                MirrorControls(state: state)
+                brushDialsButton
             }
+            Spacer(minLength: 8)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
         .background(.ultraThinMaterial)
         .onGeometryChange(for: CGRect.self) {
             $0.frame(in: .global)
-        } action: { state.chromeRects["topBar"] = $0 }
+        } action: {
+            state.chromeRects["topBar"] = $0
+            topBarWidth = $0.width
+        }
+    }
+
+    /// Version label + Gestures/Export, moved to the bottom-right to give
+    /// the top bar room for the brush dials.
+    private var utilityCluster: some View {
+        HStack(spacing: 8) {
+            Text(coreVersion)
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(.secondary)
+            gesturesButton
+            exportButton
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 6))
     }
 
     private var gesturesButton: some View {
@@ -207,6 +240,67 @@ struct ContentView: View {
             }
         }
         .animation(.easeOut(duration: 0.18), value: state.toast)
+    }
+
+    /// Top-bar brush dials: footprint size and strength (relief amplitude
+    /// for Standard/Carve, engine strength for voxel sculpt verbs and
+    /// spray stamps). Inline where the bar has room, popover otherwise.
+    private func brushDials(sliderWidth: CGFloat) -> some View {
+        HStack(spacing: 5) {
+            Image(systemName: "smallcircle.filled.circle")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+            Slider(value: Binding(get: { Double(state.brushSize) },
+                                  set: { state.brushSize = Float($0) }), in: 0...1)
+                .frame(width: sliderWidth)
+                .tint(.orange)
+                .accessibilityIdentifier("brushSizeSlider")
+            Image(systemName: "speedometer")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+            Slider(value: Binding(get: { Double(state.brushStrength) },
+                                  set: { state.brushStrength = Float($0) }), in: 0...1)
+                .frame(width: sliderWidth)
+                .tint(.orange)
+                .accessibilityIdentifier("brushStrengthSlider")
+        }
+    }
+
+    private var brushDialsButton: some View {
+        Button {
+            showBrushDials = true
+        } label: {
+            Image(systemName: "slider.horizontal.3")
+                .font(.system(size: 13))
+                .frame(width: 28, height: 28)
+                .foregroundStyle(.primary)
+                .background(
+                    RoundedRectangle(cornerRadius: 4)
+                        .fill(Color.primary.opacity(0.06))
+                )
+        }
+        .accessibilityIdentifier("brushDialsButton")
+        .popover(isPresented: $showBrushDials, arrowEdge: .top) {
+            VStack(alignment: .leading, spacing: 10) {
+                Label("Size", systemImage: "smallcircle.filled.circle")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                Slider(value: Binding(get: { Double(state.brushSize) },
+                                      set: { state.brushSize = Float($0) }), in: 0...1)
+                    .tint(.orange)
+                    .accessibilityIdentifier("brushSizeSlider")
+                Label("Strength", systemImage: "speedometer")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                Slider(value: Binding(get: { Double(state.brushStrength) },
+                                      set: { state.brushStrength = Float($0) }), in: 0...1)
+                    .tint(.orange)
+                    .accessibilityIdentifier("brushStrengthSlider")
+            }
+            .padding(16)
+            .frame(width: 260)
+            .presentationCompactAdaptation(.popover)
+        }
     }
 
     /// Brush footprint under a hovering Pencil (task 5.3): circle for the

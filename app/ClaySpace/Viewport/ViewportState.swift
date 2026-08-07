@@ -265,14 +265,14 @@ final class ViewportState {
         case standard, carve, snakeHook
 
         /// How far the chain center sits from the surface, in radii.
-        /// Standard EMBEDS most of the tube (-0.65r): only a shallow cap
-        /// pokes out (~0.35r high, ~1.4r wide) — the wide soft ridge of
-        /// ZBrush's Standard, not a snake-hook tube. Carve floats above
-        /// (+0.6r) so the subtract takes a shallow bite, not a gouge.
-        var surfaceOffset: Float {
+        /// Standard EMBEDS most of the tube: only a shallow cap pokes out
+        /// (strength-scaled, ~0.35r at the default) — the wide soft ridge
+        /// of ZBrush's Standard, not a snake-hook tube. Carve floats above
+        /// so the subtract takes a shallow bite, not a gouge.
+        func surfaceOffset(strength: Float) -> Float {
             switch self {
-            case .standard: -0.65
-            case .carve: 0.6
+            case .standard: -(1 - (0.1 + 0.5 * strength))
+            case .carve: 1 - (0.15 + 0.5 * strength)
             case .snakeHook: 0
             }
         }
@@ -298,6 +298,16 @@ final class ViewportState {
     }
     var sculptBrush: SculptBrush = .standard
     @ObservationIgnored fileprivate var strokeTravel: Float = 0
+
+    /// Top-bar brush dials. Size multiplies every brush footprint (0.5 =
+    /// the pre-dial behavior; pressure still breathes inside it); strength
+    /// maps per family — relief amplitude for Standard/Carve, the engine's
+    /// coverage strength for voxel brushes and spray stamps.
+    var brushSize: Float = 0.5
+    var brushStrength: Float = 0.5 {
+        didSet { engine.brushStrength = 0.4 + 1.2 * brushStrength }
+    }
+    var brushSizeMultiplier: Float { 0.35 + 1.3 * brushSize }
     /// Spray-tool stroke feel (ZBrush-style stamp engine).
     var sprayFeel = ClayEngine.SprayFeel()
 
@@ -601,7 +611,7 @@ extension ViewportState: PencilToolSink {
     private func radius(for pressure: Float, altitude: Float = .pi / 2) -> Float {
         let base = 0.07 + pressure * 0.28
         let tilt = 1 - min(max(altitude / (.pi / 2), 0), 1)
-        return base * (1 + 0.6 * tilt)
+        return base * (1 + 0.6 * tilt) * brushSizeMultiplier
     }
 
     fileprivate func voxelEdit(at point: CGPoint, pressure: Float) {
@@ -614,7 +624,7 @@ extension ViewportState: PencilToolSink {
             let cell = pick.hit
             if cell == lastVoxelCell { return }
             lastVoxelCell = cell
-            let brushSize = Int32(max(1, min(3, 1 + Int(pressure * 2.4))))
+            let brushSize = Int32(max(1, min(4, Int(Float(1 + Int(pressure * 2.4)) * brushSizeMultiplier))))
             engine.voxelStamp(activeTool == .erase ? .erase : .paint,
                               at: cell, brushSize: brushSize, color: activeColor)
             return
@@ -629,7 +639,7 @@ extension ViewportState: PencilToolSink {
             engine.voxelStamp(.place, at: cell, brushSize: brushSize, color: activeColor)
             return
         }
-        let brushSize = Int32(max(3, min(7, 3 + Int(pressure * 4))))
+        let brushSize = Int32(max(2, min(9, Int(Float(3 + Int(pressure * 4)) * brushSizeMultiplier))))
         if voxelVerb.needsDisplacement {
             // Grab/smudge follow the pencil's world motion on the view
             // plane through the first contact.
@@ -866,7 +876,7 @@ extension ViewportState: PencilToolSink {
         if activeTool == .sculpt { r *= sculptBrush.radiusScale }
         if activeTool == .sculpt, sculptBrush.followsSurface, start != nil {
             let normal = hit?.normal ?? SIMD3(0, 1, 0) // ground faces up
-            start! += normal * (r * sculptBrush.surfaceOffset)
+            start! += normal * (r * sculptBrush.surfaceOffset(strength: brushStrength))
         }
         guard let start else { return }
 
@@ -1077,7 +1087,7 @@ extension ViewportState: PencilToolSink {
             if let hit = engine.raycast(origin: ray.origin, direction: ray.direction),
                let picked = engine.pick(origin: ray.origin, direction: ray.direction),
                picked.index != activeIndex {
-                target = hit.position + hit.normal * (r * sculptBrush.surfaceOffset)
+                target = hit.position + hit.normal * (r * sculptBrush.surfaceOffset(strength: brushStrength))
                 // The fallback plane follows the LAST surface anchor, so a
                 // moment of self-attribution doesn't fling the chain off on
                 // the tangent from the stroke's start.
@@ -1285,7 +1295,7 @@ extension ViewportState: PencilToolSink {
         guard spraySamples.count == 1
                 || spraySamples.count - lastGhostSampleCount >= 3 else { return }
         lastGhostSampleCount = spraySamples.count
-        let radius = 0.09 + pencilPeakPressure * 0.25
+        let radius = (0.09 + pencilPeakPressure * 0.25) * brushSizeMultiplier
         let stamps = engine.resolveSprayStamps(samples: spraySamples,
                                                radius: radius, feel: sprayFeel)
         let templateParams = shapeKind.params(size: 1)
@@ -1321,7 +1331,7 @@ extension ViewportState: PencilToolSink {
             sprayGhosts = []
             previewVersion += 1
         }
-        let radius = 0.09 + pencilPeakPressure * 0.25
+        let radius = (0.09 + pencilPeakPressure * 0.25) * brushSizeMultiplier
         let stamped = engine.sprayStroke(samples: spraySamples,
                                          prim: shapeKind.clayPrim,
                                          templateParams: shapeKind.params(size: 1),
@@ -1349,7 +1359,7 @@ extension ViewportState: PencilToolSink {
     /// size (grows with peak pressure), position under the tip.
     fileprivate func updateShapePreview(at point: CGPoint) {
         guard let target = shapeTarget(at: point) else { shapePreview = nil; return }
-        let size = 0.14 + pencilPeakPressure * 0.42
+        let size = (0.14 + pencilPeakPressure * 0.42) * brushSizeMultiplier
         var params = SIMD4<Float>(repeating: 0)
         for (i, value) in shapeKind.params(size: size).prefix(4).enumerated() {
             params[i] = value
@@ -1378,7 +1388,7 @@ extension ViewportState: PencilToolSink {
             showToast("\(shapeOp.title) needs a surface")
             return
         }
-        let size = 0.14 + pencilPeakPressure * 0.42
+        let size = (0.14 + pencilPeakPressure * 0.42) * brushSizeMultiplier
         let k = shapeBlendProfile == .hard ? 0 : shapeBlendK
         if engine.addShape(shapeKind.clayPrim,
                            params: shapeKind.params(size: size),

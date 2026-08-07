@@ -704,6 +704,70 @@ final class CameraAndInputTests: XCTestCase {
         state.sculptBrush = .standard
     }
 
+    // MARK: Top-bar brush dials (size / strength)
+
+    func testBrushSizeDialScalesEveryStroke() {
+        // The dial is a footprint multiplier: 0.5 is exactly the pre-dial
+        // radius (the tilt test above pins that), 1.0 sweeps 1.65x wider.
+        let big = ViewportState()
+        big.viewportSize = CGSize(width: 800, height: 600)
+        big.activate(.sculpt, announce: false)
+        big.brushSize = 1
+        big.pencilBegan(at: CGPoint(x: 400, y: 300), pressure: 0.5)
+        big.pencilEnded(at: CGPoint(x: 400, y: 300))
+        let radius = big.engine.strokeRadii(of: 1)?.first ?? 0
+        XCTAssertEqual(radius, 0.21 * 1.35 * 1.65, accuracy: 0.01,
+                       "full-size dial multiplies the base footprint by 1.65")
+
+        let small = ViewportState()
+        small.viewportSize = CGSize(width: 800, height: 600)
+        small.activate(.sculpt, announce: false)
+        small.brushSize = 0
+        small.pencilBegan(at: CGPoint(x: 400, y: 300), pressure: 0.5)
+        small.pencilEnded(at: CGPoint(x: 400, y: 300))
+        let tiny = small.engine.strokeRadii(of: 1)?.first ?? 0
+        XCTAssertEqual(tiny, 0.21 * 1.35 * 0.35, accuracy: 0.01,
+                       "zero dial still leaves a usable detail brush")
+    }
+
+    func testBrushStrengthDialControlsReliefDepth() {
+        // Standard embeds the chain below the surface; strength decides how
+        // much cap survives. Stronger => shallower embed => taller ridge.
+        func embedDistance(strength: Float) -> Float {
+            let state = ViewportState()
+            state.viewportSize = CGSize(width: 800, height: 600)
+            state.activate(.sculpt, announce: false)
+            state.sculptBrush = .standard
+            state.brushStrength = strength
+            state.pencilBegan(at: CGPoint(x: 400, y: 300), pressure: 0.5)
+            state.pencilEnded(at: CGPoint(x: 400, y: 300))
+            let point = state.engine.strokePoints.last!
+            return simd_distance(SIMD3(point.x, point.y, point.z),
+                                 SIMD3(0, 0.8, 0))
+        }
+        let weak = embedDistance(strength: 0.1)
+        let strong = embedDistance(strength: 0.95)
+        XCTAssertGreaterThan(strong, weak + 0.05,
+                             "high strength leaves a taller cap above the surface")
+        XCTAssertLessThan(strong, 0.8, "even at full strength the chain stays embedded")
+    }
+
+    func testBrushStrengthDialReachesTheEngine() {
+        let state = ViewportState()
+        state.brushStrength = 0.2
+        XCTAssertEqual(state.engine.brushStrength, 0.4 + 1.2 * 0.2, accuracy: 1e-5,
+                       "dial maps 0...1 onto engine strength 0.4...1.6 (0.5 = legacy 1.0)")
+
+        // Place/erase/paint are binary — a tap always lands cells no
+        // matter how weak the dial (strength drives sculpt verbs only).
+        XCTAssertTrue(state.engine.ensureVoxelLayer())
+        state.brushStrength = 0
+        state.engine.voxelStamp(.place, at: SIMD3(6, 0, 6), brushSize: 3,
+                                color: SIMD3(1, 0.27, 0.56))
+        XCTAssertGreaterThan(state.engine.voxelCount, 6,
+                             "weak dial never blanks a stamp")
+    }
+
     func testHapticsFireOnStrokeEndAndRespectTheToggle() {
         let state = ViewportState()
         state.viewportSize = CGSize(width: 800, height: 600)

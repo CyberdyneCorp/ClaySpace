@@ -38,8 +38,12 @@ struct MirrorControls: View {
                 HStack(spacing: 4) {
                     Image(systemName: "circle.grid.cross")
                         .font(.system(size: 12))
-                    Text("Radial")
-                        .font(.system(size: 12))
+                    // Armed shows the count stepper instead — the text
+                    // yields its width to keep the top bar inside portrait.
+                    if !radialOn {
+                        Text("Radial")
+                            .font(.system(size: 12))
+                    }
                 }
                 .padding(.horizontal, 6)
                 .frame(height: 26)

@@ -641,6 +641,7 @@ final class ClayEngine {
         preset.jitter_position = max(feel.jitter, 0)
         preset.jitter_rotation = feel.jitter > 0 ? .pi : 0
         preset.steady = min(max(feel.steady, 0), 0.95)
+        preset.strength = max(brushStrength, 0.05)
         preset.pressure_size = 0.7
         preset.rotate_along_stroke = 1
         return preset
@@ -2234,6 +2235,7 @@ final class ClayEngine {
         // PARTIALLY frozen, and partial weight dithers edits through — the
         // opposite of what "frozen" promises.
         var brush = voxelBrush(size: Int32(max(1, min(15, radius / Self.voxelSize * 2))))
+        brush.strength = 1 // freeze stays hard whatever the strength dial says
         guard clay_mask_paint(handle, [world.x, world.y, world.z], &brush,
                               erase ? 0 : 1) == CLAY_OK else { return false }
         maskVersion += 1
@@ -2351,13 +2353,17 @@ final class ClayEngine {
         return ok
     }
 
+    /// Top-bar Strength dial (1.0 = the pre-dial behavior): coverage
+    /// strength for voxel brushes, stamp strength for spray.
+    var brushStrength: Float = 1
+
     private func voxelBrush(size: Int32) -> clay_brush_params {
         var brush = clay_brush_params()
         brush.struct_size = UInt32(MemoryLayout<clay_brush_params>.size)
         brush.size = size
         brush.shape = Int32(CLAY_BRUSH_SHAPE_SPHERE.rawValue)
         brush.falloff = Int32(CLAY_BRUSH_FALLOFF_CONSTANT.rawValue)
-        brush.strength = 1
+        brush.strength = max(brushStrength, 0.05)
         brush.seed = 7
         return brush
     }
@@ -2389,6 +2395,7 @@ final class ClayEngine {
         if selfBracketed { beginVoxelEdits() }
         defer { if selfBracketed { endVoxelEdits() } }
         var brush = voxelBrush(size: brushSize)
+        brush.strength = 1 // place/erase/paint are binary; the dial drives sculpt verbs
         brush.mask = gatingMask(voxelContext: true)
         let index = paletteIndex(for: color)
         for target in mirrorCells(of: cell) {
@@ -2489,6 +2496,7 @@ final class ClayEngine {
         }
 
         var brush = voxelBrush(size: 1)
+        brush.strength = 1
         let paletteId = paletteIndex(for: color)
         beginVoxelEdits() // the whole import is one undo step
         for cell in cells {
