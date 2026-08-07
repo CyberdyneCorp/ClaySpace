@@ -3916,9 +3916,55 @@ final class ClayEngine {
                 }
             }
         }
-        guard result == CLAY_OK, hit != 0 else { return nil }
+        guard result == CLAY_OK, hit != 0 else {
+            // Stacked warps/reliefs can push clay_raycast past its internal
+            // iteration budget (declared Lipschitz shrinks its steps until
+            // rays time out). The baked cache knows the same field — march
+            // it as a fallback so anchoring keeps working.
+            return cacheRaycast(origin: origin, direction: direction)
+        }
         return RayHit(position: SIMD3(pos.0, pos.1, pos.2),
                       normal: SIMD3(nor.0, nor.1, nor.2))
+    }
+
+    /// Raycast against the BAKED field cache (CPU trilinear): warp-aware
+    /// and budget-independent. Resolution-limited to the cache voxel.
+    func cacheRaycast(origin: SIMD3<Float>, direction: SIMD3<Float>) -> RayHit? {
+        guard let cache = fieldCache else { return nil }
+        let d = simd_normalize(direction)
+        let lo = cache.origin
+        let hi = cache.origin + cache.extent
+        var t0: Float = 0
+        var t1 = Float.greatestFiniteMagnitude
+        for a in 0..<3 {
+            let da = abs(d[a]) > 1e-6 ? d[a] : (d[a] < 0 ? -1e-6 : 1e-6)
+            var ta = (lo[a] - origin[a]) / da
+            var tb = (hi[a] - origin[a]) / da
+            if ta > tb { swap(&ta, &tb) }
+            t0 = max(t0, ta)
+            t1 = min(t1, tb)
+        }
+        guard t1 > t0 else { return nil }
+        let voxel = cache.voxelSize
+        var t = max(t0, 0) + voxel * 0.5
+        var iterations = 0
+        while t < t1, iterations < 512 {
+            let p = origin + d * t
+            let dist = cache.sample(at: p)
+            if dist < voxel * 0.6 {
+                let h = voxel
+                var n = SIMD3<Float>(
+                    cache.sample(at: p + SIMD3(h, 0, 0)) - cache.sample(at: p - SIMD3(h, 0, 0)),
+                    cache.sample(at: p + SIMD3(0, h, 0)) - cache.sample(at: p - SIMD3(0, h, 0)),
+                    cache.sample(at: p + SIMD3(0, 0, h)) - cache.sample(at: p - SIMD3(0, 0, h)))
+                let len = simd_length(n)
+                n = len > 1e-6 ? n / len : SIMD3(0, 1, 0)
+                return RayHit(position: p - d * max(dist, 0), normal: n)
+            }
+            t += max(dist * 0.8, voxel * 0.35)
+            iterations += 1
+        }
+        return nil
     }
 
     // MARK: Error plumbing

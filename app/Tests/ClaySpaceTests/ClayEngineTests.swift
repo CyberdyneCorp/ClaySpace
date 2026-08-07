@@ -177,6 +177,26 @@ final class ClayEngineTests: XCTestCase {
         XCTAssertGreaterThan(engine.safeStepScale, 0.02, "but stay marchable")
     }
 
+    func testCacheRaycastFallbackAgreesWithTheDocument() async {
+        // The anchor of last resort when clay_raycast times out under
+        // stacked warps: marching the baked cache must land on the same
+        // surface, within a cache voxel.
+        let engine = ClayEngine()
+        await engine.bakeNow()
+        let origin = SIMD3<Float>(0, 0.8, 3)
+        let direction = SIMD3<Float>(0, 0, -1)
+        guard let clay = engine.raycast(origin: origin, direction: direction),
+              let cached = engine.cacheRaycast(origin: origin, direction: direction)
+        else { return XCTFail("both paths must hit the seed ball") }
+        XCTAssertEqual(simd_distance(clay.position, cached.position), 0,
+                       accuracy: 0.06, "cache hit lands on the same surface")
+        XCTAssertGreaterThan(simd_dot(clay.normal, cached.normal), 0.9,
+                             "and agrees on the normal")
+        // A ray that misses, misses in both.
+        XCTAssertNil(engine.cacheRaycast(origin: SIMD3(5, 5, 3),
+                                         direction: SIMD3(0, 0, -1)))
+    }
+
     func testVoxelMagnifyVerb() {
         let engine = ClayEngine()
         XCTAssertTrue(engine.ensureVoxelLayer())
