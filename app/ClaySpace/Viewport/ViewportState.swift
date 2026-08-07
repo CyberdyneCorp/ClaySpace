@@ -268,42 +268,66 @@ final class ViewportState {
     /// so it never chases its own fresh surface); Snake Hook pulls free
     /// tendrils on the view plane with a tapering radius.
     enum SculptBrush: String, CaseIterable, Identifiable {
-        case standard, carve, snakeHook
+        case standard, crease, carve, snakeHook, move, magnify, pinch, noise
 
         /// How far the chain center sits from the surface, in radii.
-        /// Standard EMBEDS most of the tube: only a shallow cap pokes out
-        /// (strength-scaled, ~0.35r at the default) — the wide soft ridge
-        /// of ZBrush's Standard, not a snake-hook tube. Carve floats above
+        /// Standard/Crease are surface-relief REGIONS (CLAY_OP_RELIEF /
+        /// INCISE): the chain rides ON the surface and the op displaces
+        /// the accumulated field along its own normal. Carve floats above
         /// so the subtract takes a shallow bite, not a gouge.
         func surfaceOffset(strength: Float) -> Float {
             switch self {
-            case .standard: -(1 - (0.1 + 0.5 * strength))
             case .carve: 1 - (0.15 + 0.5 * strength)
-            case .snakeHook: 0
+            default: 0
             }
         }
-        /// Standard sweeps wider than it is tall.
-        var radiusScale: Float { self == .standard ? 1.35 : 1.0 }
+        /// Standard sweeps wider than it is tall; Crease stays tight.
+        var radiusScale: Float {
+            switch self {
+            case .standard: 1.35
+            case .crease: 0.8
+            default: 1.0
+            }
+        }
 
         var id: String { rawValue }
         var title: String {
             switch self {
             case .standard: "Standard"
+            case .crease: "Crease"
             case .carve: "Carve"
             case .snakeHook: "Snake Hook"
+            case .move: "Move"
+            case .magnify: "Magnify"
+            case .pinch: "Pinch"
+            case .noise: "Noise"
             }
         }
         var symbol: String {
             switch self {
             case .standard: "circle.tophalf.filled"
+            case .crease: "chevron.compact.down"
             case .carve: "minus.circle"
             case .snakeHook: "point.topleft.down.to.point.bottomright.curvepath"
+            case .move: "hand.draw"
+            case .magnify: "arrow.up.left.and.arrow.down.right.circle"
+            case .pinch: "arrow.right.and.line.vertical.and.arrow.left"
+            case .noise: "water.waves"
             }
         }
         var followsSurface: Bool { self != .snakeHook }
+        /// Engine-side warps (ClayCore 0.22): they act on the assembled
+        /// surface via clay_layer_move_surface / add_deformer, not strokes.
+        var isWarp: Bool {
+            self == .move || self == .magnify || self == .pinch || self == .noise
+        }
     }
     var sculptBrush: SculptBrush = .standard
     @ObservationIgnored fileprivate var strokeTravel: Float = 0
+    @ObservationIgnored fileprivate var moveDrag:
+        (anchor: SIMD3<Float>, current: SIMD3<Float>, radius: Float)?
+    @ObservationIgnored fileprivate var warpAnchor: SIMD3<Float>?
+    @ObservationIgnored fileprivate var warpRadius: Float = 0
 
     /// Top-bar brush dials. Size multiplies every brush footprint (0.5 =
     /// the pre-dial behavior; pressure still breathes inside it); strength
@@ -878,6 +902,23 @@ extension ViewportState: PencilToolSink {
               let ray = ray(through: point) else { return }
         let hit = engine.raycast(origin: ray.origin, direction: ray.direction)
 
+        // Warp brushes (ClayCore 0.22) anchor on the surface and commit on
+        // pencil-up: Move drags the assembled surface, Magnify/Pinch/Noise
+        // add region deformers. No stroke item is created.
+        if activeTool == .sculpt, sculptBrush.isWarp {
+            guard let anchorHit = hit else { return } // warps need a surface
+            let warpR = radius(for: max(pressure, 0.1), altitude: altitude)
+                * sculptBrush.radiusScale
+            if sculptBrush == .move {
+                moveDrag = (anchorHit.position, anchorHit.position, warpR)
+                strokePlane = (anchorHit.position, camera.basis.forward)
+            } else {
+                warpAnchor = anchorHit.position
+                warpRadius = warpR
+            }
+            return
+        }
+
         var start: SIMD3<Float>?
         switch activeTool {
         case .sculpt where sculptBrush == .carve:
@@ -897,6 +938,7 @@ extension ViewportState: PencilToolSink {
 
         let op: clay_op
         let blend: Float
+        var rounding: Float = 0
         switch activeTool {
         case .erase: op = CLAY_OP_SUBTRACT; blend = r * 0.09
         case .paint: op = CLAY_OP_PAINT; blend = r * 0.25 // support ≈ brush radius
@@ -904,12 +946,23 @@ extension ViewportState: PencilToolSink {
             switch sculptBrush {
             case .carve: op = CLAY_OP_SUBTRACT; blend = r * 0.12
             case .snakeHook: op = CLAY_OP_ADD; blend = r * 0.12
-            case .standard: op = CLAY_OP_ADD; blend = r * 0.2 // soft shoulders
+            case .standard:
+                // ZBrush Standard proper (CLAY_OP_RELIEF): the chain is a
+                // REGION, blendK the lift amplitude, rounding the falloff.
+                op = CLAY_OP_RELIEF
+                blend = r * (0.12 + 0.55 * brushStrength)
+                rounding = r * 0.9
+            case .crease:
+                op = CLAY_OP_INCISE
+                blend = r * (0.1 + 0.45 * brushStrength)
+                rounding = r * 0.6
+            default: op = CLAY_OP_ADD; blend = r * 0.12 // warps returned above
             }
         }
         strokeTravel = 0
         if engine.beginStroke(at: start, radius: r, op: op,
-                              blendK: blend, color: activeColor) {
+                              blendK: blend, color: activeColor,
+                              rounding: rounding) {
             // Later moves project onto the view-parallel plane through the
             // start point: predictable smears that don't chase their own
             // freshly-built surface.
@@ -930,6 +983,14 @@ extension ViewportState: PencilToolSink {
             freezePaint(at: point, pressure: max(pressure, 0.1))
             return
         }
+        if activeTool == .sculpt, moveDrag != nil, gizmoDrag == nil {
+            if let ray = ray(through: point), let plane = strokePlane,
+               let p = intersect(ray: ray, plane: plane) {
+                moveDrag?.current = p
+            }
+            return
+        }
+        if activeTool == .sculpt, warpAnchor != nil { return } // tap-style warps
         if mode == .sdf, activeTool == .trim, gizmoDrag == nil, let start = trimStart {
             switch trimShape {
             case .rect:
@@ -1136,6 +1197,8 @@ extension ViewportState: PencilToolSink {
     func pencilCancelled() {
         pencilStart = nil
         strokePlane = nil
+        moveDrag = nil
+        warpAnchor = nil
         lastStrokePoint = nil
         dragStartItemPosition = nil
         dragStartHit = nil
@@ -1176,6 +1239,45 @@ extension ViewportState: PencilToolSink {
         }
         if activeTool == .trim, gizmoDrag == nil, trimStart != nil {
             applyTrim(endingAt: point)
+            return
+        }
+        if let drag = moveDrag {
+            moveDrag = nil
+            strokePlane = nil
+            let displacement = drag.current - drag.anchor
+            let applied = engine.moveSurface(center: drag.anchor,
+                                             displacement: displacement,
+                                             radius: drag.radius * 1.2)
+            if applied > 0 {
+                emitHaptic(.completed, at: point)
+            } else if simd_length(displacement) > 1e-3 {
+                showToast("Move reached nothing")
+            }
+            return
+        }
+        if let anchor = warpAnchor {
+            warpAnchor = nil
+            switch sculptBrush {
+            case .magnify, .pinch:
+                let strength = (0.15 + 0.6 * brushStrength)
+                    * (sculptBrush == .pinch ? -1 : 1)
+                if engine.magnifySurface(center: anchor, radius: warpRadius * 1.4,
+                                         strength: strength) > 0 {
+                    emitHaptic(.completed, at: point)
+                }
+            case .noise:
+                if let ray = ray(through: point),
+                   let picked = engine.pick(origin: ray.origin,
+                                            direction: ray.direction) {
+                    let amplitude = warpRadius * 0.1 * (0.3 + 1.4 * brushStrength)
+                    if engine.noiseSurface(index: picked.index,
+                                           amplitude: amplitude,
+                                           frequency: 3 / max(warpRadius, 0.05)) {
+                        emitHaptic(.completed, at: point)
+                    }
+                }
+            default: break
+            }
             return
         }
         if engine.isEditingParams {

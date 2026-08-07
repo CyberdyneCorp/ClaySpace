@@ -104,8 +104,9 @@ final class CameraAndInputTests: XCTestCase {
         let center = CGPoint(x: 400, y: 300) // default camera looks at the base ball
         state.pencilBegan(at: center, pressure: 0.5)
         state.pencilEnded(at: center)
-        XCTAssertEqual(state.engine.items.count, 2, "the tap placed a sphere through the ABI")
-        XCTAssertEqual(state.engine.items[1].op, Int32(CLAY_OP_ADD.rawValue))
+        XCTAssertEqual(state.engine.items.count, 2, "the tap placed a stroke through the ABI")
+        XCTAssertEqual(state.engine.items[1].op, Int32(CLAY_OP_RELIEF.rawValue),
+                       "Standard is ClayCore's surface relief now")
 
         state.requestUndo()
         XCTAssertEqual(state.engine.items.count, 1, "the undo gesture unwinds the tap")
@@ -635,23 +636,22 @@ final class CameraAndInputTests: XCTestCase {
         // stay on the flat plane through the first hit; a surface-
         // conforming one bends back with the sphere.
         state.pencilBegan(at: CGPoint(x: 400, y: 300), pressure: 0.5)
-        for x in stride(from: 412, through: 520, by: 6) {
+        for x in stride(from: 412, through: 470, by: 6) {
             state.pencilMoved(to: CGPoint(x: CGFloat(x), y: 300), pressure: 0.5)
         }
-        state.pencilEnded(at: CGPoint(x: 520, y: 300))
+        state.pencilEnded(at: CGPoint(x: 470, y: 300))
 
         let ballCenter = SIMD3<Float>(0, 0.8, 0)
         let radii = state.engine.strokePoints.map { point in
             simd_distance(SIMD3(point.x, point.y, point.z), ballCenter)
         }
-        XCTAssertGreaterThan(radii.count, 4)
-        // Anchors EMBED below the sphere's surface (0.8) by ~0.65 brush
-        // radii so only a shallow cap protrudes; a tangent-plane stroke
-        // would keep distance >= 0.8 and run off toward 1.0+.
+        XCTAssertGreaterThan(radii.count, 2)
+        // The relief region rides ON the surface (0.8): a tangent-plane
+        // stroke would run off toward 1.0+ instead of hugging the sphere.
         for distance in radii.dropFirst() {
-            XCTAssertLessThan(distance, 0.88,
+            XCTAssertLessThan(distance, 0.92,
                               "stroke bent WITH the surface (tangent would pass 1.0)")
-            XCTAssertGreaterThan(distance, 0.5, "but not swallowed by it")
+            XCTAssertGreaterThan(distance, 0.7, "and stays on it, not inside")
         }
 
         // The ZBrush-Standard signature: relief is a WIDE SHALLOW ridge —
@@ -773,10 +773,10 @@ final class CameraAndInputTests: XCTestCase {
                        "zero dial still leaves a usable detail brush")
     }
 
-    func testBrushStrengthDialControlsReliefDepth() {
-        // Standard embeds the chain below the surface; strength decides how
-        // much cap survives. Stronger => shallower embed => taller ridge.
-        func embedDistance(strength: Float) -> Float {
+    func testBrushStrengthDialControlsReliefAmplitude() {
+        // Standard is a CLAY_OP_RELIEF region: strength drives the lift
+        // amplitude (blendK), and the chain rides ON the surface.
+        func reliefAmplitude(strength: Float) -> Float {
             let state = ViewportState()
             state.viewportSize = CGSize(width: 800, height: 600)
             state.activate(.sculpt, announce: false)
@@ -784,15 +784,49 @@ final class CameraAndInputTests: XCTestCase {
             state.brushStrength = strength
             state.pencilBegan(at: CGPoint(x: 400, y: 300), pressure: 0.5)
             state.pencilEnded(at: CGPoint(x: 400, y: 300))
-            let point = state.engine.strokePoints.last!
-            return simd_distance(SIMD3(point.x, point.y, point.z),
-                                 SIMD3(0, 0.8, 0))
+            let item = state.engine.items.last!
+            XCTAssertEqual(item.op, Int32(CLAY_OP_RELIEF.rawValue))
+            XCTAssertGreaterThan(item.rounding, 0, "relief declares its falloff")
+            let anchor = state.engine.strokePoints.last!
+            XCTAssertEqual(simd_distance(SIMD3(anchor.x, anchor.y, anchor.z),
+                                         SIMD3(0, 0.8, 0)), 0.8, accuracy: 0.06,
+                           "the region rides ON the surface, not embedded")
+            return item.blendK
         }
-        let weak = embedDistance(strength: 0.1)
-        let strong = embedDistance(strength: 0.95)
-        XCTAssertGreaterThan(strong, weak + 0.05,
-                             "high strength leaves a taller cap above the surface")
-        XCTAssertLessThan(strong, 0.8, "even at full strength the chain stays embedded")
+        let weak = reliefAmplitude(strength: 0.1)
+        let strong = reliefAmplitude(strength: 0.95)
+        XCTAssertGreaterThan(strong, weak * 2, "strength scales the lift")
+    }
+
+    func testCreaseBrushIncisesAndMoveBrushWarps() {
+        let state = ViewportState()
+        state.viewportSize = CGSize(width: 800, height: 600)
+        state.activate(.sculpt, announce: false)
+
+        state.sculptBrush = .crease
+        state.pencilBegan(at: CGPoint(x: 400, y: 300), pressure: 0.5)
+        state.pencilEnded(at: CGPoint(x: 400, y: 300))
+        XCTAssertEqual(state.engine.items.last?.op, Int32(CLAY_OP_INCISE.rawValue))
+        state.requestUndo()
+
+        // Move: a drag warps the assembled surface without adding items.
+        state.sculptBrush = .move
+        let before = state.engine.items.count
+        let probe = { () -> Float in
+            state.engine.raycast(origin: SIMD3(0.25, 0.8, 3),
+                                 direction: SIMD3(0, 0, -1))?.position.z ?? 0
+        }
+        let frontBefore = probe()
+        state.pencilBegan(at: CGPoint(x: 400, y: 300), pressure: 0.6)
+        for x in stride(from: 410, through: 500, by: 10) {
+            state.pencilMoved(to: CGPoint(x: CGFloat(x), y: 300), pressure: 0.6)
+        }
+        state.pencilEnded(at: CGPoint(x: 500, y: 300))
+        XCTAssertEqual(state.engine.items.count, before, "move adds no items")
+        XCTAssertGreaterThan(probe(), frontBefore + 0.01,
+                             "material followed the drag inside the region")
+        state.requestUndo()
+        state.sculptBrush = .standard
     }
 
     func testBrushStrengthDialReachesTheEngine() {

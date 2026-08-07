@@ -9,10 +9,128 @@ import claycore
 final class ClayEngineTests: XCTestCase {
 
 
+    func testReliefStrokeLiftsTheSurfaceInsideItsRegion() {
+        let engine = ClayEngine()
+        XCTAssertTrue(engine.addShape(CLAY_PRIM_SPHERE, params: [0.6],
+                                      at: SIMD3(0, 0.8, 0), op: CLAY_OP_ADD,
+                                      blendK: 0, color: ClayEngine.clayColor))
+        let front = engine.raycast(origin: SIMD3(0, 0.8, 3),
+                                   direction: SIMD3(0, 0, -1))?.position.z ?? 0
+
+        // A relief stroke ON the front face: region radius 0.2, lift 0.08.
+        XCTAssertTrue(engine.beginStroke(at: SIMD3(0, 0.8, 0.6), radius: 0.2,
+                                         op: CLAY_OP_RELIEF, blendK: 0.08,
+                                         color: ClayEngine.clayColor, rounding: 0.18))
+        engine.appendStrokePoint(SIMD3(0.1, 0.8, 0.59), radius: 0.2)
+        engine.endStroke()
+
+        let lifted = engine.raycast(origin: SIMD3(0, 0.8, 3),
+                                    direction: SIMD3(0, 0, -1))?.position.z ?? 0
+        XCTAssertGreaterThan(lifted, front + 0.02, "surface rose inside the region")
+        XCTAssertLessThan(lifted, front + 0.12, "…by about the amplitude")
+        // A flank far from the region: untouched (seed ball surface).
+        let side = engine.raycast(origin: SIMD3(3, 0.8, 0),
+                                  direction: SIMD3(-1, 0, 0))?.position.x ?? 0
+        XCTAssertEqual(side, 0.8, accuracy: 0.03)
+
+        XCTAssertTrue(engine.undo())
+        let restored = engine.raycast(origin: SIMD3(0, 0.8, 3),
+                                      direction: SIMD3(0, 0, -1))?.position.z ?? 0
+        XCTAssertEqual(restored, front, accuracy: 0.01, "one undo unwinds the relief")
+    }
+
+    func testInciseStrokeCutsIn() {
+        let engine = ClayEngine()
+        XCTAssertTrue(engine.addShape(CLAY_PRIM_SPHERE, params: [0.6],
+                                      at: SIMD3(0, 0.8, 0), op: CLAY_OP_ADD,
+                                      blendK: 0, color: ClayEngine.clayColor))
+        let front = engine.raycast(origin: SIMD3(0, 0.8, 3),
+                                   direction: SIMD3(0, 0, -1))?.position.z ?? 0
+        XCTAssertTrue(engine.beginStroke(at: SIMD3(0, 0.8, 0.6), radius: 0.15,
+                                         op: CLAY_OP_INCISE, blendK: 0.06,
+                                         color: ClayEngine.clayColor, rounding: 0.12))
+        engine.endStroke()
+        let cut = engine.raycast(origin: SIMD3(0, 0.8, 3),
+                                 direction: SIMD3(0, 0, -1))?.position.z ?? 0
+        XCTAssertLessThan(cut, front - 0.02, "incise sinks the surface")
+    }
+
+    func testMoveSurfaceDragsTheAssembledSurfaceAsOneUndo() {
+        let engine = ClayEngine()
+        XCTAssertTrue(engine.addShape(CLAY_PRIM_SPHERE, params: [0.5],
+                                      at: SIMD3(0, 0.8, 0), op: CLAY_OP_ADD,
+                                      blendK: 0, color: ClayEngine.clayColor))
+        let count = engine.items.count
+        let tip = engine.raycast(origin: SIMD3(0, 3, 0),
+                                 direction: SIMD3(0, -1, 0))?.position.y ?? 0
+
+        let applied = engine.moveSurface(center: SIMD3(0, 1.3, 0),
+                                         displacement: SIMD3(0, 0.4, 0),
+                                         radius: 0.6)
+        XCTAssertGreaterThan(applied, 0, "the drag reached the ball")
+        XCTAssertEqual(engine.items.count, count, "a warp adds no items")
+        let pulled = engine.raycast(origin: SIMD3(0, 3, 0),
+                                    direction: SIMD3(0, -1, 0))?.position.y ?? 0
+        XCTAssertGreaterThan(pulled, tip + 0.05,
+                             "the tip followed the drag (documented partial pull)")
+
+        XCTAssertTrue(engine.undo(), "whole drag is one step")
+        let restored = engine.raycast(origin: SIMD3(0, 3, 0),
+                                      direction: SIMD3(0, -1, 0))?.position.y ?? 0
+        XCTAssertEqual(restored, tip, accuracy: 0.02)
+        XCTAssertTrue(engine.redo())
+        let again = engine.raycast(origin: SIMD3(0, 3, 0),
+                                   direction: SIMD3(0, -1, 0))?.position.y ?? 0
+        XCTAssertEqual(again, pulled, accuracy: 0.02)
+    }
+
+    func testMagnifyAndNoiseDeformersApplyAndUndo() {
+        let engine = ClayEngine()
+        XCTAssertTrue(engine.addShape(CLAY_PRIM_SPHERE, params: [0.5],
+                                      at: SIMD3(0, 0.8, 0), op: CLAY_OP_ADD,
+                                      blendK: 0, color: ClayEngine.clayColor))
+        let front = engine.raycast(origin: SIMD3(0, 0.8, 3),
+                                   direction: SIMD3(0, 0, -1))?.position.z ?? 0
+
+        // Magnify about the front face grows the surface toward the camera.
+        XCTAssertGreaterThan(engine.magnifySurface(center: SIMD3(0, 0.8, 0.5),
+                                                   radius: 0.5, strength: 0.5), 0)
+        let grown = engine.raycast(origin: SIMD3(0, 0.8, 3),
+                                   direction: SIMD3(0, 0, -1))?.position.z ?? 0
+        XCTAssertNotEqual(grown, front, accuracy: 0.01, "magnify moved the surface")
+        XCTAssertTrue(engine.undo(), "grouped: one step")
+        let back = engine.raycast(origin: SIMD3(0, 0.8, 3),
+                                  direction: SIMD3(0, 0, -1))?.position.z ?? 0
+        XCTAssertEqual(back, front, accuracy: 0.01)
+
+        // Noise perturbs the whole item; undo restores.
+        XCTAssertTrue(engine.noiseSurface(index: engine.items.count - 1,
+                                          amplitude: 0.05, frequency: 8))
+        var maxDeviation: Float = 0
+        for x in stride(from: Float(-0.3), through: 0.3, by: 0.1) {
+            let z = engine.raycast(origin: SIMD3(x, 0.8, 3),
+                                   direction: SIMD3(0, 0, -1))?.position.z ?? 0
+            let expected = sqrt(max(0.25 - x * x, 0))
+            maxDeviation = max(maxDeviation, abs(z - expected))
+        }
+        XCTAssertGreaterThan(maxDeviation, 0.004, "noise roughened the surface")
+        XCTAssertTrue(engine.undo())
+    }
+
+    func testVoxelMagnifyVerb() {
+        let engine = ClayEngine()
+        XCTAssertTrue(engine.ensureVoxelLayer())
+        engine.voxelStamp(.place, at: SIMD3(20, 4, 20), brushSize: 3,
+                          color: SIMD3(0.93, 0.73, 0))
+        XCTAssertTrue(engine.voxelSculpt(.magnify, at: SIMD3(20, 4, 20),
+                                         brushSize: 7,
+                                         color: SIMD3(0.93, 0.73, 0)))
+    }
+
     func testParamSessionPromotesSphereToEllipsoidAsOneUndoStep() {
         let engine = ClayEngine()
         XCTAssertTrue(engine.addShape(CLAY_PRIM_SPHERE, params: [0.3],
-                                      at: SIMD3(0, 1, 0), op: CLAY_OP_ADD,
+                                      at: SIMD3(1.5, 0.8, 0), op: CLAY_OP_ADD,
                                       blendK: 0, color: SIMD3(1, 0.27, 0.56)))
         let index = engine.items.count - 1
         let countBefore = engine.items.count
@@ -36,10 +154,10 @@ final class ClayEngineTests: XCTestCase {
 
         // The document field agrees with the mirror: the stretched axis
         // reaches further than the round ones.
-        let hitZ = engine.raycast(origin: SIMD3(0, 1, 3), direction: SIMD3(0, 0, -1))
-        let hitX = engine.raycast(origin: SIMD3(3, 1, 0), direction: SIMD3(-1, 0, 0))
+        let hitZ = engine.raycast(origin: SIMD3(1.5, 0.8, 3), direction: SIMD3(0, 0, -1))
+        let hitX = engine.raycast(origin: SIMD3(3, 0.8, 0), direction: SIMD3(-1, 0, 0))
         XCTAssertEqual(hitZ?.position.z ?? 0, 0.45, accuracy: 0.03)
-        XCTAssertEqual(hitX?.position.x ?? 0, 0.30, accuracy: 0.03)
+        XCTAssertEqual(hitX?.position.x ?? 0, 1.80, accuracy: 0.03)
     }
 
     func testSeedsOneBaseSphereThatCannotBeUndone() {

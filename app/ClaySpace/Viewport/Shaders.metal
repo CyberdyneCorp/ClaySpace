@@ -197,6 +197,8 @@ constant int OP_ADD = 0;
 constant int OP_SUBTRACT = 1;
 constant int OP_INTERSECT = 2;
 constant int OP_PAINT = 3;
+constant int OP_RELIEF = 14; // region lifts the accumulated surface (ZBrush Standard)
+constant int OP_INCISE = 15; // region cuts it in (Crease / DamStandard)
 
 constant int BLEND_QUADRATIC = 1;
 constant int BLEND_CUBIC = 2;
@@ -475,6 +477,11 @@ static float mapDist(float3 p, FieldCtx ctx) {
                 d = -csminP(-d, di, k, it.blend); // op_ssubtract
             } else if (it.op == OP_INTERSECT) {
                 d = -csminP(-d, -di, k, it.blend);
+            } else if (it.op == OP_RELIEF || it.op == OP_INCISE) {
+                float width = max(it.rounding, 1e-6);
+                float w = 1.0 - clamp(di / width, 0.0, 1.0);
+                w = w * w * (3.0 - 2.0 * w);
+                d -= (it.op == OP_RELIEF ? it.blendK : -it.blendK) * w;
             }
         }
         return d;
@@ -501,6 +508,11 @@ static float mapDist(float3 p, FieldCtx ctx) {
             ld[slot] = -csminP(-ld[slot], di, k, it.blend);
         } else if (it.op == OP_INTERSECT) {
             ld[slot] = -csminP(-ld[slot], -di, k, it.blend);
+        } else if (it.op == OP_RELIEF || it.op == OP_INCISE) {
+            float width = max(it.rounding, 1e-6);
+            float w = 1.0 - clamp(di / width, 0.0, 1.0);
+            w = w * w * (3.0 - 2.0 * w);
+            ld[slot] -= (it.op == OP_RELIEF ? it.blendK : -it.blendK) * w;
         }
     }
     for (int slot = 0; slot < ctx.layerCount; slot++) d = min(d, ld[slot]);
@@ -543,6 +555,11 @@ static float4 mapShade(float3 p, FieldCtx ctx) {
                 float support = max(blendSupport(it.blend, k), k);
                 float w = 1.0 - clamp(di / max(support, 1e-6), 0.0, 1.0);
                 col = mix(col, it.color, w);
+            } else if (it.op == OP_RELIEF || it.op == OP_INCISE) {
+                float width = max(it.rounding, 1e-6);
+                float w = 1.0 - clamp(di / width, 0.0, 1.0);
+                w = w * w * (3.0 - 2.0 * w);
+                d -= (it.op == OP_RELIEF ? it.blendK : -it.blendK) * w;
             }
         }
         return float4(col, d);
@@ -576,6 +593,11 @@ static float4 mapShade(float3 p, FieldCtx ctx) {
             float support = max(blendSupport(it.blend, k), k);
             float w = 1.0 - clamp(di / max(support, 1e-6), 0.0, 1.0);
             lcol[slot] = mix(lcol[slot], it.color, w);
+        } else if (it.op == OP_RELIEF || it.op == OP_INCISE) {
+            float width = max(it.rounding, 1e-6);
+            float w = 1.0 - clamp(di / width, 0.0, 1.0);
+            w = w * w * (3.0 - 2.0 * w);
+            ld[slot] -= (it.op == OP_RELIEF ? it.blendK : -it.blendK) * w;
         }
     }
     float d = cacheD;

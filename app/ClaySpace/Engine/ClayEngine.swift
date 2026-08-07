@@ -230,6 +230,7 @@ final class ClayEngine {
         case voxelStep // grid diff lives in ClayCore's journal (ABI 0.20)
         case reparam(index: Int, before: SIMD4<Float>, after: SIMD4<Float>,
                      primBefore: Int32, primAfter: Int32)
+        case warp
         case addBatch(count: Int) // spray stroke: N stamps, one clay step
         case removeBatch(rows: [LayerRow])
     }
@@ -250,6 +251,7 @@ final class ClayEngine {
         case voxelStep
         case reparam(index: Int, before: SIMD4<Float>, after: SIMD4<Float>,
                      primBefore: Int32, primAfter: Int32)
+        case warp
         case addBatch(rows: [LayerRow])
         case removeBatch(rows: [LayerRow])
     }
@@ -787,7 +789,8 @@ final class ClayEngine {
     /// smear undoes as a single step (sdf-sculpting spec).
     @discardableResult
     func beginStroke(at position: SIMD3<Float>, radius: Float,
-                     op: clay_op, blendK: Float, color: SIMD3<Float>) -> Bool {
+                     op: clay_op, blendK: Float, color: SIMD3<Float>,
+                     rounding: Float = 0) -> Bool {
         guard let doc, activeStroke == nil,
               strokePoints.count < Self.maxStrokePoints else { return false }
 
@@ -799,6 +802,7 @@ final class ClayEngine {
         }
         clay_item_add_stroke_point(item, [position.x, position.y, position.z], radius)
         clay_item_set_stroke_blend_k(item, radius * 0.12)
+        if rounding > 0 { _ = clay_item_set_rounding(item, rounding) }
         clay_item_set_op(item, Int32(op.rawValue))
         clay_item_set_blend(item, Int32(CLAY_BLEND_QUADRATIC.rawValue), blendK)
         clay_item_set_color(item, [color.x, color.y, color.z])
@@ -819,20 +823,20 @@ final class ClayEngine {
         strokeMin = position
         strokeMax = position
         strokeMaxRadius = radius
-        let bound = strokeBound(chainK: radius * 0.5, blendK: blendK)
+        let bound = strokeBound(chainK: radius * 0.5, blendK: blendK + rounding)
         items.append(SceneItem(
             position: .zero, scale: 1, rotation: SIMD4(0, 0, 0, 1),
             params: SIMD4(Float(strokePoints.count), 1, radius * 0.12, 0),
             color: color, blendK: blendK,
             prim: Self.strokePrim, op: Int32(op.rawValue),
-            blend: Int32(CLAY_BLEND_QUADRATIC.rawValue), rounding: 0,
+            blend: Int32(CLAY_BLEND_QUADRATIC.rawValue), rounding: rounding,
             boundCenter: bound.0, boundRadius: bound.1,
             mirrorFlag: mirrorAxes != 0 ? 1 : 0,
             radialCount: Float(radialCount),
             layerSlot: Float(activeLayerSlot)
         ))
         strokePoints.append(SIMD4(position.x, position.y, position.z, radius))
-        let pad = radius + radius * 0.12 * 4 + blendK * 4 + 0.02
+        let pad = radius + radius * 0.12 * 4 + blendK * 4 + rounding + 0.02
         var aabb = (min: position - SIMD3(repeating: pad),
                     max: position + SIMD3(repeating: pad))
         if radialCount >= 2 { aabb = Self.ringAABB(aabb) }
@@ -861,9 +865,11 @@ final class ClayEngine {
         strokeMax = simd_max(strokeMax, position)
         strokeMaxRadius = max(strokeMaxRadius, radius)
         var bound = strokeBound(chainK: items[items.count - 1].params.z,
-                                blendK: items[items.count - 1].blendK)
+                                blendK: items[items.count - 1].blendK
+                                    + items[items.count - 1].rounding)
         let pad = strokeMaxRadius + items[items.count - 1].params.z * 4
-            + items[items.count - 1].blendK * 4 + 0.02
+            + items[items.count - 1].blendK * 4
+            + items[items.count - 1].rounding + 0.02
         var aabb = (min: strokeMin - SIMD3(repeating: pad),
                     max: strokeMax + SIMD3(repeating: pad))
         if items[items.count - 1].radialCount >= 2 {
@@ -891,6 +897,123 @@ final class ClayEngine {
         guard activeStroke != nil else { return }
         endStroke()
         _ = undo()
+    }
+
+    // MARK: Surface warps (ClayCore 0.22: Move brush, magnify/pinch, noise)
+
+    /// ZBrush Move: drags the layer's ASSEMBLED surface — every item the
+    /// region reaches takes a front-of-chain warp, one undo step in clay.
+    /// Mirror bounds pad conservatively by the drag length (the warp's
+    /// exact reach is engine-side); undo/redo just re-bakes.
+    @discardableResult
+    func moveSurface(center: SIMD3<Float>, displacement: SIMD3<Float>,
+                     radius: Float) -> Int {
+        guard let doc, activeStroke == nil, transformIndex == nil,
+              paramSessionIndex == nil, radius > 0,
+              simd_length(displacement) > 1e-4 else { return 0 }
+        var params = clay_move_params()
+        params.struct_size = UInt32(MemoryLayout<clay_move_params>.size)
+        params.radius = radius
+        params.ease = CLAY_EASE_LINEAR
+        params.front_only = 1
+        var applied = 0
+        guard check(clay_layer_move_surface(doc, layer,
+                                            [center.x, center.y, center.z],
+                                            [displacement.x, displacement.y, displacement.z],
+                                            &params, &applied)), applied > 0 else {
+            return 0
+        }
+        padBounds(around: center, reach: radius + simd_length(displacement),
+                  by: simd_length(displacement))
+        undoLog.append(.warp)
+        redoOps.removeAll()
+        fieldCache = nil
+        commit()
+        scheduleBake()
+        scheduleAutosave()
+        return applied
+    }
+
+    /// Magnify (strength > 0) / pinch (strength < 0) about a world point:
+    /// a CLAY_DEFORM_MAGNIFY warp on every item the region reaches, mapped
+    /// into each item's LOCAL frame. Grouped: one undo step.
+    @discardableResult
+    func magnifySurface(center: SIMD3<Float>, radius: Float,
+                        strength: Float) -> Int {
+        guard let doc, activeStroke == nil, transformIndex == nil,
+              paramSessionIndex == nil, radius > 0, abs(strength) > 1e-4
+        else { return 0 }
+        _ = check(clay_document_begin_undo_group(doc))
+        var applied = 0
+        for index in items.indices where itemLayers[index] == Int32(activeLayerSlot) {
+            let aabb = itemAABBs[index]
+            let nearest = simd_clamp(center, aabb.min, aabb.max)
+            guard simd_distance(nearest, center) <= radius else { continue }
+            let item = items[index]
+            let scale = item.scale == 0 ? 1 : item.scale
+            let q = simd_quatf(vector: item.rotation)
+            let local = q.inverse.act(center - item.position) / scale
+            let deformParams: [Float] = [local.x, local.y, local.z,
+                                         radius / scale, strength]
+            if check(clay_layer_add_deformer(doc, layerId(of: index), nodeIDs[index],
+                                             Int32(CLAY_DEFORM_MAGNIFY.rawValue),
+                                             deformParams, deformParams.count,
+                                             CLAY_EASE_LINEAR, 1)) {
+                applied += 1
+            }
+        }
+        _ = check(clay_document_end_undo_group(doc))
+        guard applied > 0 else { return 0 }
+        padBounds(around: center, reach: radius,
+                  by: radius * abs(strength) * 0.5 + 0.02)
+        undoLog.append(.warp)
+        redoOps.removeAll()
+        fieldCache = nil
+        commit()
+        scheduleBake()
+        scheduleAutosave()
+        return applied
+    }
+
+    /// Fractal noise displacement over one item's surface
+    /// (CLAY_DEFORM_NOISE: amplitude, frequency, octaves, gain, seed).
+    @discardableResult
+    func noiseSurface(index: Int, amplitude: Float, frequency: Float,
+                      seed: Float = 7) -> Bool {
+        guard let doc, items.indices.contains(index), activeStroke == nil,
+              transformIndex == nil, paramSessionIndex == nil,
+              amplitude > 0, frequency > 0 else { return false }
+        let scale = items[index].scale == 0 ? 1 : items[index].scale
+        let deformParams: [Float] = [amplitude / scale, frequency * scale,
+                                     4, 0.5, seed]
+        guard check(clay_layer_add_deformer(doc, layerId(of: index), nodeIDs[index],
+                                            Int32(CLAY_DEFORM_NOISE.rawValue),
+                                            deformParams, deformParams.count,
+                                            CLAY_EASE_LINEAR, 1)) else { return false }
+        localBounds[index].radius += amplitude + 0.02
+        refreshWorldBound(index)
+        undoLog.append(.warp)
+        redoOps.removeAll()
+        fieldCache = nil
+        commit()
+        scheduleBake()
+        scheduleAutosave()
+        return true
+    }
+
+    /// Conservative bound growth for engine-side warps the mirror cannot
+    /// itemize: every item whose AABB the region touches gets the pad.
+    private func padBounds(around center: SIMD3<Float>, reach: Float, by pad: Float) {
+        for index in items.indices {
+            let aabb = itemAABBs[index]
+            let nearest = simd_clamp(center, aabb.min, aabb.max)
+            guard simd_distance(nearest, center) <= reach else { continue }
+            localBounds[index].radius += pad
+            items[index].boundRadius += pad
+            itemAABBs[index] = (aabb.min - SIMD3(repeating: pad),
+                                aabb.max + SIMD3(repeating: pad))
+            refreshWorldBound(index)
+        }
     }
 
     // MARK: Undo / redo (ClayCore's document undo stack)
@@ -958,6 +1081,10 @@ final class ClayEngine {
         case .voxelStep:
             rebuildVoxelMesh() // ClayCore's journal reverted the cells
             redoOps.append(.voxelStep)
+        case .warp:
+            fieldCache = nil // the warp's reach is not itemized; rebake all
+            scheduleBake()
+            redoOps.append(.warp)
         case .reparam(let index, let before, let after, let primBefore, let primAfter):
             if items.indices.contains(index) { items[index].prim = primBefore }
             replayParamsMirror(before, at: index)
@@ -1078,6 +1205,10 @@ final class ClayEngine {
         case .voxelStep:
             rebuildVoxelMesh()
             undoLog.append(.voxelStep)
+        case .warp:
+            fieldCache = nil
+            scheduleBake()
+            undoLog.append(.warp)
         case .reparam(let index, let before, let after, let primBefore, let primAfter):
             if items.indices.contains(index) { items[index].prim = primAfter }
             replayParamsMirror(after, at: index)
@@ -2290,8 +2421,8 @@ final class ClayEngine {
     /// 3DCoat-style voxel sculpt verbs (task 6.2 follow-up). Place routes
     /// to the stamp brush; the rest call clay_voxel_sculpt_*.
     enum VoxelVerb: String, CaseIterable, Identifiable {
-        case place, smooth, inflate, deflate, flatten, scrape, pinch, grab,
-             smudge, fill
+        case place, smooth, inflate, deflate, flatten, scrape, pinch, magnify,
+             grab, smudge, fill
 
         var id: String { rawValue }
         var title: String { rawValue.capitalized }
@@ -2304,6 +2435,7 @@ final class ClayEngine {
             case .flatten: "square.bottomthird.inset.filled"
             case .scrape: "scissors"
             case .pinch: "arrow.right.and.line.vertical.and.arrow.left"
+            case .magnify: "arrow.left.and.line.vertical.and.arrow.right"
             case .grab: "hand.draw"
             case .smudge: "hand.point.up.left.and.text"
             case .fill: "drop.fill"
@@ -2354,6 +2486,8 @@ final class ClayEngine {
             ok = clay_voxel_sculpt_scrape(voxelGrid, at, &brush, n, 0) == CLAY_OK
         case .pinch:
             ok = clay_voxel_sculpt_pinch(voxelGrid, at, &brush) == CLAY_OK
+        case .magnify:
+            ok = clay_voxel_sculpt_magnify(voxelGrid, at, &brush) == CLAY_OK
         case .grab:
             ok = clay_voxel_sculpt_grab(voxelGrid, at, &brush, d, 1) == CLAY_OK
         case .smudge:
