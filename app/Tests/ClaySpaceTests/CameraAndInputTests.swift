@@ -804,26 +804,34 @@ final class CameraAndInputTests: XCTestCase {
         state.viewportSize = CGSize(width: 800, height: 600)
         state.activate(.sculpt, announce: false)
         state.sculptBrush = .move
-        let probe = { () -> Float in
-            state.engine.raycast(origin: SIMD3(0.25, 0.8, 3),
-                                 direction: SIMD3(0, 0, -1))?.position.z ?? 0
+        // A tangential drag SLIDES material along the surface: the front
+        // bulge shifts toward +x, so the right side grows fuller than the
+        // left. Asymmetry is the robust signature (reach barely changes).
+        let asymmetry = { () -> Float in
+            let right = state.engine.raycast(origin: SIMD3(0.35, 0.8, 3),
+                                             direction: SIMD3(0, 0, -1))?.position.z ?? 0
+            let left = state.engine.raycast(origin: SIMD3(-0.35, 0.8, 3),
+                                            direction: SIMD3(0, 0, -1))?.position.z ?? 0
+            return right - left
         }
-        let original = probe()
+        let original = asymmetry()
+        // Screen-right in world space depends on the camera azimuth.
+        let sign: Float = state.camera.basis.right.x >= 0 ? 1 : -1
 
         state.pencilBegan(at: CGPoint(x: 400, y: 300), pressure: 0.6)
         for x in stride(from: 410, through: 490, by: 10) {
             state.pencilMoved(to: CGPoint(x: CGFloat(x), y: 300), pressure: 0.6)
         }
         // LIVE: the document already shows the drag BEFORE pencil-up.
-        XCTAssertGreaterThan(probe(), original + 0.01,
+        XCTAssertGreaterThan((asymmetry() - original) * sign, 0.02,
                              "the surface follows the drag mid-gesture")
         state.pencilEnded(at: CGPoint(x: 490, y: 300))
-        let final = probe()
-        XCTAssertGreaterThan(final, original + 0.01)
+        let final = asymmetry()
+        XCTAssertGreaterThan((final - original) * sign, 0.02)
 
         // The whole gesture is ONE undo step, not one per live update.
         state.requestUndo()
-        XCTAssertEqual(probe(), original, accuracy: 0.02,
+        XCTAssertEqual(asymmetry(), original, accuracy: 0.02,
                        "single undo restores the pre-drag surface")
         state.sculptBrush = .standard
     }
@@ -894,19 +902,26 @@ final class CameraAndInputTests: XCTestCase {
         // Move: a drag warps the assembled surface without adding items.
         state.sculptBrush = .move
         let before = state.engine.items.count
-        let probe = { () -> Float in
-            state.engine.raycast(origin: SIMD3(0.25, 0.8, 3),
-                                 direction: SIMD3(0, 0, -1))?.position.z ?? 0
+        // A tangential drag SLIDES material along the surface: the front
+        // bulge shifts toward +x, so the right side grows fuller than the
+        // left. Asymmetry is the robust signature (reach barely changes).
+        let asymmetry = { () -> Float in
+            let right = state.engine.raycast(origin: SIMD3(0.35, 0.8, 3),
+                                             direction: SIMD3(0, 0, -1))?.position.z ?? 0
+            let left = state.engine.raycast(origin: SIMD3(-0.35, 0.8, 3),
+                                            direction: SIMD3(0, 0, -1))?.position.z ?? 0
+            return right - left
         }
-        let frontBefore = probe()
+        let asymmetryBefore = asymmetry()
+        let sign: Float = state.camera.basis.right.x >= 0 ? 1 : -1
         state.pencilBegan(at: CGPoint(x: 400, y: 300), pressure: 0.6)
         for x in stride(from: 410, through: 500, by: 10) {
             state.pencilMoved(to: CGPoint(x: CGFloat(x), y: 300), pressure: 0.6)
         }
         state.pencilEnded(at: CGPoint(x: 500, y: 300))
         XCTAssertEqual(state.engine.items.count, before, "move adds no items")
-        XCTAssertGreaterThan(probe(), frontBefore + 0.01,
-                             "material followed the drag inside the region")
+        XCTAssertGreaterThan((asymmetry() - asymmetryBefore) * sign, 0.02,
+                             "the front bulge slid toward the drag")
         state.requestUndo()
         state.sculptBrush = .standard
     }

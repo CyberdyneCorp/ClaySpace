@@ -988,15 +988,25 @@ final class ClayEngine {
             bakeDirtyNowForLivePreview(region)
             return 0
         }
+        // Grab's region weight is read at the SAMPLE point, so raw surface
+        // travel saturates at the region radius (docs: 0.5 asked over 0.8
+        // moves ~0.31). Calibrate: widen the region with the drag and ask
+        // for the inverse-decay displacement, so the surface tracks the
+        // finger instead of stalling a fraction of the way there.
+        let effectiveRadius = radius + drag
+        let amplification = min(effectiveRadius / max(radius, 0.02), 4)
+        let asked = displacement * amplification
+        moveSession!.maxReach = max(moveSession!.maxReach,
+                                    effectiveRadius + drag * amplification + 0.1)
         var params = clay_move_params()
         params.struct_size = UInt32(MemoryLayout<clay_move_params>.size)
-        params.radius = radius
+        params.radius = effectiveRadius
         params.ease = CLAY_EASE_LINEAR
         params.front_only = 1
         var applied = 0
         guard check(clay_layer_move_surface(doc, layer,
                                             [center.x, center.y, center.z],
-                                            [displacement.x, displacement.y, displacement.z],
+                                            [asked.x, asked.y, asked.z],
                                             &params, &applied)), applied > 0 else {
             commit()
             bakeDirtyNowForLivePreview(region)
@@ -1032,10 +1042,30 @@ final class ClayEngine {
         moveSession = nil
         guard session.applied else { return }
         let drag = simd_length(session.displacement)
-        padBounds(around: session.center,
-                  reach: session.radius + drag, by: drag)
+        padBoundsDirectional(around: session.center,
+                             reach: session.radius + drag * 2,
+                             displacement: session.displacement)
         scheduleBake(debounceMilliseconds: 30)
         scheduleAutosave()
+    }
+
+    /// Pad reached items' bounds along the pull direction only (plus a
+    /// margin): symmetric sphere pads balloon the scene bounds — and with
+    /// them the bake grid — dropping cache resolution everywhere.
+    private func padBoundsDirectional(around center: SIMD3<Float>, reach: Float,
+                                      displacement: SIMD3<Float>) {
+        let margin = simd_length(displacement) * 0.25 + 0.05
+        for index in items.indices {
+            let aabb = itemAABBs[index]
+            let nearest = simd_clamp(center, aabb.min, aabb.max)
+            guard simd_distance(nearest, center) <= reach else { continue }
+            itemAABBs[index] = (
+                aabb.min + simd_min(displacement, .zero) - SIMD3(repeating: margin),
+                aabb.max + simd_max(displacement, .zero) + SIMD3(repeating: margin))
+            localBounds[index].radius += simd_length(displacement) + margin
+            items[index].boundRadius += simd_length(displacement) + margin
+            refreshWorldBound(index)
+        }
     }
 
     /// Magnify (strength > 0) / pinch (strength < 0) about a world point:

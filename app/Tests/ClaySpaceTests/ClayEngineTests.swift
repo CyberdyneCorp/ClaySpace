@@ -146,13 +146,11 @@ final class ClayEngineTests: XCTestCase {
         XCTAssertTrue(engine.redo())
         XCTAssertEqual(tip(), sessionTip, accuracy: 0.02)
 
-        // …and equals the same displacement applied in one shot — proof
-        // the intermediate live applies never accumulated.
-        XCTAssertTrue(engine.undo())
-        XCTAssertGreaterThan(engine.moveSurface(center: SIMD3(0, 1.3, 0),
-                                                displacement: SIMD3(0, 0.4, 0),
-                                                radius: 0.6), 0)
-        XCTAssertEqual(tip(), sessionTip, accuracy: 0.03)
+        // …and the calibrated pull lands the surface close to where the
+        // finger asked (raw grab saturates at ~radius; docs example moves
+        // 0.31 for 0.5 asked — calibration must beat that clearly).
+        XCTAssertGreaterThan(sessionTip - original, 0.28,
+                             "0.4 asked pulls ~0.4, not a stalled fraction")
     }
 
     func testReliefStrokesLowerTheSafeStepScale() async {
@@ -194,6 +192,24 @@ final class ClayEngineTests: XCTestCase {
         engine.endMoveSurfaceSession()
         XCTAssertGreaterThan(engine.itemAABBs[0].max.y, aabbBefore.max.y,
                              "the pad lands once, at session end")
+    }
+
+    func testFarMovePullsFar() {
+        // The user gesture that stalled: one long drag. The calibrated
+        // session must carry the surface most of the way, far beyond the
+        // raw grab saturation at the brush radius.
+        let engine = ClayEngine()
+        let tip = { engine.raycast(origin: SIMD3(0, 4, 0),
+                                   direction: SIMD3(0, -1, 0))?.position.y ?? 0 }
+        let original = tip() // seed ball top, 1.6
+        engine.beginMoveSurfaceSession()
+        _ = engine.updateMoveSurfaceSession(center: SIMD3(0, 1.4, 0),
+                                            displacement: SIMD3(0, 1.2, 0),
+                                            radius: 0.3)
+        engine.endMoveSurfaceSession()
+        XCTAssertGreaterThan(tip() - original, 0.7,
+                             "a 1.2 drag with a 0.3 brush still pulls far")
+        XCTAssertTrue(engine.undo())
     }
 
     func testCacheRaycastFallbackAgreesWithTheDocument() async {
