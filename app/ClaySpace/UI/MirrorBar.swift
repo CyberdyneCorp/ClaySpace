@@ -1,28 +1,26 @@
 import SwiftUI
 
-/// Bottom contextual bar (from the UI study): mirror sculpting toggles.
+/// Mirror sculpting toggles, now living in the TOP bar (user request).
 /// Each axis button reflects new strokes through that world plane; the
-/// seam smooths with the layer's Mirror Blend.
-struct MirrorBar: View {
+/// seam smooths with the layer's Mirror Blend. No bar chrome of its own —
+/// the top bar supplies background and the chrome rect.
+struct MirrorControls: View {
     @Bindable var state: ViewportState
 
     private let axes: [(bit: Int32, label: String)] = [(1, "X"), (2, "Y"), (4, "Z")]
 
     var body: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 6) {
             Image(systemName: "arrow.left.and.right.righttriangle.left.righttriangle.right")
-                .font(.system(size: 14))
-                .foregroundStyle(state.engine.mirrorAxes != 0 ? Color.orange : .secondary)
-            Text("Mirror")
                 .font(.system(size: 13))
-                .foregroundStyle(.primary)
+                .foregroundStyle(state.engine.mirrorAxes != 0 ? Color.orange : .secondary)
             ForEach(axes, id: \.bit) { axis in
                 let active = state.engine.mirrorAxes & axis.bit != 0
                 Button(axis.label) {
                     state.toggleMirrorAxis(axis.bit)
                 }
                 .font(.system(size: 12, weight: .medium))
-                .frame(width: 30, height: 26)
+                .frame(width: 28, height: 26)
                 .foregroundStyle(active ? .white : .primary)
                 .background(
                     RoundedRectangle(cornerRadius: 4)
@@ -37,13 +35,13 @@ struct MirrorBar: View {
             Button {
                 state.toggleRadial()
             } label: {
-                HStack(spacing: 5) {
+                HStack(spacing: 4) {
                     Image(systemName: "circle.grid.cross")
-                        .font(.system(size: 13))
+                        .font(.system(size: 12))
                     Text("Radial")
-                        .font(.system(size: 13))
+                        .font(.system(size: 12))
                 }
-                .padding(.horizontal, 8)
+                .padding(.horizontal, 6)
                 .frame(height: 26)
                 .foregroundStyle(radialOn ? .white : .primary)
                 .background(
@@ -59,7 +57,7 @@ struct MirrorBar: View {
                 } label: {
                     Image(systemName: "minus")
                         .font(.system(size: 11, weight: .semibold))
-                        .frame(width: 24, height: 24)
+                        .frame(width: 22, height: 24)
                         .foregroundStyle(.primary)
                 }
                 .accessibilityLabel("Fewer copies")
@@ -72,14 +70,11 @@ struct MirrorBar: View {
                 } label: {
                     Image(systemName: "plus")
                         .font(.system(size: 11, weight: .semibold))
-                        .frame(width: 24, height: 24)
+                        .frame(width: 22, height: 24)
                         .foregroundStyle(.primary)
                 }
                 .accessibilityLabel("More copies")
             }
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 8)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 6))
     }
 }

@@ -59,8 +59,6 @@ struct ContentView: View {
                         }
                         if state.mode == .voxel {
                             VoxelBar(state: state)
-                        } else {
-                            MirrorBar(state: state)
                         }
                     }
                     .padding(.bottom, 16)
@@ -144,7 +142,6 @@ struct ContentView: View {
                 }
             }
             .accessibilityIdentifier("documentsButton")
-            Spacer(minLength: 8)
             Picker("Mode", selection: Binding(
                 get: { state.mode },
                 set: { state.setMode($0) })) {
@@ -152,8 +149,11 @@ struct ContentView: View {
                 Text("Voxels").tag(ViewportState.EditorMode.voxel)
             }
             .pickerStyle(.segmented)
-            .frame(width: 150)
+            .frame(width: 140)
             .accessibilityIdentifier("modeSwitch")
+            .padding(.leading, 6)
+            Spacer(minLength: 8)
+            MirrorControls(state: state)
             Spacer(minLength: 8)
             ViewThatFits(in: .horizontal) {
                 HStack(spacing: 8) {
