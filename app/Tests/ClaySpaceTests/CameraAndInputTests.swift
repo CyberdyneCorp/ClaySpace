@@ -747,6 +747,28 @@ final class CameraAndInputTests: XCTestCase {
         XCTAssertTrue(state.hoverEchoes.allSatisfy(\.isVoxel))
     }
 
+    func testBrushSizeIsScreenSpaceAcrossZoom() {
+        // ZBrush Draw Size: the same touch covers the same POINTS, so a
+        // closer camera sculpts proportionally finer clay.
+        let state = ViewportState()
+        state.viewportSize = CGSize(width: 800, height: 600)
+        state.activate(.sculpt, announce: false)
+        state.pencilBegan(at: CGPoint(x: 400, y: 300), pressure: 0.5)
+        state.pencilEnded(at: CGPoint(x: 400, y: 300))
+        let stock = state.engine.strokeRadii(of: 1)?.first ?? 0
+        XCTAssertEqual(stock, 0.21 * 1.35, accuracy: 0.01,
+                       "stock view keeps the calibrated reference size")
+        state.requestUndo()
+
+        state.camera.distance = 1.2 // lean in close to the ball
+        state.pencilBegan(at: CGPoint(x: 400, y: 300), pressure: 0.5)
+        state.pencilEnded(at: CGPoint(x: 400, y: 300))
+        let close = state.engine.strokeRadii(of: 1)?.first ?? 0
+        XCTAssertLessThan(close, stock * 0.45,
+                          "zooming in shrinks the world footprint")
+        XCTAssertGreaterThan(close, 0.003, "but never below the floor")
+    }
+
     // MARK: Top-bar brush dials (size / strength)
 
     func testBrushSizeDialScalesEveryStroke() {

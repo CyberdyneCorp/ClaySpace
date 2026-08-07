@@ -375,6 +375,7 @@ final class MetalViewportView: UIView {
 
     private var lastDrawnInputScale: CGFloat = -1
     private var lastDrawnDarkMode: Bool?
+    private var lastDrawnPolyframe: Bool?
     private var settleFrames = 0
 
     @objc private func step(_ link: CADisplayLink) {
@@ -391,6 +392,7 @@ final class MetalViewportView: UIView {
         let previewVersion = state.previewVersion
         let inputScale = upscaling ? currentInputScale : 1
         let darkMode = state.isDarkMode
+        let polyframe = state.showPolyframe
         let changed = camera != lastDrawnCamera
             || inputScale != lastDrawnInputScale
             || version != lastDrawnVersion
@@ -399,6 +401,7 @@ final class MetalViewportView: UIView {
             || previewVersion != lastDrawnPreviewVersion
             || state.engine.voxelMeshVersion != lastDrawnVoxelVersion
             || darkMode != lastDrawnDarkMode
+            || polyframe != lastDrawnPolyframe
             || metalLayer.drawableSize != lastDrawnSize
         if changed {
             settleFrames = 8 // one full jitter cycle after motion stops
@@ -424,6 +427,7 @@ final class MetalViewportView: UIView {
         lastDrawnInputScale = inputScale
         lastDrawnVoxelVersion = state.engine.voxelMeshVersion
         lastDrawnDarkMode = darkMode
+        lastDrawnPolyframe = polyframe
         renderer?.draw(to: drawable,
                        time: Float(CACurrentMediaTime() - startTime),
                        camera: camera,
@@ -433,7 +437,8 @@ final class MetalViewportView: UIView {
                        fullQuality: activeTouchCount == 0,
                        preview: state.previewItems,
                        inputScale: inputScale,
-                       darkMode: darkMode)
+                       darkMode: darkMode,
+                       polyframe: polyframe)
     }
 }
 

@@ -322,7 +322,8 @@ final class Renderer {
               fullQuality: Bool = true,
               preview: [SceneItem] = [],
               inputScale: CGFloat = 1,
-              darkMode: Bool = false) {
+              darkMode: Bool = false,
+              polyframe: Bool = false) {
         let items = engine.items
         let strokePoints = engine.strokePoints
         if engine.version != uploadedVersion {
@@ -536,7 +537,7 @@ final class Renderer {
             previewBound: previewBound,
             prevRight: SIMD4(prev.right, width),
             prevUp: SIMD4(prev.up, height),
-            prevForward: SIMD4(prev.forward, 0),
+            prevForward: SIMD4(prev.forward, polyframe ? 1 : 0),
             prevPosition: SIMD4(prev.position, useTemporal ? 1 : 0),
             temporalInfo: SIMD4(2 * jitterPx.x / width, -2 * jitterPx.y / height,
                                 prev.lens, prev.ortho)

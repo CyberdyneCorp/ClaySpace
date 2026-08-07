@@ -856,6 +856,24 @@ fragment FragOut raymarch_fragment(VertexOut in [[stage_in]],
     bool ortho = orthoHalfHeight > 0.0;
     float depth = 1.0;
     bool sceneWins = hit && (!groundCloser || t < tGround);
+
+    // Polyframe (ZBrush-style): a world-spaced tri-planar grid over the
+    // clay, antialiased by screen derivatives so it stays hairline at any
+    // zoom. An SDF has no polygons; this is the honest equivalent.
+    if (u.prevForward.w > 0.5 && sceneWins) {
+        float3 hp = ro + rd * t;
+        float3 n = abs(calcNormal(hp, ctx));
+        const float spacing = 0.08;
+        float3 g = abs(fract(hp / spacing - 0.5) - 0.5) * spacing;
+        float3 fw = fwidth(hp) + 1e-6;
+        float2 uvd, fw2;
+        if (n.x >= n.y && n.x >= n.z)      { uvd = g.yz; fw2 = fw.yz; }
+        else if (n.y >= n.z)               { uvd = g.xz; fw2 = fw.xz; }
+        else                               { uvd = g.xy; fw2 = fw.xy; }
+        float lineD = min(uvd.x / (fw2.x * 1.3), uvd.y / (fw2.y * 1.3));
+        float wire = 1.0 - saturate(lineD);
+        color = mix(color, color * 0.32, wire * 0.85);
+    }
     if (sceneWins) {
         depth = depthFor(dot(ro + rd * t - u.position, u.forward), ortho);
     } else if (groundCloser) {
@@ -920,6 +938,19 @@ fragment VoxelFragOut voxel_fragment(VoxelVSOut in [[stage_in]],
     float3 l = normalize(u.lightDir.xyz);
     float diffuse = saturate(dot(n, l));
     float3 color = in.color * (0.45 + 0.55 * diffuse);
+    if (u.prevForward.w > 0.5) {
+        float3 an = abs(normalize(in.normal));
+        const float spacing = 0.08;
+        float3 g = abs(fract(in.world / spacing - 0.5) - 0.5) * spacing;
+        float3 fw = fwidth(in.world) + 1e-6;
+        float2 uvd, fw2;
+        if (an.x >= an.y && an.x >= an.z)  { uvd = g.yz; fw2 = fw.yz; }
+        else if (an.y >= an.z)             { uvd = g.xz; fw2 = fw.xz; }
+        else                               { uvd = g.xy; fw2 = fw.xy; }
+        float lineD = min(uvd.x / (fw2.x * 1.3), uvd.y / (fw2.y * 1.3));
+        float wire = 1.0 - saturate(lineD);
+        color = mix(color, color * 0.32, wire * 0.85);
+    }
     VoxelFragOut out;
     out.color = float4(pow(color, 1.0 / 2.2), 1.0);
     out.motion = reprojectMotion(in.world, in.position.xy, u);

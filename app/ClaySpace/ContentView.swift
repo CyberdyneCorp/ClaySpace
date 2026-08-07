@@ -197,6 +197,24 @@ struct ContentView: View {
         .accessibilityIdentifier("modeSwitch")
     }
 
+    /// Polyframe (ZBrush): world-grid overlay on the clay surface.
+    private var polyframeToggle: some View {
+        Button {
+            state.showPolyframe.toggle()
+        } label: {
+            Image(systemName: "grid")
+                .font(.system(size: 13))
+                .frame(width: 34, height: 30)
+                .foregroundStyle(state.showPolyframe ? .white : .primary)
+                .background(
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(state.showPolyframe ? Color.orange
+                                                  : Color.primary.opacity(0.06))
+                )
+        }
+        .accessibilityIdentifier("polyframeToggle")
+    }
+
     /// Light/dark toggle: flips to the opposite of the EFFECTIVE scheme,
     /// so the first tap always visibly switches even from "follow system".
     private var appearanceToggle: some View {
@@ -547,6 +565,7 @@ struct ContentView: View {
             EditListPanel(state: state)
             HStack(spacing: 8) {
                 modeSwitch
+                polyframeToggle
                 appearanceToggle
             }
             Divider()

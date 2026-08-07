@@ -443,6 +443,8 @@ final class ViewportState {
     /// Effective appearance (set from SwiftUI's colorScheme): the shader
     /// swaps its paper/ground palette to match the chrome.
     var isDarkMode = false
+    /// Polyframe (ZBrush): tri-planar world grid over the clay surface.
+    var showPolyframe = false
 
     var lightDirection: SIMD3<Float> {
         let elevation: Float = 0.927
@@ -641,10 +643,27 @@ extension ViewportState: PencilToolSink {
 
     /// Pressure sizes the brush; tilt broadens it (task 5.2) — a shallow
     /// pencil sweeps a wider footprint, like the side of a real tool.
-    private func radius(for pressure: Float, altitude: Float = .pi / 2) -> Float {
+    /// SCREEN-SPACE (ZBrush Draw Size): the world radius scales with the
+    /// view height at the anchor, so zooming in sculpts proportionally
+    /// finer. Reference = the stock camera over the seed ball (scale 1).
+    private func radius(for pressure: Float, altitude: Float = .pi / 2,
+                        at world: SIMD3<Float>? = nil) -> Float {
         let base = 0.07 + pressure * 0.28
         let tilt = 1 - min(max(altitude / (.pi / 2), 0), 1)
-        return base * (1 + 0.6 * tilt) * brushSizeMultiplier
+        return max(base * (1 + 0.6 * tilt) * brushSizeMultiplier * zoomScale(at: world),
+                   0.004)
+    }
+
+    /// View height at the anchor relative to the reference view (stock
+    /// camera, seed-ball distance 2.4): <1 zoomed in, >1 zoomed out.
+    private func zoomScale(at world: SIMD3<Float>?) -> Float {
+        let referenceDistance: Float = 2.4
+        if camera.orthoHalfHeight > 0 {
+            let referenceHeight = 2 * referenceDistance / camera.lens
+            return min(max(2 * camera.orthoHalfHeight / referenceHeight, 0.05), 4)
+        }
+        let d = simd_distance(camera.position, world ?? camera.target)
+        return min(max(d / referenceDistance, 0.05), 4)
     }
 
     fileprivate func voxelEdit(at point: CGPoint, pressure: Float) {
@@ -907,7 +926,8 @@ extension ViewportState: PencilToolSink {
         // add region deformers. No stroke item is created.
         if activeTool == .sculpt, sculptBrush.isWarp {
             guard let anchorHit = hit else { return } // warps need a surface
-            let warpR = radius(for: max(pressure, 0.1), altitude: altitude)
+            let warpR = radius(for: max(pressure, 0.1), altitude: altitude,
+                               at: anchorHit.position)
                 * sculptBrush.radiusScale
             if sculptBrush == .move {
                 moveDrag = (anchorHit.position, anchorHit.position, warpR)
@@ -928,7 +948,7 @@ extension ViewportState: PencilToolSink {
         default: start = hit?.position // carving and painting need a surface
         }
 
-        var r = radius(for: max(pressure, 0.1), altitude: altitude)
+        var r = radius(for: max(pressure, 0.1), altitude: altitude, at: hit?.position)
         if activeTool == .sculpt { r *= sculptBrush.radiusScale }
         if activeTool == .sculpt, sculptBrush.followsSurface, start != nil {
             let normal = hit?.normal ?? SIMD3(0, 1, 0) // ground faces up
@@ -1152,7 +1172,7 @@ extension ViewportState: PencilToolSink {
               let last = lastStrokePoint,
               let ray = ray(through: point) else { return }
 
-        var r = radius(for: max(pressure, 0.1), altitude: altitude)
+        var r = radius(for: max(pressure, 0.1), altitude: altitude, at: last)
         if activeTool == .sculpt { r *= sculptBrush.radiusScale }
         var target: SIMD3<Float>?
 
@@ -1349,7 +1369,7 @@ extension ViewportState: PencilToolSink {
                 ?? groundPoint(on: ray)
         }
         guard let world else { return }
-        _ = engine.maskPaint(at: world, radius: radius(for: pressure),
+        _ = engine.maskPaint(at: world, radius: radius(for: pressure, at: world),
                              erase: freezeErase, voxelContext: mode == .voxel)
     }
 
@@ -1573,12 +1593,14 @@ extension ViewportState: PencilToolSink {
             }
             let r = activeTool == .shape ? 0.14 + hoverPressure * 0.42
                 : activeTool == .spray ? 0.09 + hoverPressure * 0.25
-                : radius(for: hoverPressure, altitude: altitude) // sculpt/freeze
+                : radius(for: hoverPressure, altitude: altitude,
+                         at: target) // sculpt/freeze
             hoverGhost = ghost(at: target, worldRadius: r, isVoxel: false)
             hoverEchoes = symmetryEchoes(of: target, worldRadius: r, isVoxel: false)
         case .erase, .paint:
             guard let hit else { hoverGhost = nil; return }
-            let eraseRadius = radius(for: hoverPressure, altitude: altitude)
+            let eraseRadius = radius(for: hoverPressure, altitude: altitude,
+                                     at: hit.position)
             hoverGhost = ghost(at: hit.position, worldRadius: eraseRadius,
                                isVoxel: false)
             hoverEchoes = symmetryEchoes(of: hit.position, worldRadius: eraseRadius,
