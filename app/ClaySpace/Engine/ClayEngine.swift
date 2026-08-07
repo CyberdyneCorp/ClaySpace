@@ -93,7 +93,8 @@ struct FieldCache: @unchecked Sendable {
 @MainActor
 @Observable
 final class ClayEngine {
-    static let clayColor = SIMD3<Float>(0.22, 0.65, 0.81)
+    /// Terracotta — modelling-clay warmth as the default material color.
+    static let clayColor = SIMD3<Float>(0.70, 0.42, 0.32)
 
     // nonisolated(unsafe): touched from deinit; all live access is main-actor.
     private nonisolated(unsafe) var doc: OpaquePointer?
@@ -344,19 +345,23 @@ final class ClayEngine {
     /// Surface material preset (task 8.4): shading parameters the preview
     /// applies to the whole SDF layer. Persisted in the mirror sidecar.
     enum MaterialPreset: Int32, CaseIterable, Identifiable {
-        case matte = 0, plastic = 1, metal = 2
+        case clay = 3, matte = 0, plastic = 1, metal = 2
 
         var id: Int32 { rawValue }
         var title: String {
             switch self {
+            case .clay: "Clay"
             case .matte: "Matte"
             case .plastic: "Plastic"
             case .metal: "Metal"
             }
         }
-        /// spec strength, shininess, metalness (shader u.material).
+        /// spec strength, shininess, metalness, organic flag (u.material).
+        /// Clay: broad soft sheen + the shader's wrap lighting and grain —
+        /// all pure ALU in the existing shading path, no extra field evals.
         var shadingParams: SIMD4<Float> {
             switch self {
+            case .clay: SIMD4(0.10, 6, 0, 1)
             case .matte: SIMD4(0.0, 1, 0, 0)
             case .plastic: SIMD4(0.5, 36, 0, 0)
             case .metal: SIMD4(0.95, 64, 1, 0)
@@ -364,7 +369,7 @@ final class ClayEngine {
         }
     }
 
-    private(set) var materialPreset: MaterialPreset = .matte
+    private(set) var materialPreset: MaterialPreset = .clay
 
     func setMaterialPreset(_ preset: MaterialPreset) {
         guard preset != materialPreset else { return }
@@ -3145,9 +3150,9 @@ final class ClayEngine {
             clay_document_destroy(newDoc)
             return false
         }
-        var loadedPreset = MaterialPreset.matte
+        var loadedPreset = MaterialPreset.clay
         if header[1] >= 2, let extra: [UInt32] = readArray(count: 1) {
-            loadedPreset = MaterialPreset(rawValue: Int32(bitPattern: extra[0])) ?? .matte
+            loadedPreset = MaterialPreset(rawValue: Int32(bitPattern: extra[0])) ?? .clay
         }
         let itemCount = Int(header[2])
         let pointCount = Int(header[3])
@@ -3297,7 +3302,7 @@ final class ClayEngine {
         voxelMeshVersion += 1
         mirrorAxes = 0
         radialCount = 0
-        materialPreset = .matte
+        materialPreset = .clay
         guard let doc else { return }
         var layerId: clay_layer_id = 0
         guard check(clay_add_sdf_layer(doc, "Clay", &layerId)) else { return }
@@ -3587,7 +3592,7 @@ final class ClayEngine {
         // Far cells shade never; default color is the clay blue.
         var colors = [UInt8](repeating: 255, count: nx * ny * nz * 4)
         for i in 0..<(nx * ny * nz) {
-            colors[i * 4 + 0] = 56; colors[i * 4 + 1] = 166; colors[i * 4 + 2] = 207
+            colors[i * 4 + 0] = 179; colors[i * 4 + 1] = 107; colors[i * 4 + 2] = 82
         }
 
         // Partition fine cells by nearest coarse sample.

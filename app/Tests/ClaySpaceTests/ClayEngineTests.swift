@@ -730,7 +730,9 @@ final class ClayEngineTests: XCTestCase {
         let stained = try XCTUnwrap(engine.colorAt(front))
         XCTAssertGreaterThan(stained.x, 0.8, "stained red at the stroke")
         let back = try XCTUnwrap(engine.colorAt(SIMD3(0, 0.8, -0.8)))
-        XCTAssertLessThan(back.x, 0.5, "far side keeps the clay color")
+        XCTAssertEqual(back.x, ClayEngine.clayColor.x, accuracy: 0.1,
+                       "far side keeps the clay color")
+        XCTAssertLessThan(back.x, stained.x - 0.15, "and is clearly not the stain")
     }
 
     func testRecolorSelectionIsUndoable() throws {
@@ -749,7 +751,8 @@ final class ClayEngineTests: XCTestCase {
         XCTAssertEqual(engine.items.count, 2, "undo restored color, not removed the item")
         XCTAssertEqual(engine.items[1].color.x, ClayEngine.clayColor.x, accuracy: 1e-4)
         probe = try XCTUnwrap(engine.colorAt(SIMD3(1.3, 0.8, 0)))
-        XCTAssertLessThan(probe.x, 0.5)
+        XCTAssertEqual(probe.x, ClayEngine.clayColor.x, accuracy: 0.1,
+                       "the document color returned to clay")
 
         XCTAssertTrue(engine.redo())
         XCTAssertEqual(engine.items[1].color.x, 0.93, accuracy: 1e-4)

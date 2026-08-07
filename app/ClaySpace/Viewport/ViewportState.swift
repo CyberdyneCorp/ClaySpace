@@ -58,10 +58,10 @@ final class ViewportState {
 
     /// Starter palette from the UI study.
     static let palette: [SIMD3<Float>] = [
+        SIMD3(0.70, 0.42, 0.32), // terracotta (the default clay)
+        SIMD3(0.45, 0.26, 0.20), // fired umber
         SIMD3(1.00, 0.27, 0.56), // cap magenta
-        SIMD3(0.67, 0.04, 0.34), // deep magenta
         SIMD3(0.22, 0.65, 0.81), // clay cyan
-        SIMD3(0.00, 0.40, 0.53), // deep cyan
         SIMD3(0.93, 0.73, 0.00), // press yellow
         SIMD3(0.97, 0.96, 0.96), // paper
         SIMD3(0.61, 0.59, 0.59), // newsprint

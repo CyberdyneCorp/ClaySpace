@@ -483,7 +483,7 @@ static float4 mapShade(float3 p, FieldCtx ctx) {
     constant SceneItem *items = ctx.items;
     bool cached = ctx.gridOrigin.w > 0.5;
     float cacheD = 1e9;
-    float3 cacheCol = float3(0.22, 0.65, 0.81);
+    float3 cacheCol = float3(0.70, 0.42, 0.32);
     if (cached) {
         cacheD = sampleCache(p, ctx);
         float3 uvw = (p - ctx.gridOrigin.xyz) * ctx.gridInvExtent.xyz;
@@ -523,7 +523,7 @@ static float4 mapShade(float3 p, FieldCtx ctx) {
     // (layers union with a hard min, matching op_union color semantics).
     float ld[8] = {1e9, 1e9, 1e9, 1e9, 1e9, 1e9, 1e9, 1e9};
     float3 lcol[8];
-    for (int slot = 0; slot < 8; slot++) lcol[slot] = float3(0.22, 0.65, 0.81);
+    for (int slot = 0; slot < 8; slot++) lcol[slot] = float3(0.70, 0.42, 0.32);
     for (int i = cached ? ctx.start : 0; i < ctx.count; i++) {
         constant SceneItem &it = items[i];
         int slot = clamp(int(it.layerSlot), 0, 7);
@@ -677,16 +677,34 @@ fragment FragOut raymarch_fragment(VertexOut in [[stage_in]],
         float diffuse = saturate(dot(n, l)) * shadow;
         float rim = pow(1.0 - saturate(dot(n, -rd)), 3.0);
 
-        // Material presets (task 8.4): Matte/Plastic/Metal as spec
-        // strength + shininess + metalness (spec tinted by albedo, less
-        // diffuse energy for metals).
+        // Material presets (task 8.4): spec strength + shininess +
+        // metalness; w flags the ORGANIC clay look — wrap lighting with a
+        // warm key and cool fill, plus two-scale value grain. All pure ALU
+        // on values already computed: zero extra field evaluations.
         float3 h = normalize(l - rd);
         float spec = pow(saturate(dot(n, h)), max(u.material.y, 1.0))
                      * u.material.x * shadow;
         float3 specTint = mix(float3(1.0), albedo, u.material.z);
         float3 diffuseAlbedo = albedo * (1.0 - 0.55 * u.material.z);
-        color = diffuseAlbedo * (0.35 * ao + 0.65 * diffuse * mix(1.0, ao, 0.35))
-              + spec * specTint + rim * 0.18 * ao;
+        if (u.material.w > 0.5) {
+            // Hand-worked clay: micro grain breaks the mathematical
+            // smoothness (hash cells at two scales, ±5% brightness)...
+            float g1 = fract(sin(dot(floor(p * 92.0),
+                                     float3(12.9898, 78.233, 37.719))) * 43758.55);
+            float g2 = fract(sin(dot(floor(p * 23.0),
+                                     float3(26.651, 41.767, 61.319))) * 24634.62);
+            diffuseAlbedo *= 1.0 + (g1 - 0.5) * 0.05 + (g2 - 0.5) * 0.05;
+            // ...and wrap lighting rolls the terminator softly around the
+            // form, warm in the key and cool in the fill, like studio clay.
+            float wrap = saturate((dot(n, l) + 0.4) / 1.4) * shadow;
+            float3 key = float3(1.03, 0.97, 0.90) * wrap;
+            float3 fill = float3(0.36, 0.38, 0.44) * ao;
+            color = diffuseAlbedo * (fill + key * mix(1.0, ao, 0.35))
+                  + spec * specTint + rim * 0.12 * ao;
+        } else {
+            color = diffuseAlbedo * (0.35 * ao + 0.65 * diffuse * mix(1.0, ao, 0.35))
+                  + spec * specTint + rim * 0.18 * ao;
+        }
 
         // Freeze tint (clay_mask): frozen smooth clay shifts toward the
         // same ice blue the voxel mesh uses.
