@@ -61,6 +61,44 @@ final class MetalViewportView: UIView {
     /// Last observed Pencil barrel-roll angle (Pencil Pro), radians.
     private var lastRollAngle: Float?
 
+    #if DEBUG
+    /// Frame HUD (docs/06 §4.12): CPU draw cadence + GPU ms, refreshed at
+    /// 2 Hz. Debug builds, opt-in via `-showPerfHUD YES`.
+    private let perfLabel = CATextLayer()
+    private var drawTimestamps: [Double] = []
+    private var lastHUDRefresh: Double = 0
+    private var hudEnabled: Bool {
+        UserDefaults.standard.bool(forKey: "showPerfHUD")
+    }
+
+    private func recordDrawForHUD() {
+        guard hudEnabled else { return }
+        let now = CACurrentMediaTime()
+        drawTimestamps.append(now)
+        if drawTimestamps.count > 120 { drawTimestamps.removeFirst(60) }
+        guard now - lastHUDRefresh > 0.5 else { return }
+        lastHUDRefresh = now
+        if perfLabel.superlayer == nil {
+            perfLabel.fontSize = 11
+            perfLabel.foregroundColor = UIColor.systemOrange.cgColor
+            perfLabel.contentsScale = window?.screen.scale ?? 2
+            perfLabel.frame = CGRect(x: 66, y: bounds.height - 34,
+                                     width: 320, height: 16)
+            layer.addSublayer(perfLabel)
+        }
+        perfLabel.frame.origin.y = bounds.height - 34
+        let recent = drawTimestamps.suffix(30)
+        var cadence = 0.0
+        if recent.count > 1 {
+            cadence = (recent.last! - recent.first!) / Double(recent.count - 1)
+        }
+        let gpu = renderer?.gpuFrameTime.withLock { $0 } ?? 0
+        perfLabel.string = String(format: "draw %.1f ms · gpu %.1f ms · %d items",
+                                  cadence * 1000, gpu * 1000,
+                                  state.engine.items.count)
+    }
+    #endif
+
     init(state: ViewportState) {
         self.state = state
         super.init(frame: .zero)
@@ -123,6 +161,12 @@ final class MetalViewportView: UIView {
     }
 
     @objc private func hovered(_ recognizer: UIHoverGestureRecognizer) {
+        // Hover events can interleave with an active touch on M2 pencils;
+        // the ghost is meaningless mid-gesture and the raycast isn't free.
+        guard activeTouchCount == 0 else {
+            state.pencilHoverEnded()
+            return
+        }
         switch recognizer.state {
         case .began, .changed:
             if state.isChromePoint(recognizer.location(in: nil)) {
@@ -333,7 +377,12 @@ final class MetalViewportView: UIView {
                 || state.engine.voxelMeshVersion != lastDrawnVoxelVersion
                 || metalLayer.drawableSize != lastDrawnSize else { return }
 
+        state.engine.rebuildVoxelMeshIfDirty() // throttled voxel drags
+
         guard let drawable = metalLayer.nextDrawable() else { return }
+        #if DEBUG
+        recordDrawForHUD()
+        #endif
         lastDrawnCamera = camera
         lastDrawnVersion = version
         lastDrawnSize = metalLayer.drawableSize

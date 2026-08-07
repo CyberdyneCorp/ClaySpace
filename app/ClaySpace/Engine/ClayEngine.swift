@@ -1647,6 +1647,19 @@ final class ClayEngine {
     @ObservationIgnored private(set) var fieldCacheVersion = 0
     private var bakeTask: Task<Void, Never>?
 
+    /// ClayCore's Lipschitz safety factor for ray stepping (docs/06 §2.3).
+    /// The app authors no warps, so this is >= 1 in practice — free extra
+    /// step length the marcher was leaving on the table.
+    @ObservationIgnored private(set) var safeStepScale: Float = 1
+
+    private func refreshSafeStepScale() {
+        guard let doc else { return }
+        var scale: Float = 1
+        if clay_safe_step_scale(doc, &scale) == CLAY_OK, scale.isFinite, scale > 0 {
+            safeStepScale = scale
+        }
+    }
+
     /// Debounced rebake after committed edits. The bake runs on a background
     /// thread against an independently loaded snapshot of the document, so
     /// the main thread (and ClayCore's live doc) is never touched.
@@ -1675,7 +1688,9 @@ final class ClayEngine {
         let bounds = sceneBounds()
 
         let baked = await Task.detached(priority: .userInitiated) {
-            Self.bakeField(documentPath: path, boundsMin: bounds.0, boundsMax: bounds.1)
+            Perf.interval("bake") {
+                Self.bakeField(documentPath: path, boundsMin: bounds.0, boundsMax: bounds.1)
+            }
         }.value
 
         guard version == editVersion else {
@@ -1686,6 +1701,7 @@ final class ClayEngine {
         cache.bakedItemCount = itemCount
         fieldCache = cache
         fieldCacheVersion += 1
+        refreshSafeStepScale()
         commit() // wake the renderer
     }
 
@@ -1774,25 +1790,50 @@ final class ClayEngine {
         return depth
     }
 
-    /// Brackets a run of voxel edits (a drag, an import) into ONE undo
-    /// step. The op-log entry is appended only if ClayCore actually
-    /// journaled a step (depth delta), so no-op edits cannot desync.
+    @ObservationIgnored private var voxelGroupOpen = false
+    @ObservationIgnored private var voxelMeshDirty = false
+
+    /// Brackets a run of voxel edits (a drag, an import): mesh rebuilds
+    /// throttle to one per frame inside the session (docs/06 §3.5), and —
+    /// when the linked ClayCore journals voxel edits — the whole run is
+    /// ONE undo step (the op-log entry lands only if the journal's depth
+    /// actually grew, so no-op edits cannot desync).
     func beginVoxelEdits() {
-        guard Self.voxelUndoAvailable, let doc, !voxelSessionOpen,
-              activeStroke == nil, transformIndex == nil else { return }
-        voxelSessionDepthBefore = clayUndoDepth()
-        _ = check(clay_document_begin_undo_group(doc))
+        guard !voxelSessionOpen, activeStroke == nil, transformIndex == nil
+        else { return }
         voxelSessionOpen = true
+        if Self.voxelUndoAvailable, let doc {
+            voxelSessionDepthBefore = clayUndoDepth()
+            _ = check(clay_document_begin_undo_group(doc))
+            voxelGroupOpen = true
+        }
     }
 
     func endVoxelEdits() {
-        guard voxelSessionOpen, let doc else { return }
-        _ = check(clay_document_end_undo_group(doc))
+        guard voxelSessionOpen else { return }
         voxelSessionOpen = false
-        if clayUndoDepth() > voxelSessionDepthBefore {
-            undoLog.append(.voxelStep)
-            redoOps.removeAll()
+        rebuildVoxelMeshIfDirty()
+        if voxelGroupOpen, let doc {
+            _ = check(clay_document_end_undo_group(doc))
+            voxelGroupOpen = false
+            if clayUndoDepth() > voxelSessionDepthBefore {
+                undoLog.append(.voxelStep)
+                redoOps.removeAll()
+            }
         }
+    }
+
+    /// Inside a session, stamps only mark the mesh dirty; the render loop
+    /// (and session end) rebuild at most once per frame.
+    private func markVoxelMeshDirty() {
+        voxelMeshDirty = true
+        if !voxelSessionOpen { rebuildVoxelMeshIfDirty() }
+    }
+
+    func rebuildVoxelMeshIfDirty() {
+        guard voxelMeshDirty else { return }
+        voxelMeshDirty = false
+        rebuildVoxelMesh()
     }
 
     /// Creates or re-borrows the document's voxel layer.
@@ -2031,7 +2072,7 @@ final class ClayEngine {
             return true
         }
         guard ensureVoxelLayer(), let voxelGrid else { return false }
-        let selfBracketed = Self.voxelUndoAvailable && !voxelSessionOpen
+        let selfBracketed = !voxelSessionOpen
         if selfBracketed { beginVoxelEdits() }
         defer { if selfBracketed { endVoxelEdits() } }
 
@@ -2064,7 +2105,7 @@ final class ClayEngine {
         case .fill:
             ok = clay_voxel_sculpt_fill_cavities(voxelGrid, at, &brush, 2) == CLAY_OK
         }
-        rebuildVoxelMesh()
+        markVoxelMeshDirty()
         commit()
         scheduleAutosave()
         return ok
@@ -2104,7 +2145,7 @@ final class ClayEngine {
         guard ensureVoxelLayer(), let voxelGrid else { return }
         // A lone stamp is its own undo step; stamps inside a drag session
         // (beginVoxelEdits) coalesce into the session's step.
-        let selfBracketed = Self.voxelUndoAvailable && !voxelSessionOpen
+        let selfBracketed = !voxelSessionOpen
         if selfBracketed { beginVoxelEdits() }
         defer { if selfBracketed { endVoxelEdits() } }
         var brush = voxelBrush(size: brushSize)
@@ -2118,7 +2159,7 @@ final class ClayEngine {
             case .paint: _ = clay_voxel_paint_brush(voxelGrid, cellArray, &brush, index)
             }
         }
-        rebuildVoxelMesh()
+        markVoxelMeshDirty()
         commit()
         scheduleAutosave()
     }
@@ -2215,7 +2256,6 @@ final class ClayEngine {
                                      &brush, paletteId)
         }
         endVoxelEdits()
-        rebuildVoxelMesh()
         commit()
         scheduleAutosave()
         return OBJImportStats(triangles: triangles.count, cells: cells.count,
@@ -2264,6 +2304,8 @@ final class ClayEngine {
 
     private func rebuildVoxelMesh() {
         guard let voxelGrid else { return }
+        let signpost = Perf.signposter.beginInterval("voxelMesh")
+        defer { Perf.signposter.endInterval("voxelMesh", signpost) }
         var mesh: OpaquePointer?
         guard clay_voxel_mesh(voxelGrid, &mesh) == CLAY_OK, let mesh else {
             voxelPositions = []; voxelNormals = []; voxelColors = []; voxelIndices = []
@@ -2802,6 +2844,8 @@ final class ClayEngine {
     func saveDocument(documentURL: URL? = nil, mirrorURL: URL? = nil) -> Bool {
         let package = documentURL ?? Self.documentURL(named: documentName)
         guard let doc, !isStroking, !isTransforming, !isEditingParams else { return false }
+        let signpost = Perf.signposter.beginInterval("save")
+        defer { Perf.signposter.endInterval("save", signpost) }
         do {
             try FileManager.default.createDirectory(at: package,
                                                     withIntermediateDirectories: true)
@@ -2926,6 +2970,7 @@ final class ClayEngine {
         itemLayers = newItemLayers
         itemBatches = newItemBatches
         nextBatchID = (newItemBatches.max() ?? 0) + 1
+        refreshSafeStepScale()
         mirrorAxes = Int32(bitPattern: header[4])
         radialCount = Int32(bitPattern: header[5])
         mirrorK = Float(bitPattern: header[6])

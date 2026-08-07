@@ -620,10 +620,13 @@ fragment FragOut raymarch_fragment(VertexOut in [[stage_in]],
 
     float t = 0.0;
     bool hit = false;
+    // Step factor = 0.9 x ClayCore's Lipschitz safe-step scale (>= 1 with
+    // no warps in the scene) — free extra step length (docs/06 §2.3).
+    const float stepScale = max(u.previewInfo.z, 0.5);
     for (int i = 0; i < 112 && t < 24.0; i++) {
         float d = mapDist(ro + rd * t, ctx);
         if (d < 0.001 * max(t, 1.0)) { hit = true; break; }
-        t += max(d * 0.9, 0.0014 * max(t, 1.0)); // 0.9: blends bound; floor: grazing rays
+        t += max(d * stepScale, 0.0014 * max(t, 1.0)); // floor: grazing rays
     }
 
     // Paper background.

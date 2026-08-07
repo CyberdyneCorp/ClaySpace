@@ -561,6 +561,61 @@ final class ClayEngineTests: XCTestCase {
                        "the freeze mask rides the document")
     }
 
+    // MARK: Performance pass (docs/06 §A)
+
+    func testSafeStepScaleQueriedAndSane() async {
+        let engine = ClayEngine()
+        engine.beginStroke(at: SIMD3(1.2, 0.8, 0), radius: 0.2,
+                           op: CLAY_OP_ADD, blendK: 0.03, color: ClayEngine.clayColor)
+        engine.endStroke()
+        await engine.bakeNow()
+        // The app authors no warps: ClayCore's Lipschitz factor is >= 1,
+        // meaning the marcher may step FARTHER than the raw distance.
+        XCTAssertGreaterThanOrEqual(engine.safeStepScale, 1.0)
+        XCTAssertLessThan(engine.safeStepScale, 10, "sane magnitude")
+    }
+
+    func testPointUploadRangeDeltas() {
+        // Appends upload the suffix only; shrinks and in-place edits fall
+        // back to a full copy; empty pools upload nothing.
+        XCTAssertNil(Renderer.pointUploadRange(uploaded: 0, current: 0))
+        XCTAssertEqual(Renderer.pointUploadRange(uploaded: 0, current: 5), 0..<5)
+        XCTAssertEqual(Renderer.pointUploadRange(uploaded: 5, current: 8), 5..<8)
+        XCTAssertEqual(Renderer.pointUploadRange(uploaded: 8, current: 3), 0..<3,
+                       "undo shrank the pool: full re-upload")
+        XCTAssertEqual(Renderer.pointUploadRange(uploaded: 5, current: 5), 0..<5,
+                       "same count can mean in-place radii edits: full copy")
+    }
+
+    func testVoxelDragSessionThrottlesMeshRebuilds() {
+        let engine = ClayEngine()
+        _ = engine.ensureVoxelLayer()
+        let pink = SIMD3<Float>(1, 0.27, 0.56)
+
+        engine.beginVoxelEdits()
+        let versionAtStart = engine.voxelMeshVersion
+        for x in Int32(0)..<12 {
+            engine.voxelStamp(.place, at: SIMD3(x, 0, 0), brushSize: 1, color: pink)
+        }
+        XCTAssertEqual(engine.voxelMeshVersion, versionAtStart,
+                       "stamps inside a session defer the rebuild")
+
+        engine.rebuildVoxelMeshIfDirty() // what the render loop does per frame
+        XCTAssertEqual(engine.voxelMeshVersion, versionAtStart + 1,
+                       "one frame, one rebuild")
+        XCTAssertGreaterThan(engine.voxelIndices.count, 0)
+
+        engine.voxelStamp(.place, at: SIMD3(20, 0, 0), brushSize: 1, color: pink)
+        engine.endVoxelEdits()
+        XCTAssertEqual(engine.voxelMeshVersion, versionAtStart + 2,
+                       "session end flushes the final rebuild")
+        XCTAssertEqual(engine.voxelCount, 13, "every stamp landed despite throttling")
+
+        // Lone stamps (no session) still rebuild immediately.
+        engine.voxelStamp(.place, at: SIMD3(30, 0, 0), brushSize: 1, color: pink)
+        XCTAssertEqual(engine.voxelMeshVersion, versionAtStart + 3)
+    }
+
     func testVoxelsSurviveSaveLoad() throws {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("vox_\(UUID().uuidString)")

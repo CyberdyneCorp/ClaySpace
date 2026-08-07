@@ -1,4 +1,5 @@
 import Metal
+import os
 import QuartzCore
 import simd
 
@@ -44,6 +45,17 @@ final class Renderer {
     private let colorTexture: MTLTexture
     private var uploadedVersion = -1
     private var uploadedCacheVersion = -1
+    private var uploadedPointCount = 0
+    /// Last GPU time of a completed frame, for the debug HUD.
+    let gpuFrameTime = OSAllocatedUnfairLock<Double>(initialState: 0)
+
+    /// During strokes the pool only appends — upload just the suffix.
+    /// Any shrink or in-place edit (undo, thickness slider) falls back to
+    /// a full copy.
+    static func pointUploadRange(uploaded: Int, current: Int) -> Range<Int>? {
+        guard current > 0 else { return nil }
+        return current > uploaded ? uploaded..<current : 0..<current
+    }
 
     // Voxel raster pass (greedy mesh) composited via a shared depth buffer.
     private let voxelPipeline: MTLRenderPipelineState
@@ -194,13 +206,17 @@ final class Renderer {
             items.prefix(count).withUnsafeBytes { src in
                 itemBuffer.contents().copyMemory(from: src.baseAddress!, byteCount: src.count)
             }
-            if !strokePoints.isEmpty {
-                let pointCount = min(strokePoints.count, ClayEngine.maxStrokePoints)
-                strokePoints.prefix(pointCount).withUnsafeBytes { src in
-                    strokePointBuffer.contents().copyMemory(from: src.baseAddress!,
-                                                            byteCount: src.count)
+            let pointCount = min(strokePoints.count, ClayEngine.maxStrokePoints)
+            if let range = Self.pointUploadRange(uploaded: uploadedPointCount,
+                                                 current: pointCount) {
+                let stride = MemoryLayout<SIMD4<Float>>.stride
+                strokePoints[range].withUnsafeBytes { src in
+                    strokePointBuffer.contents()
+                        .advanced(by: range.lowerBound * stride)
+                        .copyMemory(from: src.baseAddress!, byteCount: src.count)
                 }
             }
+            uploadedPointCount = pointCount
             uploadedVersion = engine.version
         }
 
@@ -295,7 +311,8 @@ final class Renderer {
             mirrorAxes: engine.mirrorAxes,
             mirrorK: engine.mirrorK,
             selectedIndex: Int32(selectedIndex),
-            previewInfo: SIMD3(Float(previewSlot), Float(previewCount), 0),
+            previewInfo: SIMD3(Float(previewSlot), Float(previewCount),
+                               0.9 * min(max(engine.safeStepScale, 0.5), 1.3)),
             gridOrigin: cacheUsable
                 ? SIMD4(cache!.origin.x, cache!.origin.y, cache!.origin.z, 1)
                 : SIMD4(0, 0, 0, 0),
@@ -354,6 +371,11 @@ final class Renderer {
         }
         encoder.endEncoding()
 
+        commands.addCompletedHandler { [gpuFrameTime] buffer in
+            // MTLCommandBuffer isn't Sendable; only two doubles cross.
+            nonisolated(unsafe) let completed = buffer
+            gpuFrameTime.withLock { $0 = completed.gpuEndTime - completed.gpuStartTime }
+        }
         commands.present(drawable)
         commands.commit()
     }
