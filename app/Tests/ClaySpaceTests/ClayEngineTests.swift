@@ -8,6 +8,40 @@ import claycore
 @MainActor
 final class ClayEngineTests: XCTestCase {
 
+
+    func testParamSessionPromotesSphereToEllipsoidAsOneUndoStep() {
+        let engine = ClayEngine()
+        XCTAssertTrue(engine.addShape(CLAY_PRIM_SPHERE, params: [0.3],
+                                      at: SIMD3(0, 1, 0), op: CLAY_OP_ADD,
+                                      blendK: 0, color: SIMD3(1, 0.27, 0.56)))
+        let index = engine.items.count - 1
+        let countBefore = engine.items.count
+
+        // The gizmo's axis-stretch path: one session retypes AND stretches.
+        XCTAssertTrue(engine.beginParamEdit(index: index))
+        engine.updateParamEdit(prim: Int32(CLAY_PRIM_ELLIPSOID.rawValue),
+                               params: [0.3, 0.3, 0.45])
+        engine.endParamEdit()
+        XCTAssertEqual(engine.items[index].prim, Int32(CLAY_PRIM_ELLIPSOID.rawValue))
+        XCTAssertEqual(engine.items[index].params.z, 0.45, accuracy: 1e-4)
+
+        // ONE undo returns the sphere, radius intact; redo restores both.
+        XCTAssertTrue(engine.undo())
+        XCTAssertEqual(engine.items.count, countBefore, "prim change is not an add")
+        XCTAssertEqual(engine.items[index].prim, Int32(CLAY_PRIM_SPHERE.rawValue))
+        XCTAssertEqual(engine.items[index].params.x, 0.3, accuracy: 1e-4)
+        XCTAssertTrue(engine.redo())
+        XCTAssertEqual(engine.items[index].prim, Int32(CLAY_PRIM_ELLIPSOID.rawValue))
+        XCTAssertEqual(engine.items[index].params.z, 0.45, accuracy: 1e-4)
+
+        // The document field agrees with the mirror: the stretched axis
+        // reaches further than the round ones.
+        let hitZ = engine.raycast(origin: SIMD3(0, 1, 3), direction: SIMD3(0, 0, -1))
+        let hitX = engine.raycast(origin: SIMD3(3, 1, 0), direction: SIMD3(-1, 0, 0))
+        XCTAssertEqual(hitZ?.position.z ?? 0, 0.45, accuracy: 0.03)
+        XCTAssertEqual(hitX?.position.x ?? 0, 0.30, accuracy: 0.03)
+    }
+
     func testSeedsOneBaseSphereThatCannotBeUndone() {
         let engine = ClayEngine()
         XCTAssertNil(engine.lastError)

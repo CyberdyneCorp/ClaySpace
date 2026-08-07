@@ -732,11 +732,17 @@ extension ViewportState: PencilToolSink {
                 }
                 if layout.mode == .scale {
                     // Primitives edit their params per axis; strokes fall
-                    // back to uniform transform scale.
+                    // back to uniform transform scale. Spheres have ONE
+                    // radius — an axis stretch promotes them to ellipsoids
+                    // (r,r,r) inside the same one-step undo group.
+                    let isSphere = item.prim == Int32(CLAY_PRIM_SPHERE.rawValue)
                     if ClayEngine.paramCount(forPrim: item.prim) > 0,
                        engine.beginParamEdit(index: index) {
                         gizmoDrag = .axisScale(colorIndex: axis.colorIndex,
-                                               startParams: item.params,
+                                               startParams: isSphere
+                                                   ? SIMD4(item.params.x, item.params.x,
+                                                           item.params.x, 0)
+                                                   : item.params,
                                                startScale: item.scale == 0 ? 1 : item.scale,
                                                screenDir: axis.screenDir,
                                                startScalar: scalar(along: axis.screenDir),
@@ -1005,8 +1011,11 @@ extension ViewportState: PencilToolSink {
                             let screenDir, let startScalar, let anchor):
                 let delta = scalar(along: screenDir, center: anchor) - startScalar
                 let factor = Float(max(0.1, 1 + delta / 120))
+                let prim = item.prim == Int32(CLAY_PRIM_SPHERE.rawValue)
+                    ? Int32(CLAY_PRIM_ELLIPSOID.rawValue) : item.prim
                 engine.updateParamEdit(
-                    params: Self.scaledParams(prim: item.prim, start: startParams,
+                    prim: prim,
+                    params: Self.scaledParams(prim: prim, start: startParams,
                                               axis: colorIndex, factor: factor))
             case .scale(let startScale, let startDistance, let center):
                 let distance = max(hypot(point.x - center.x, point.y - center.y), 10)

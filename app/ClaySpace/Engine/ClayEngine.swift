@@ -228,7 +228,8 @@ final class ClayEngine {
         case layerRemove(slot: Int, info: SdfLayer, rows: [LayerRow])
         case layerVisibility(slot: Int, before: Bool, after: Bool)
         case voxelStep // grid diff lives in ClayCore's journal (ABI 0.20)
-        case reparam(index: Int, before: SIMD4<Float>, after: SIMD4<Float>)
+        case reparam(index: Int, before: SIMD4<Float>, after: SIMD4<Float>,
+                     primBefore: Int32, primAfter: Int32)
         case addBatch(count: Int) // spray stroke: N stamps, one clay step
         case removeBatch(rows: [LayerRow])
     }
@@ -247,7 +248,8 @@ final class ClayEngine {
         case layerRemove(slot: Int)
         case layerVisibility(slot: Int, before: Bool, after: Bool)
         case voxelStep
-        case reparam(index: Int, before: SIMD4<Float>, after: SIMD4<Float>)
+        case reparam(index: Int, before: SIMD4<Float>, after: SIMD4<Float>,
+                     primBefore: Int32, primAfter: Int32)
         case addBatch(rows: [LayerRow])
         case removeBatch(rows: [LayerRow])
     }
@@ -956,9 +958,11 @@ final class ClayEngine {
         case .voxelStep:
             rebuildVoxelMesh() // ClayCore's journal reverted the cells
             redoOps.append(.voxelStep)
-        case .reparam(let index, let before, let after):
+        case .reparam(let index, let before, let after, let primBefore, let primAfter):
+            if items.indices.contains(index) { items[index].prim = primBefore }
             replayParamsMirror(before, at: index)
-            redoOps.append(.reparam(index: index, before: before, after: after))
+            redoOps.append(.reparam(index: index, before: before, after: after,
+                                    primBefore: primBefore, primAfter: primAfter))
         case .addBatch(let count):
             var rows: [LayerRow] = []
             for _ in 0..<min(count, items.count) {
@@ -1074,9 +1078,11 @@ final class ClayEngine {
         case .voxelStep:
             rebuildVoxelMesh()
             undoLog.append(.voxelStep)
-        case .reparam(let index, let before, let after):
+        case .reparam(let index, let before, let after, let primBefore, let primAfter):
+            if items.indices.contains(index) { items[index].prim = primAfter }
             replayParamsMirror(after, at: index)
-            undoLog.append(.reparam(index: index, before: before, after: after))
+            undoLog.append(.reparam(index: index, before: before, after: after,
+                                    primBefore: primBefore, primAfter: primAfter))
         case .addBatch(let rows):
             for row in rows {
                 items.append(row.item)
@@ -1260,6 +1266,7 @@ final class ClayEngine {
 
     private var paramSessionIndex: Int?
     private var paramSessionBefore: SIMD4<Float>?
+    private var paramSessionPrimBefore: Int32 = 0
     private var paramSessionChanged = false
     var isEditingParams: Bool { paramSessionIndex != nil }
 
@@ -1272,19 +1279,24 @@ final class ClayEngine {
         _ = check(clay_document_begin_undo_group(doc))
         paramSessionIndex = index
         paramSessionBefore = items[index].params
+        paramSessionPrimBefore = items[index].prim
         paramSessionChanged = false
         dropCacheIfCovers(index)
         return true
     }
 
-    /// Live update within the session (absolute parameter values).
-    func updateParamEdit(params: [Float]) {
+    /// Live update within the session (absolute parameter values). Passing
+    /// `prim` retypes the primitive in the same undo step — how a sphere
+    /// becomes an ellipsoid the moment an axis handle stretches it.
+    func updateParamEdit(prim newPrim: Int32? = nil, params: [Float]) {
         guard let doc, let index = paramSessionIndex else { return }
-        let count = Self.paramCount(forPrim: items[index].prim)
+        let prim = newPrim ?? items[index].prim
+        let count = Self.paramCount(forPrim: prim)
         guard params.count >= count else { return }
         let clamped = params.prefix(count).map { max($0, 0.02) }
         guard check(clay_layer_set_prim(doc, layerId(of: index), nodeIDs[index],
-                                        items[index].prim, clamped, count)) else { return }
+                                        prim, clamped, count)) else { return }
+        items[index].prim = prim
         for (i, value) in clamped.prefix(4).enumerated() { items[index].params[i] = value }
         paramSessionChanged = true
         let support = Self.blendSupport(clay_blend(UInt32(max(items[index].blend, 0))),
@@ -1302,7 +1314,9 @@ final class ClayEngine {
         _ = check(clay_document_end_undo_group(doc))
         if paramSessionChanged, let before = paramSessionBefore {
             undoLog.append(.reparam(index: index, before: before,
-                                    after: items[index].params))
+                                    after: items[index].params,
+                                    primBefore: paramSessionPrimBefore,
+                                    primAfter: items[index].prim))
             redoOps.removeAll()
             scheduleBake()
         }
