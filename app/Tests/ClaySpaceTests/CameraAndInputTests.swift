@@ -621,6 +621,77 @@ final class CameraAndInputTests: XCTestCase {
                                     "commit covers everything previewed")
     }
 
+    // MARK: Smooth-mode sculpt brushes (Standard / Carve / Snake Hook)
+
+    func testStandardBrushConformsToTheSurface() {
+        let state = ViewportState()
+        state.viewportSize = CGSize(width: 800, height: 600)
+        state.activate(.sculpt, announce: false)
+        state.sculptBrush = .standard
+
+        // Drag across the seeded ball's face: a view-plane stroke would
+        // stay on the flat plane through the first hit; a surface-
+        // conforming one bends back with the sphere.
+        state.pencilBegan(at: CGPoint(x: 400, y: 300), pressure: 0.5)
+        for x in stride(from: 412, through: 520, by: 6) {
+            state.pencilMoved(to: CGPoint(x: CGFloat(x), y: 300), pressure: 0.5)
+        }
+        state.pencilEnded(at: CGPoint(x: 520, y: 300))
+
+        let ballCenter = SIMD3<Float>(0, 0.8, 0)
+        let radii = state.engine.strokePoints.map { point in
+            simd_distance(SIMD3(point.x, point.y, point.z), ballCenter)
+        }
+        XCTAssertGreaterThan(radii.count, 4)
+        // Every anchored point hugs the sphere (0.8) plus the buildup
+        // offset — none of them run off on the tangent plane, which would
+        // reach 1.0+ by the stroke's end.
+        for distance in radii.dropFirst() {
+            XCTAssertLessThan(distance, 0.98, "stroke bent WITH the surface")
+            XCTAssertGreaterThan(distance, 0.75, "and stayed on it, not inside")
+        }
+    }
+
+    func testSnakeHookTapersAndStaysFree() {
+        let state = ViewportState()
+        state.viewportSize = CGSize(width: 800, height: 600)
+        state.activate(.sculpt, announce: false)
+        state.sculptBrush = .snakeHook
+
+        state.pencilBegan(at: CGPoint(x: 400, y: 300), pressure: 0.7)
+        for x in stride(from: 412, through: 560, by: 8) {
+            state.pencilMoved(to: CGPoint(x: CGFloat(x), y: 300), pressure: 0.7)
+        }
+        state.pencilEnded(at: CGPoint(x: 560, y: 300))
+
+        let index = state.engine.items.count - 1
+        let radii = state.engine.strokeRadii(of: index) ?? []
+        XCTAssertGreaterThan(radii.count, 4)
+        XCTAssertLessThan(radii.last!, radii.first! * 0.85,
+                          "the tendril thins as it grows")
+        XCTAssertEqual(state.engine.items[index].op, Int32(CLAY_OP_ADD.rawValue))
+    }
+
+    func testCarveBrushSubtractsAndNeedsASurface() {
+        let state = ViewportState()
+        state.viewportSize = CGSize(width: 800, height: 600)
+        state.activate(.sculpt, announce: false)
+        state.sculptBrush = .carve
+
+        // A tap in empty air carves nothing.
+        let before = state.engine.items.count
+        state.pencilBegan(at: CGPoint(x: 80, y: 80), pressure: 0.5)
+        state.pencilEnded(at: CGPoint(x: 80, y: 80))
+        XCTAssertEqual(state.engine.items.count, before, "carving needs a surface")
+
+        // On the ball it subtracts.
+        state.pencilBegan(at: CGPoint(x: 400, y: 300), pressure: 0.5)
+        state.pencilEnded(at: CGPoint(x: 400, y: 300))
+        XCTAssertEqual(state.engine.items.count, before + 1)
+        XCTAssertEqual(state.engine.items.last?.op, Int32(CLAY_OP_SUBTRACT.rawValue))
+        state.sculptBrush = .standard
+    }
+
     func testHapticsFireOnStrokeEndAndRespectTheToggle() {
         let state = ViewportState()
         state.viewportSize = CGSize(width: 800, height: 600)

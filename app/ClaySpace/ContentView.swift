@@ -57,7 +57,6 @@ struct ContentView: View {
                         if state.activeTool == .freeze {
                             FreezeBar(state: state)
                         }
-                        PaletteBar(state: state)
                         if state.mode == .voxel {
                             VoxelBar(state: state)
                         } else {
@@ -426,12 +425,95 @@ struct ContentView: View {
                     .accessibilityLabel("Light direction")
             }
             LayersPanel(state: state)
+            brushesSection
+            colorsSection
             EditListPanel(state: state)
-            Spacer()
         }
         .padding(16)
         .frame(width: 270, alignment: .topLeading)
         .background(.thinMaterial)
+    }
+
+    /// Brushes in the Build panel (user sketch): the Smooth-mode sculpt
+    /// brushes plus the brush-like tools, as a grid. Selecting one
+    /// activates the matching tool.
+    private var brushesSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Brushes")
+                .font(.system(size: 13, weight: .semibold))
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 6),
+                                     count: 5), spacing: 6) {
+                if state.mode == .sdf {
+                    ForEach(ViewportState.SculptBrush.allCases) { brush in
+                        let active = state.activeTool == .sculpt
+                            && state.sculptBrush == brush
+                        brushButton(symbol: brush.symbol, title: brush.title,
+                                    active: active) {
+                            state.sculptBrush = brush
+                            state.activate(.sculpt, announce: false)
+                            state.showToast(brush.title)
+                        }
+                    }
+                } else {
+                    ForEach(ClayEngine.VoxelVerb.allCases) { verb in
+                        let active = state.activeTool == .sculpt
+                            && state.voxelVerb == verb
+                        brushButton(symbol: verb.symbol, title: verb.title,
+                                    active: active) {
+                            state.voxelVerb = verb
+                            state.activate(.sculpt, announce: false)
+                            state.showToast(verb.title)
+                        }
+                    }
+                }
+                ForEach([Tool.spray, .shape, .trim, .freeze, .erase, .paint,
+                         .select, .move], id: \.self) { tool in
+                    brushButton(symbol: tool.symbol, title: tool.title,
+                                active: state.activeTool == tool) {
+                        state.activate(tool)
+                    }
+                }
+            }
+        }
+    }
+
+    private func brushButton(symbol: String, title: String, active: Bool,
+                             action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 14))
+                .frame(width: 42, height: 32)
+                .foregroundStyle(active ? .white : .primary)
+                .background(
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(active ? Color.orange : Color.primary.opacity(0.06)))
+        }
+        .accessibilityLabel("Brush \(title)")
+    }
+
+    /// Colours in the Build panel (moved from the floating bottom bar).
+    private var colorsSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Colours")
+                .font(.system(size: 13, weight: .semibold))
+            HStack(spacing: 6) {
+                ForEach(Array(ViewportState.palette.enumerated()), id: \.offset) { _, color in
+                    let selected = state.activeColor == color
+                    Button {
+                        state.pickColor(color)
+                    } label: {
+                        Circle()
+                            .fill(Color(red: Double(color.x), green: Double(color.y),
+                                        blue: Double(color.z)))
+                            .frame(width: 24, height: 24)
+                            .overlay(Circle().strokeBorder(
+                                selected ? Color.orange : Color.primary.opacity(0.15),
+                                lineWidth: selected ? 2.5 : 1))
+                    }
+                    .accessibilityLabel("Colour")
+                }
+            }
+        }
     }
 }
 

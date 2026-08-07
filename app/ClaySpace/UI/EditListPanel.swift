@@ -72,7 +72,8 @@ struct EditListPanel: View {
             }
             .listStyle(.plain)
             .environment(\.editMode, .constant(.active)) // always reorderable
-            .frame(maxHeight: 240)
+            // Fill whatever the panel has left; the List scrolls inside it.
+            .frame(minHeight: 140, maxHeight: .infinity)
             .accessibilityIdentifier("editList")
 
             if let index = state.selectedIndex,

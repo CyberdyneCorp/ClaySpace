@@ -255,6 +255,34 @@ final class ViewportState {
     var shapeOp: ShapeOp = .add
     /// Voxel sculpt verb applied by the Sculpt tool in Voxels mode.
     var voxelVerb: ClayEngine.VoxelVerb = .place
+
+    /// Smooth-mode sculpt brushes (ZBrush/3DCoat-style, task 7.x follow-up).
+    /// Standard and Carve CONFORM TO THE SURFACE — each move re-anchors on
+    /// the clay via an attributed raycast (ignoring the stroke being drawn,
+    /// so it never chases its own fresh surface); Snake Hook pulls free
+    /// tendrils on the view plane with a tapering radius.
+    enum SculptBrush: String, CaseIterable, Identifiable {
+        case standard, carve, snakeHook
+
+        var id: String { rawValue }
+        var title: String {
+            switch self {
+            case .standard: "Standard"
+            case .carve: "Carve"
+            case .snakeHook: "Snake Hook"
+            }
+        }
+        var symbol: String {
+            switch self {
+            case .standard: "circle.tophalf.filled"
+            case .carve: "minus.circle"
+            case .snakeHook: "point.topleft.down.to.point.bottomright.curvepath"
+            }
+        }
+        var followsSurface: Bool { self != .snakeHook }
+    }
+    var sculptBrush: SculptBrush = .standard
+    @ObservationIgnored fileprivate var strokeTravel: Float = 0
     /// Spray-tool stroke feel (ZBrush-style stamp engine).
     var sprayFeel = ClayEngine.SprayFeel()
 
@@ -812,7 +840,10 @@ extension ViewportState: PencilToolSink {
 
         let start: SIMD3<Float>?
         switch activeTool {
-        case .sculpt: start = hit?.position ?? groundPoint(on: ray)
+        case .sculpt where sculptBrush == .carve:
+            start = hit?.position // carving needs a surface
+        case .sculpt:
+            start = hit?.position ?? groundPoint(on: ray)
         default: start = hit?.position // carving and painting need a surface
         }
         guard let start else { return }
@@ -823,8 +854,14 @@ extension ViewportState: PencilToolSink {
         switch activeTool {
         case .erase: op = CLAY_OP_SUBTRACT; blend = r * 0.09
         case .paint: op = CLAY_OP_PAINT; blend = r * 0.25 // support ≈ brush radius
-        default: op = CLAY_OP_ADD; blend = r * 0.14
+        default:
+            switch sculptBrush {
+            case .carve: op = CLAY_OP_SUBTRACT; blend = r * 0.09
+            case .snakeHook: op = CLAY_OP_ADD; blend = r * 0.12
+            case .standard: op = CLAY_OP_ADD; blend = r * 0.14
+            }
         }
+        strokeTravel = 0
         if engine.beginStroke(at: start, radius: r, op: op,
                               blendK: blend, color: activeColor) {
             // Later moves project onto the view-parallel plane through the
@@ -1003,13 +1040,36 @@ extension ViewportState: PencilToolSink {
         guard engine.isStroking,
               let plane = strokePlane,
               let last = lastStrokePoint,
-              let ray = ray(through: point),
-              let p = intersect(ray: ray, plane: plane) else { return }
+              let ray = ray(through: point) else { return }
 
-        let r = radius(for: max(pressure, 0.1), altitude: altitude)
+        var r = radius(for: max(pressure, 0.1), altitude: altitude)
+        var target: SIMD3<Float>?
+
+        if activeTool == .sculpt, sculptBrush.followsSurface {
+            // Standard/Carve glide ON the clay: an attributed raycast finds
+            // the surface, and hits owned by the stroke being drawn fall
+            // back to the view plane instead of chasing themselves.
+            let activeIndex = engine.items.count - 1
+            if let hit = engine.raycast(origin: ray.origin, direction: ray.direction),
+               let picked = engine.pick(origin: ray.origin, direction: ray.direction),
+               picked.index != activeIndex {
+                let offset: Float = sculptBrush == .carve ? -r * 0.1 : r * 0.25
+                target = hit.position + hit.normal * offset
+            }
+        }
+        if target == nil {
+            target = intersect(ray: ray, plane: plane)
+        }
+        guard let p = target else { return }
+
+        if activeTool == .sculpt, sculptBrush == .snakeHook {
+            // Tendrils thin as they grow, like pulling real clay.
+            r *= max(0.3, 1 - strokeTravel * 0.45)
+        }
         // Decimate: only append once the Pencil has travelled a fraction of
         // the brush radius, so point counts stay low and segments smooth.
         guard simd_distance(p, last) > r * 0.45 else { return }
+        strokeTravel += simd_distance(p, last)
         engine.appendStrokePoint(p, radius: r)
         lastStrokePoint = p
     }

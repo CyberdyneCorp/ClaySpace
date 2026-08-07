@@ -66,6 +66,8 @@
 
 ### Brush suite follow-ups (post 6.x/7.x, from device use)
 - [x] Trim tool (ZBrush Trim Rect/Circle/Lasso via clay_cut_create): marquee overlay -> cut frame on the plane through the scene center, camera basis, prism cut as an ordinary undoable item; Remove|Keep = SUBTRACT|INTERSECT; preview inert until the bake lands (no analytic extrude kernel — unknown prims now contribute nothing instead of falling back to a sphere)
+- [x] Smooth-mode sculpt brushes (ZBrush/3DCoat direction): Standard and Carve CONFORM TO THE SURFACE — each move re-anchors on the clay via attributed raycasts, ignoring hits owned by the stroke being drawn so it never chases its own fresh surface (buildup offsets +0.25r out, carve digs -0.1r in); Snake Hook pulls free tendrils on the view plane with tapering radii. TRUE surface-relief Standard/Smooth/Move brushes stay engine-gated (ClayCore #7 items 1/2/8)
+- [x] Build panel reorganization (user sketch): Brushes grid (sculpt brushes or voxel verbs by mode + brush-like tools) and Colours row moved INTO the right panel; the floating palette bar retired; the Edits list takes the panel's remaining height and scrolls
 - [x] Freeze tool (clay_mask): hard-edged world-space mask brush per layer (voxel layer in Voxels mode, active SDF layer in Smooth), gating stamp brushes, sculpt verbs and spray stamps; Invert/Clear; frozen regions tint ice blue in BOTH representations — voxel vertices via clay_mask_sample_many at mesh rebuild, smooth clay via a 48-cap 3D weight texture baked from the active layer's mask (clay_mask_bounds + sample_many) and sampled in the raymarcher's shading; masks ride the document (verified save/load); mask paints are tool state (ClayCore does not journal mask ops)
 
 ## 8. Materials & color
