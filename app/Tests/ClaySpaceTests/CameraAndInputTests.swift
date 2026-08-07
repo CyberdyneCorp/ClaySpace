@@ -232,7 +232,9 @@ final class CameraAndInputTests: XCTestCase {
         state.pencilEnded(at: center)
         let tilted = state.engine.strokeRadii(of: 2)?.first ?? 0
 
-        XCTAssertEqual(vertical, 0.21, accuracy: 0.005, "vertical is the base radius")
+        // Standard sweeps 1.35x wide (embedded-relief geometry).
+        XCTAssertEqual(vertical, 0.21 * 1.35, accuracy: 0.007,
+                       "vertical is the base radius times the brush width")
         XCTAssertGreaterThan(tilted, vertical * 1.4,
                              "a near-flat pencil sweeps a much wider footprint")
     }
@@ -643,13 +645,23 @@ final class CameraAndInputTests: XCTestCase {
             simd_distance(SIMD3(point.x, point.y, point.z), ballCenter)
         }
         XCTAssertGreaterThan(radii.count, 4)
-        // Every anchored point hugs the sphere (0.8) plus the buildup
-        // offset — none of them run off on the tangent plane, which would
-        // reach 1.0+ by the stroke's end.
+        // Anchors EMBED below the sphere's surface (0.8) by ~0.65 brush
+        // radii so only a shallow cap protrudes; a tangent-plane stroke
+        // would keep distance >= 0.8 and run off toward 1.0+.
         for distance in radii.dropFirst() {
-            XCTAssertLessThan(distance, 0.98, "stroke bent WITH the surface")
-            XCTAssertGreaterThan(distance, 0.75, "and stayed on it, not inside")
+            XCTAssertLessThan(distance, 0.88,
+                              "stroke bent WITH the surface (tangent would pass 1.0)")
+            XCTAssertGreaterThan(distance, 0.5, "but not swallowed by it")
         }
+
+        // The ZBrush-Standard signature: relief is a WIDE SHALLOW ridge —
+        // protrusion well under the chain radius, not a full tube.
+        let front = state.engine.raycast(origin: SIMD3(0.25, 0.8, 3),
+                                         direction: SIMD3(0, 0, -1))
+        let protrusion = (front?.position.z ?? 0.8) - 0.8
+        XCTAssertGreaterThan(protrusion, 0.015, "the ridge raised the surface")
+        XCTAssertLessThan(protrusion, 0.2,
+                          "…but stays shallow (a snake-hook tube would bulge ~0.35)")
     }
 
     func testSnakeHookTapersAndStaysFree() {

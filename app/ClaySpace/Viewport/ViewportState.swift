@@ -264,6 +264,21 @@ final class ViewportState {
     enum SculptBrush: String, CaseIterable, Identifiable {
         case standard, carve, snakeHook
 
+        /// How far the chain center sits from the surface, in radii.
+        /// Standard EMBEDS most of the tube (-0.65r): only a shallow cap
+        /// pokes out (~0.35r high, ~1.4r wide) — the wide soft ridge of
+        /// ZBrush's Standard, not a snake-hook tube. Carve floats above
+        /// (+0.6r) so the subtract takes a shallow bite, not a gouge.
+        var surfaceOffset: Float {
+            switch self {
+            case .standard: -0.65
+            case .carve: 0.6
+            case .snakeHook: 0
+            }
+        }
+        /// Standard sweeps wider than it is tall.
+        var radiusScale: Float { self == .standard ? 1.35 : 1.0 }
+
         var id: String { rawValue }
         var title: String {
             switch self {
@@ -838,7 +853,7 @@ extension ViewportState: PencilToolSink {
               let ray = ray(through: point) else { return }
         let hit = engine.raycast(origin: ray.origin, direction: ray.direction)
 
-        let start: SIMD3<Float>?
+        var start: SIMD3<Float>?
         switch activeTool {
         case .sculpt where sculptBrush == .carve:
             start = hit?.position // carving needs a surface
@@ -846,9 +861,15 @@ extension ViewportState: PencilToolSink {
             start = hit?.position ?? groundPoint(on: ray)
         default: start = hit?.position // carving and painting need a surface
         }
+
+        var r = radius(for: max(pressure, 0.1), altitude: altitude)
+        if activeTool == .sculpt { r *= sculptBrush.radiusScale }
+        if activeTool == .sculpt, sculptBrush.followsSurface, start != nil {
+            let normal = hit?.normal ?? SIMD3(0, 1, 0) // ground faces up
+            start! += normal * (r * sculptBrush.surfaceOffset)
+        }
         guard let start else { return }
 
-        let r = radius(for: max(pressure, 0.1), altitude: altitude)
         let op: clay_op
         let blend: Float
         switch activeTool {
@@ -856,9 +877,9 @@ extension ViewportState: PencilToolSink {
         case .paint: op = CLAY_OP_PAINT; blend = r * 0.25 // support ≈ brush radius
         default:
             switch sculptBrush {
-            case .carve: op = CLAY_OP_SUBTRACT; blend = r * 0.09
+            case .carve: op = CLAY_OP_SUBTRACT; blend = r * 0.12
             case .snakeHook: op = CLAY_OP_ADD; blend = r * 0.12
-            case .standard: op = CLAY_OP_ADD; blend = r * 0.14
+            case .standard: op = CLAY_OP_ADD; blend = r * 0.2 // soft shoulders
             }
         }
         strokeTravel = 0
@@ -1043,18 +1064,24 @@ extension ViewportState: PencilToolSink {
               let ray = ray(through: point) else { return }
 
         var r = radius(for: max(pressure, 0.1), altitude: altitude)
+        if activeTool == .sculpt { r *= sculptBrush.radiusScale }
         var target: SIMD3<Float>?
 
         if activeTool == .sculpt, sculptBrush.followsSurface {
             // Standard/Carve glide ON the clay: an attributed raycast finds
             // the surface, and hits owned by the stroke being drawn fall
-            // back to the view plane instead of chasing themselves.
+            // back to the view plane instead of chasing themselves. The
+            // chain center then embeds per the brush's surfaceOffset, so
+            // relief stays a shallow ridge rather than a full tube.
             let activeIndex = engine.items.count - 1
             if let hit = engine.raycast(origin: ray.origin, direction: ray.direction),
                let picked = engine.pick(origin: ray.origin, direction: ray.direction),
                picked.index != activeIndex {
-                let offset: Float = sculptBrush == .carve ? -r * 0.1 : r * 0.25
-                target = hit.position + hit.normal * offset
+                target = hit.position + hit.normal * (r * sculptBrush.surfaceOffset)
+                // The fallback plane follows the LAST surface anchor, so a
+                // moment of self-attribution doesn't fling the chain off on
+                // the tangent from the stroke's start.
+                strokePlane = (target!, camera.basis.forward)
             }
         }
         if target == nil {
