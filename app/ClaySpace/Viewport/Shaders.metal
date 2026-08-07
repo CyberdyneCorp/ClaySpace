@@ -27,6 +27,7 @@ struct Uniforms {
     float4 maskOrigin;    // xyz freeze-field origin; w = enabled
     float4 maskInvExtent; // xyz = 1/extent
     float4 maskScale;     // xyz = dims/maxResolution (texture sub-region)
+    float4 previewBound;  // ghost union sphere: xyz center, w radius
 };
 
 // Must match SceneItem in ClayEngine.swift (80 bytes).
@@ -705,9 +706,19 @@ fragment FragOut raymarch_fragment(VertexOut in [[stage_in]],
     int previewSlot = int(u.previewInfo.x);
     int previewCount = int(u.previewInfo.y);
     if (previewSlot >= 0 && previewCount > 0) {
+        // Whole-trail early-out: ray vs the ghosts' union sphere.
+        float3 oc = u.previewBound.xyz - ro;
+        float along = dot(oc, rd);
+        float miss2 = dot(oc, oc) - along * along;
+        float r2 = u.previewBound.w * u.previewBound.w;
+        if (miss2 > r2 || (along < 0.0 && dot(oc, oc) > r2)) {
+            previewCount = 0;
+        }
+    }
+    if (previewSlot >= 0 && previewCount > 0) {
         float tg = 0.0;
         bool ghostHit = false;
-        for (int step = 0; step < 48 && tg < 24.0; step++) {
+        for (int step = 0; step < 40 && tg < 24.0; step++) {
             float3 gp = ro + rd * tg;
             float d = 1e9;
             for (int i = 0; i < previewCount; i++) {
@@ -716,7 +727,7 @@ fragment FragOut raymarch_fragment(VertexOut in [[stage_in]],
                 d = min(d, sdItem(gp, ghost, ctx.pts));
             }
             if (d < 0.0015 * max(tg, 1.0)) { ghostHit = true; break; }
-            tg += max(d * 0.95, 0.004);
+            tg += max(d * 0.95, 0.008);
         }
         if (ghostHit) {
             float3 gp = ro + rd * tg;

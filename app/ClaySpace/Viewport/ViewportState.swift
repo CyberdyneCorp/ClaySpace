@@ -1,6 +1,7 @@
 import Foundation
 import Observation
 import CoreGraphics
+import QuartzCore
 import simd
 import claycore
 
@@ -281,6 +282,7 @@ final class ViewportState {
     fileprivate var lastVoxelDragPoint: SIMD3<Float>?
     fileprivate var spraySamples: [(position: SIMD3<Float>, pressure: Float, tilt: Float)] = []
     fileprivate var sprayPlane: (point: SIMD3<Float>, normal: SIMD3<Float>)?
+    @ObservationIgnored fileprivate var lastGhostSampleCount = 0
     var shapeBlendProfile: BlendProfile = .smooth
     /// Blend radius k in world units (the bar's slider); support reach is
     /// the profile's multiple of it.
@@ -1189,8 +1191,13 @@ extension ViewportState: PencilToolSink {
         }
     }
 
-    /// Rebuilds the live spray ghosts from a pure resolve.
+    /// Rebuilds the live spray ghosts from a pure resolve, every few
+    /// samples — re-resolving at pencil rate burned CPU for frames nobody
+    /// saw, and a sample-count throttle stays deterministic for tests.
     fileprivate func updateSprayGhosts() {
+        guard spraySamples.count == 1
+                || spraySamples.count - lastGhostSampleCount >= 3 else { return }
+        lastGhostSampleCount = spraySamples.count
         let radius = 0.09 + pencilPeakPressure * 0.25
         let stamps = engine.resolveSprayStamps(samples: spraySamples,
                                                radius: radius, feel: sprayFeel)
@@ -1202,7 +1209,7 @@ extension ViewportState: PencilToolSink {
                                       blendK: blendK)
         var params = SIMD4<Float>(repeating: 0)
         for (i, value) in templateParams.prefix(4).enumerated() { params[i] = value }
-        sprayGhosts = stamps.suffix(64).map { stamp in
+        sprayGhosts = stamps.suffix(40).map { stamp in
             let position = SIMD3(stamp.position.0, stamp.position.1, stamp.position.2)
             let scale = max(stamp.radius, 0.01)
             return SceneItem(

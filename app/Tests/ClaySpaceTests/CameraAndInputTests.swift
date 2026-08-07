@@ -607,7 +607,7 @@ final class CameraAndInputTests: XCTestCase {
         }
         let ghosts = state.previewItems
         XCTAssertGreaterThan(ghosts.count, 3, "the stamp trail previews live")
-        XCTAssertLessThanOrEqual(ghosts.count, 64, "ghost cap")
+        XCTAssertLessThanOrEqual(ghosts.count, 40, "ghost cap")
         XCTAssertEqual(ghosts.first?.prim, Int32(CLAY_PRIM_SPHERE.rawValue))
 
         let before = state.engine.items.count
@@ -615,10 +615,10 @@ final class CameraAndInputTests: XCTestCase {
         XCTAssertTrue(state.previewItems.isEmpty, "ghosts clear on commit")
         XCTAssertGreaterThan(state.engine.items.count, before,
                              "the lift committed the stamps the ghosts showed")
-        // Same preset, same resolve: the committed stamp count matches the
-        // final ghost count (ghost cap permitting).
-        XCTAssertEqual(state.engine.items.count - before, ghosts.count,
-                       "ghosts were an exact preview")
+        // Same preset, same resolver: the commit can only EXTEND the trail
+        // the ghosts showed (the throttle may lag a couple of samples).
+        XCTAssertGreaterThanOrEqual(state.engine.items.count - before, ghosts.count,
+                                    "commit covers everything previewed")
     }
 
     func testHapticsFireOnStrokeEndAndRespectTheToggle() {

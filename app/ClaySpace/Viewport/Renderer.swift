@@ -33,6 +33,7 @@ final class Renderer {
         var maskOrigin: SIMD4<Float>    // xyz freeze-field origin; w = enabled
         var maskInvExtent: SIMD4<Float> // xyz = 1/extent
         var maskScale: SIMD4<Float>     // xyz = dims/maxResolution
+        var previewBound: SIMD4<Float>  // xyz union-sphere center; w radius
     }
 
     static let maxItems = 256
@@ -239,6 +240,7 @@ final class Renderer {
         var previewSlot: Int32 = -1
         var previewCount: Int32 = 0
         let liveCount = min(items.count, Self.maxItems)
+        var previewBound = SIMD4<Float>(repeating: 0)
         if !preview.isEmpty, liveCount < Self.maxItems {
             let ghosts = Array(preview.prefix(Self.maxItems - liveCount))
             previewSlot = Int32(liveCount)
@@ -248,6 +250,16 @@ final class Renderer {
                     .advanced(by: MemoryLayout<SceneItem>.stride * liveCount)
                     .copyMemory(from: src.baseAddress!, byteCount: src.count)
             }
+            // Union sphere: rays that miss it skip the ghost march entirely.
+            var mn = ghosts[0].boundCenter - SIMD3(repeating: ghosts[0].boundRadius)
+            var mx = ghosts[0].boundCenter + SIMD3(repeating: ghosts[0].boundRadius)
+            for ghost in ghosts {
+                mn = simd_min(mn, ghost.boundCenter - SIMD3(repeating: ghost.boundRadius))
+                mx = simd_max(mx, ghost.boundCenter + SIMD3(repeating: ghost.boundRadius))
+            }
+            let center = (mn + mx) * 0.5
+            previewBound = SIMD4(center.x, center.y, center.z,
+                                 simd_length(mx - mn) * 0.5)
         }
 
         let pass = MTLRenderPassDescriptor()
@@ -312,7 +324,8 @@ final class Renderer {
                 let n = Float(ClayEngine.MaskField.maxResolution)
                 return SIMD4(Float($0.dims.x) / n, Float($0.dims.y) / n,
                              Float($0.dims.z) / n, 0)
-            } ?? SIMD4(repeating: 0)
+            } ?? SIMD4(repeating: 0),
+            previewBound: previewBound
         )
 
         encoder.setRenderPipelineState(pipeline)

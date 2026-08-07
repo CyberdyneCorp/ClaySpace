@@ -39,24 +39,25 @@ struct EditListPanel: View {
                                     ? Color.orange.opacity(0.14) : Color.clear)
                             .contentShape(Rectangle())
                             .onTapGesture { select(index) }
-                            .swipeActions(edge: .trailing) {
-                                Button("Delete", role: .destructive) {
-                                    deleteSingle(index)
-                                }
-                            }
                     case .batch(let range):
                         batchRow(range: range)
                             .listRowInsets(EdgeInsets(top: 4, leading: 6,
                                                       bottom: 4, trailing: 6))
                             .listRowBackground(Color.clear)
-                            .swipeActions(edge: .trailing) {
-                                Button("Delete", role: .destructive) {
-                                    if state.engine.deleteBatch(range: range) {
-                                        state.selectedIndex = nil
-                                        state.showToast("Spray removed")
-                                    }
-                                }
+                    }
+                }
+                .onDelete { offsets in
+                    // Row-space offsets map to items or whole batches.
+                    for offset in offsets.sorted(by: >) where rows.indices.contains(offset) {
+                        switch rows[offset] {
+                        case .single(let index):
+                            deleteSingle(index)
+                        case .batch(let range):
+                            if state.engine.deleteBatch(range: range) {
+                                state.selectedIndex = nil
+                                state.showToast("Spray removed")
                             }
+                        }
                     }
                 }
                 // Reordering stays index-exact only while every row is one
