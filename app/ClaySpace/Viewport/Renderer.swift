@@ -185,7 +185,7 @@ final class Renderer {
               engine: ClayEngine, selectedIndex: Int,
               lightDir: SIMD3<Float> = simd_normalize(SIMD3(0.5, 0.8, 0.3)),
               fullQuality: Bool = true,
-              preview: SceneItem? = nil) {
+              preview: [SceneItem] = []) {
         let items = engine.items
         let strokePoints = engine.strokePoints
         if engine.version != uploadedVersion {
@@ -233,15 +233,21 @@ final class Renderer {
         }
         uploadedMaskVersion = engine.maskFieldVersion
 
-        // Pending-shape ghost: one extra item past the live list; the
-        // shader marches it separately and tints its silhouette.
+        // Pending ghosts (shape press or spray stamps): extra items past
+        // the live list; the shader marches them as one combined field and
+        // tints the silhouette.
         var previewSlot: Int32 = -1
+        var previewCount: Int32 = 0
         let liveCount = min(items.count, Self.maxItems)
-        if var ghost = preview, liveCount < Self.maxItems {
+        if !preview.isEmpty, liveCount < Self.maxItems {
+            let ghosts = Array(preview.prefix(Self.maxItems - liveCount))
             previewSlot = Int32(liveCount)
-            itemBuffer.contents()
-                .advanced(by: MemoryLayout<SceneItem>.stride * liveCount)
-                .copyMemory(from: &ghost, byteCount: MemoryLayout<SceneItem>.stride)
+            previewCount = Int32(ghosts.count)
+            ghosts.withUnsafeBytes { src in
+                itemBuffer.contents()
+                    .advanced(by: MemoryLayout<SceneItem>.stride * liveCount)
+                    .copyMemory(from: src.baseAddress!, byteCount: src.count)
+            }
         }
 
         let pass = MTLRenderPassDescriptor()
@@ -277,7 +283,7 @@ final class Renderer {
             mirrorAxes: engine.mirrorAxes,
             mirrorK: engine.mirrorK,
             selectedIndex: Int32(selectedIndex),
-            previewInfo: SIMD3(Float(previewSlot), 0, 0),
+            previewInfo: SIMD3(Float(previewSlot), Float(previewCount), 0),
             gridOrigin: cacheUsable
                 ? SIMD4(cache!.origin.x, cache!.origin.y, cache!.origin.z, 1)
                 : SIMD4(0, 0, 0, 0),

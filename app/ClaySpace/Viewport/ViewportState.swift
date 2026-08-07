@@ -222,7 +222,19 @@ final class ViewportState {
     var hoverGhost: HoverGhost?
     /// Pending-shape ghost while the Shape tool presses (rendered by the
     /// raymarcher as a translucent silhouette of the real primitive).
-    var shapePreview: SceneItem?
+    var shapePreview: SceneItem? {
+        didSet { previewVersion += 1 }
+    }
+    /// Live spray ghosts: where the stamps WILL land, updated per move
+    /// from a pure resolve of the same preset the lift will commit.
+    @ObservationIgnored private(set) var sprayGhosts: [SceneItem] = []
+    @ObservationIgnored private(set) var previewVersion = 0
+
+    /// What the renderer draws as pending geometry this frame.
+    var previewItems: [SceneItem] {
+        if let shapePreview { return [shapePreview] }
+        return sprayGhosts
+    }
     @ObservationIgnored fileprivate var lastHoverPoint: CGPoint?
     @ObservationIgnored fileprivate var lastHoverTool: Tool = .sculpt
     @ObservationIgnored fileprivate var lastHoverMode: EditorMode = .sdf
@@ -757,13 +769,15 @@ extension ViewportState: PencilToolSink {
             return
         }
 
-        // Spray tool: collect the drag; stamps resolve on lift.
+        // Spray tool: collect the drag; ghosts show live, stamps commit
+        // on lift.
         if activeTool == .spray {
             guard let ray = ray(through: point) else { return }
             let hit = engine.raycast(origin: ray.origin, direction: ray.direction)
             guard let start = hit?.position ?? groundPoint(on: ray) else { return }
             sprayPlane = (start, camera.basis.forward)
             spraySamples = [(start, max(pressure, 0.1), altitude)]
+            updateSprayGhosts()
             return
         }
 
@@ -856,6 +870,7 @@ extension ViewportState: PencilToolSink {
                   let ray = ray(through: point),
                   let p = intersect(ray: ray, plane: plane) else { return }
             spraySamples.append((p, max(pressure, 0.1), altitude))
+            updateSprayGhosts()
             return
         }
 
@@ -1174,10 +1189,44 @@ extension ViewportState: PencilToolSink {
         }
     }
 
+    /// Rebuilds the live spray ghosts from a pure resolve.
+    fileprivate func updateSprayGhosts() {
+        let radius = 0.09 + pencilPeakPressure * 0.25
+        let stamps = engine.resolveSprayStamps(samples: spraySamples,
+                                               radius: radius, feel: sprayFeel)
+        let templateParams = shapeKind.params(size: 1)
+        let blendK = shapeBlendProfile == .hard ? 0 : shapeBlendK
+        let bound = engine.stampBound(prim: shapeKind.clayPrim,
+                                      templateParams: templateParams,
+                                      blend: shapeBlendProfile.clayBlend,
+                                      blendK: blendK)
+        var params = SIMD4<Float>(repeating: 0)
+        for (i, value) in templateParams.prefix(4).enumerated() { params[i] = value }
+        sprayGhosts = stamps.suffix(64).map { stamp in
+            let position = SIMD3(stamp.position.0, stamp.position.1, stamp.position.2)
+            let scale = max(stamp.radius, 0.01)
+            return SceneItem(
+                position: position, scale: scale,
+                rotation: SIMD4(stamp.rotation.0, stamp.rotation.1,
+                                stamp.rotation.2, stamp.rotation.3),
+                params: params, color: activeColor, blendK: 0,
+                prim: Int32(shapeKind.clayPrim.rawValue), op: 0, blend: 0,
+                rounding: 0, boundCenter: position,
+                boundRadius: bound * scale, mirrorFlag: 0, radialCount: 0,
+                layerSlot: 0)
+        }
+        previewVersion += 1
+    }
+
     /// Resolves the collected spray samples into stamps of the current
     /// shape-bar primitive — one undo step for the whole stroke.
     fileprivate func applySpray(at point: CGPoint) {
-        defer { spraySamples = []; sprayPlane = nil }
+        defer {
+            spraySamples = []
+            sprayPlane = nil
+            sprayGhosts = []
+            previewVersion += 1
+        }
         let radius = 0.09 + pencilPeakPressure * 0.25
         let stamped = engine.sprayStroke(samples: spraySamples,
                                          prim: shapeKind.clayPrim,

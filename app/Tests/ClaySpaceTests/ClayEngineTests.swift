@@ -331,6 +331,59 @@ final class ClayEngineTests: XCTestCase {
         XCTAssertNotNil(engine.raycast(origin: SIMD3(4, 8, 0), direction: SIMD3(0, -1, 0)))
     }
 
+    func testSprayBatchesGroupDeleteAndPersist() throws {
+        let engine = ClayEngine()
+        var samples: [(position: SIMD3<Float>, pressure: Float, tilt: Float)] = []
+        for i in 0...12 { samples.append((SIMD3(Float(i) * 0.14 + 3, 2, 0), 0.8, .pi / 2)) }
+        let first = engine.sprayStroke(samples: samples, prim: CLAY_PRIM_SPHERE,
+                                       templateParams: [1], op: CLAY_OP_ADD,
+                                       blendK: 0, blend: CLAY_BLEND_HARD,
+                                       color: ClayEngine.clayColor,
+                                       radius: 0.12, feel: ClayEngine.SprayFeel())
+        let second = engine.sprayStroke(samples: samples.map {
+            (SIMD3($0.position.x, 3.2, 0), $0.pressure, $0.tilt)
+        }, prim: CLAY_PRIM_SPHERE, templateParams: [1], op: CLAY_OP_ADD,
+           blendK: 0, blend: CLAY_BLEND_HARD, color: ClayEngine.clayColor,
+           radius: 0.12, feel: ClayEngine.SprayFeel())
+        XCTAssertGreaterThan(first, 2)
+        XCTAssertGreaterThan(second, 2)
+
+        // One batch id per stroke, distinct between strokes.
+        let batchesA = Set(engine.itemBatches[1...(first)])
+        let batchesB = Set(engine.itemBatches[(1 + first)...])
+        XCTAssertEqual(batchesA.count, 1)
+        XCTAssertEqual(batchesB.count, 1)
+        XCTAssertNotEqual(batchesA, batchesB)
+
+        // The panel folds each stroke into one row: seed + 2 sprays = 3.
+        let rows = EditListPanel.groupRows(batches: engine.itemBatches,
+                                           itemCount: engine.items.count)
+        XCTAssertEqual(rows.count, 3, "seed + one row per spray")
+
+        // Batch delete removes the whole first spray as ONE undo step.
+        let total = engine.items.count
+        XCTAssertTrue(engine.deleteBatch(range: 1..<(1 + first)))
+        XCTAssertEqual(engine.items.count, total - first)
+        XCTAssertTrue(engine.undo())
+        XCTAssertEqual(engine.items.count, total, "one step restored the spray")
+        XCTAssertEqual(Set(engine.itemBatches[1...(first)]), batchesA,
+                       "batch ids restored with the rows")
+
+        // Batch ids ride the sidecar (format 4) so grouping survives reload.
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("batch_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("b.clayspace")
+        XCTAssertTrue(engine.saveDocument(documentURL: url))
+        let reloaded = ClayEngine()
+        XCTAssertTrue(reloaded.loadDocument(documentURL: url, mirrorURL: url))
+        XCTAssertEqual(reloaded.itemBatches, engine.itemBatches)
+        let reloadedRows = EditListPanel.groupRows(batches: reloaded.itemBatches,
+                                                   itemCount: reloaded.items.count)
+        XCTAssertEqual(reloadedRows.count, 3)
+    }
+
     func testSprayJitterAndSpacingChangeTheStampField() {
         let engine = ClayEngine()
         var samples: [(position: SIMD3<Float>, pressure: Float, tilt: Float)] = []
@@ -1036,7 +1089,8 @@ final class ClayEngineTests: XCTestCase {
         var data = try Data(contentsOf: mirror)
         let itemCount = data.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: 8, as: UInt32.self) }
         let layerCount = 1
-        let tail = 8 + layerCount * 48 + Int(itemCount) * 4
+        // Format-3 tail (layer table + slots) + format-4 tail (batch ids).
+        let tail = 8 + layerCount * 48 + Int(itemCount) * 4 + Int(itemCount) * 4
         data.withUnsafeMutableBytes { raw in
             raw.storeBytes(of: UInt32(2), toByteOffset: 4, as: UInt32.self) // format
         }

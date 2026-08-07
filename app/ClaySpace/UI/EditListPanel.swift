@@ -24,32 +24,50 @@ struct EditListPanel: View {
                     .font(.system(size: 10))
                     .foregroundStyle(.tertiary)
             }
+            let rows = Self.groupRows(batches: state.engine.itemBatches,
+                                      itemCount: state.engine.uiItemCount)
+            let hasBatches = rows.contains { if case .batch = $0 { true } else { false } }
             List {
-                ForEach(Array(state.engine.uiItems.enumerated()), id: \.offset) { index, item in
-                    row(index: index, item: item)
-                        .listRowInsets(EdgeInsets(top: 4, leading: 6, bottom: 4, trailing: 6))
-                        .listRowBackground(
-                            state.selectedIndex == index ? Color.orange.opacity(0.14) : Color.clear)
-                        .contentShape(Rectangle())
-                        .onTapGesture { select(index) }
+                ForEach(rows) { rowKind in
+                    switch rowKind {
+                    case .single(let index):
+                        row(index: index, item: state.engine.uiItems[index])
+                            .listRowInsets(EdgeInsets(top: 4, leading: 6,
+                                                      bottom: 4, trailing: 6))
+                            .listRowBackground(
+                                state.selectedIndex == index
+                                    ? Color.orange.opacity(0.14) : Color.clear)
+                            .contentShape(Rectangle())
+                            .onTapGesture { select(index) }
+                            .swipeActions(edge: .trailing) {
+                                Button("Delete", role: .destructive) {
+                                    deleteSingle(index)
+                                }
+                            }
+                    case .batch(let range):
+                        batchRow(range: range)
+                            .listRowInsets(EdgeInsets(top: 4, leading: 6,
+                                                      bottom: 4, trailing: 6))
+                            .listRowBackground(Color.clear)
+                            .swipeActions(edge: .trailing) {
+                                Button("Delete", role: .destructive) {
+                                    if state.engine.deleteBatch(range: range) {
+                                        state.selectedIndex = nil
+                                        state.showToast("Spray removed")
+                                    }
+                                }
+                            }
+                    }
                 }
-                .onMove { offsets, destination in
+                // Reordering stays index-exact only while every row is one
+                // item; sprays fold rows and would skew the mapping.
+                .onMove(perform: hasBatches ? nil : { offsets, destination in
                     guard let from = offsets.first else { return }
                     let to = destination > from ? destination - 1 : destination
                     if state.engine.moveItem(from: from, to: to) {
                         remapSelection(from: from, to: to)
                     }
-                }
-                .onDelete { offsets in
-                    for offset in offsets.sorted(by: >) {
-                        if state.engine.deleteItem(index: offset) {
-                            if state.selectedIndex == offset { state.selectedIndex = nil }
-                            else if let sel = state.selectedIndex, sel > offset {
-                                state.selectedIndex = sel - 1
-                            }
-                        }
-                    }
-                }
+                })
             }
             .listStyle(.plain)
             .environment(\.editMode, .constant(.active)) // always reorderable
@@ -63,6 +81,76 @@ struct EditListPanel: View {
         }
         .onChange(of: state.selectedIndex) { syncFromSelection() }
         .onAppear { syncFromSelection() }
+    }
+
+    /// One list row: a lone edit, or a whole spray batch folded together.
+    enum EditRow: Identifiable {
+        case single(index: Int)
+        case batch(range: Range<Int>)
+        var id: String {
+            switch self {
+            case .single(let index): "i\(index)"
+            case .batch(let range): "b\(range.lowerBound)-\(range.upperBound)"
+            }
+        }
+    }
+
+    /// Contiguous runs of one nonzero batch id fold into a single row.
+    static func groupRows(batches: [Int32], itemCount: Int) -> [EditRow] {
+        var rows: [EditRow] = []
+        var index = 0
+        let count = min(batches.count, itemCount)
+        while index < count {
+            let batch = batches[index]
+            if batch == 0 {
+                rows.append(.single(index: index))
+                index += 1
+                continue
+            }
+            var end = index + 1
+            while end < count && batches[end] == batch { end += 1 }
+            if end - index == 1 {
+                rows.append(.single(index: index))
+            } else {
+                rows.append(.batch(range: index..<end))
+            }
+            index = end
+        }
+        // Items beyond the batches array (defensive) list singly.
+        while index < itemCount {
+            rows.append(.single(index: index))
+            index += 1
+        }
+        return rows
+    }
+
+    private func batchRow(range: Range<Int>) -> some View {
+        let first = state.engine.uiItems[range.lowerBound]
+        return HStack(spacing: 8) {
+            Image(systemName: "wand.and.rays")
+                .font(.system(size: 12))
+                .frame(width: 18)
+                .foregroundStyle(.secondary)
+            Text("Spray · \(range.count) stamps")
+                .font(.system(size: 12))
+            Spacer()
+            Text(opTitle(first.op))
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+            Circle()
+                .fill(Color(red: Double(first.color.x), green: Double(first.color.y),
+                            blue: Double(first.color.z)))
+                .frame(width: 12, height: 12)
+        }
+    }
+
+    private func deleteSingle(_ index: Int) {
+        if state.engine.deleteItem(index: index) {
+            if state.selectedIndex == index { state.selectedIndex = nil }
+            else if let sel = state.selectedIndex, sel > index {
+                state.selectedIndex = sel - 1
+            }
+        }
     }
 
     private func row(index: Int, item: SceneItem) -> some View {

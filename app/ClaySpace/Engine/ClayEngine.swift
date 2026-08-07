@@ -102,6 +102,10 @@ final class ClayEngine {
     private(set) var activeLayerSlot = 0
     /// Owning layer slot per mirror item, parallel to `items`.
     @ObservationIgnored private(set) var itemLayers: [Int32] = []
+    /// Spray-batch id per item (0 = none): stamps of one stroke share one,
+    /// so the edit list can fold them into a single row.
+    @ObservationIgnored private(set) var itemBatches: [Int32] = []
+    @ObservationIgnored private var nextBatchID: Int32 = 1
 
     /// Bit i set = slot i visible (shader visibility mask).
     var layerVisibilityMask: UInt32 {
@@ -203,6 +207,7 @@ final class ClayEngine {
         var aabb: (min: SIMD3<Float>, max: SIMD3<Float>)
         var local: (center: SIMD3<Float>, radius: Float)
         var slot: Int32
+        var batch: Int32 = 0
     }
 
     private enum UndoKind {
@@ -222,6 +227,7 @@ final class ClayEngine {
         case voxelStep // grid diff lives in ClayCore's journal (ABI 0.20)
         case reparam(index: Int, before: SIMD4<Float>, after: SIMD4<Float>)
         case addBatch(count: Int) // spray stroke: N stamps, one clay step
+        case removeBatch(rows: [LayerRow])
     }
     private enum RedoOp {
         case add(item: SceneItem, points: [SIMD4<Float>],
@@ -240,6 +246,7 @@ final class ClayEngine {
         case voxelStep
         case reparam(index: Int, before: SIMD4<Float>, after: SIMD4<Float>)
         case addBatch(rows: [LayerRow])
+        case removeBatch(rows: [LayerRow])
     }
     private var undoLog: [UndoKind] = []
     private var redoOps: [RedoOp] = []
@@ -482,6 +489,7 @@ final class ClayEngine {
             nodeIDs.append(node)
             localBounds.append((SIMD3.zero, radius))
             itemLayers.append(Int32(activeLayerSlot))
+            itemBatches.append(0)
             undoLog.append(.add)
             redoOps.removeAll()
             commit()
@@ -598,6 +606,7 @@ final class ClayEngine {
         nodeIDs.append(node)
         localBounds.append((SIMD3.zero, radius))
         itemLayers.append(Int32(activeLayerSlot))
+        itemBatches.append(0)
         undoLog.append(.add)
         redoOps.removeAll()
         fieldCache = nil // the cut reaches everything baked
@@ -617,6 +626,52 @@ final class ClayEngine {
         var steady: Float = 0      // lazy-mouse lag, 0…0.9
     }
 
+    private func sprayPreset(radius: Float, feel: SprayFeel) -> clay_stroke_preset? {
+        var preset = clay_stroke_preset()
+        guard clay_stroke_preset_defaults(&preset) == CLAY_OK else { return nil }
+        preset.radius = max(radius, 0.01)
+        preset.spacing = max(feel.spacing, 0.1)
+        preset.jitter_position = max(feel.jitter, 0)
+        preset.jitter_rotation = feel.jitter > 0 ? .pi : 0
+        preset.steady = min(max(feel.steady, 0), 0.95)
+        preset.pressure_size = 0.7
+        preset.rotate_along_stroke = 1
+        return preset
+    }
+
+    /// PURE stamp preview of a drag-in-progress (clay_stroke_resolve is
+    /// side-effect free): the same preset the commit will use, so ghosts
+    /// land exactly where stamps will.
+    func resolveSprayStamps(samples: [(position: SIMD3<Float>, pressure: Float, tilt: Float)],
+                            radius: Float, feel: SprayFeel,
+                            cap: Int = 256) -> [clay_stamp] {
+        guard !samples.isEmpty, var preset = sprayPreset(radius: radius, feel: feel)
+        else { return [] }
+        var flat = [Float]()
+        flat.reserveCapacity(samples.count * 5)
+        for sample in samples {
+            flat.append(contentsOf: [sample.position.x, sample.position.y,
+                                     sample.position.z, sample.pressure, sample.tilt])
+        }
+        var count: size_t = 0
+        guard clay_stroke_resolve(flat, samples.count, &preset, nil, &count) == CLAY_OK,
+              count > 0 else { return [] }
+        count = min(count, size_t(cap))
+        var stamps = [clay_stamp](repeating: clay_stamp(), count: count)
+        var written = count
+        guard clay_stroke_resolve(flat, samples.count, &preset, &stamps,
+                                  &written) == CLAY_OK else { return [] }
+        return Array(stamps.prefix(Int(written)))
+    }
+
+    /// Ghost-preview bound for a stamped template (public for the spray
+    /// preview; matches the mirror-row bound math).
+    func stampBound(prim: clay_prim, templateParams: [Float],
+                    blend: clay_blend, blendK: Float) -> Float {
+        Self.geometricRadius(prim: prim, params: templateParams)
+            + Self.blendSupport(blendK > 0 ? blend : CLAY_BLEND_HARD, blendK) + 0.02
+    }
+
     /// Resolves a drag into stamps of the given primitive template and
     /// applies them as ONE undo step (clay_layer_apply_stroke). The mirror
     /// reconstructs each stamp exactly: position/rotation from the stamp,
@@ -629,15 +684,7 @@ final class ClayEngine {
         guard let doc, !samples.isEmpty, activeStroke == nil,
               transformIndex == nil, items.count < Renderer.maxItems else { return 0 }
 
-        var preset = clay_stroke_preset()
-        guard clay_stroke_preset_defaults(&preset) == CLAY_OK else { return 0 }
-        preset.radius = max(radius, 0.01)
-        preset.spacing = max(feel.spacing, 0.1)
-        preset.jitter_position = max(feel.jitter, 0)
-        preset.jitter_rotation = feel.jitter > 0 ? .pi : 0
-        preset.steady = min(max(feel.steady, 0), 0.95)
-        preset.pressure_size = 0.7
-        preset.rotate_along_stroke = 1
+        guard var preset = sprayPreset(radius: radius, feel: feel) else { return 0 }
 
         var flat = [Float]()
         flat.reserveCapacity(samples.count * 5)
@@ -682,6 +729,8 @@ final class ClayEngine {
         var p = SIMD4<Float>(repeating: 0)
         for (i, value) in templateParams.prefix(4).enumerated() { p[i] = value }
         let used = min(Int(applied), Int(stampCount))
+        let batchID = nextBatchID
+        nextBatchID += 1
         for i in 0..<used {
             let stamp = stamps[i]
             let position = SIMD3(stamp.position.0, stamp.position.1, stamp.position.2)
@@ -703,6 +752,7 @@ final class ClayEngine {
             nodeIDs.append(nodes[i])
             localBounds.append((SIMD3.zero, geo))
             itemLayers.append(Int32(activeLayerSlot))
+            itemBatches.append(batchID)
         }
         undoLog.append(.addBatch(count: used))
         redoOps.removeAll()
@@ -773,6 +823,7 @@ final class ClayEngine {
         nodeIDs.append(node)
         localBounds.append((bound.0, bound.1)) // stroke origin is identity
         itemLayers.append(Int32(activeLayerSlot))
+        itemBatches.append(0)
         undoLog.append(.add)
         redoOps.removeAll()
         commit()
@@ -865,6 +916,7 @@ final class ClayEngine {
             nodeIDs.insert(node, at: index)
             localBounds.insert(local, at: index)
             itemLayers.insert(slot, at: index)
+            itemBatches.insert(0, at: index)
             dropCacheIfCovers(index)
             redoOps.append(.remove(index: index))
         case .reorder(let from, let to):
@@ -899,14 +951,28 @@ final class ClayEngine {
                 rows.append(LayerRow(index: index, item: items[index],
                                      node: nodeIDs[index], aabb: itemAABBs[index],
                                      local: localBounds[index],
-                                     slot: itemLayers[index]))
+                                     slot: itemLayers[index],
+                                     batch: itemBatches[index]))
                 items.removeLast()
                 itemAABBs.removeLast()
                 nodeIDs.removeLast()
                 localBounds.removeLast()
                 itemLayers.removeLast()
+                itemBatches.removeLast()
             }
             redoOps.append(.addBatch(rows: rows.reversed()))
+        case .removeBatch(let rows):
+            // The doc group already restored every node; re-insert rows.
+            for row in rows {
+                items.insert(row.item, at: row.index)
+                itemAABBs.insert(row.aabb, at: row.index)
+                nodeIDs.insert(row.node, at: row.index)
+                localBounds.insert(row.local, at: row.index)
+                itemLayers.insert(row.slot, at: row.index)
+                itemBatches.insert(row.batch, at: row.index)
+            }
+            dropCacheIfCovers(rows.first?.index ?? 0)
+            redoOps.append(.removeBatch(rows: rows))
         case .add, .none: // .none: history predating the log — treat as add
             if let last = items.popLast() {
                 var points: [SIMD4<Float>] = []
@@ -920,6 +986,7 @@ final class ClayEngine {
                 let node = nodeIDs.popLast() ?? 0
                 let local = localBounds.popLast() ?? (SIMD3.zero, 0)
                 let slot = itemLayers.popLast() ?? 0
+                itemBatches.removeLast()
                 redoOps.append(.add(item: last, points: points, aabb: aabb,
                                     node: node, localBound: local, slot: slot))
             }
@@ -945,6 +1012,7 @@ final class ClayEngine {
             nodeIDs.append(node)
             localBounds.append(local)
             itemLayers.append(slot)
+            itemBatches.append(0)
             undoLog.append(.add)
         case .transform(let index, let before, let after):
             apply(after, to: index)
@@ -969,6 +1037,7 @@ final class ClayEngine {
             nodeIDs.remove(at: index)
             localBounds.remove(at: index)
             itemLayers.remove(at: index)
+            itemBatches.remove(at: index)
             dropCacheIfCovers(index)
             undoLog.append(entry)
         case .reorder(let from, let to):
@@ -1000,8 +1069,20 @@ final class ClayEngine {
                 nodeIDs.append(row.node)
                 localBounds.append(row.local)
                 itemLayers.append(row.slot)
+                itemBatches.append(row.batch)
             }
             undoLog.append(.addBatch(count: rows.count))
+        case .removeBatch(let rows):
+            for row in rows.reversed() {
+                items.remove(at: row.index)
+                itemAABBs.remove(at: row.index)
+                nodeIDs.remove(at: row.index)
+                localBounds.remove(at: row.index)
+                itemLayers.remove(at: row.index)
+                itemBatches.remove(at: row.index)
+            }
+            dropCacheIfCovers(rows.first?.index ?? 0)
+            undoLog.append(.removeBatch(rows: rows))
         case .none:
             break
         }
@@ -1359,9 +1440,52 @@ final class ClayEngine {
         nodeIDs.remove(at: index)
         localBounds.remove(at: index)
         itemLayers.remove(at: index)
+        itemBatches.remove(at: index)
         undoLog.append(entry)
         redoOps.removeAll()
         dropCacheIfCovers(index)
+        commit()
+        scheduleBake()
+        return true
+    }
+
+    /// Removes a whole spray batch (contiguous rows) as ONE undo step:
+    /// the node removals bracket into one ClayCore group, and a single
+    /// .removeBatch op-log entry restores every mirror row on undo.
+    @discardableResult
+    func deleteBatch(range: Range<Int>) -> Bool {
+        guard let doc, !range.isEmpty,
+              range.lowerBound >= 0, range.upperBound <= items.count,
+              activeStroke == nil, transformIndex == nil, !isEditingParams
+        else { return false }
+        _ = check(clay_document_begin_undo_group(doc))
+        var removed = true
+        for index in range {
+            removed = check(clay_remove_node(doc, layerId(of: index),
+                                             nodeIDs[index])) && removed
+        }
+        _ = check(clay_document_end_undo_group(doc))
+        guard removed else { return false }
+
+        var rows: [LayerRow] = []
+        for index in range {
+            rows.append(LayerRow(index: index, item: items[index],
+                                 node: nodeIDs[index], aabb: itemAABBs[index],
+                                 local: localBounds[index],
+                                 slot: itemLayers[index],
+                                 batch: itemBatches[index]))
+        }
+        for index in range.reversed() {
+            items.remove(at: index)
+            itemAABBs.remove(at: index)
+            nodeIDs.remove(at: index)
+            localBounds.remove(at: index)
+            itemLayers.remove(at: index)
+            itemBatches.remove(at: index)
+        }
+        undoLog.append(.removeBatch(rows: rows))
+        redoOps.removeAll()
+        dropCacheIfCovers(range.lowerBound)
         commit()
         scheduleBake()
         return true
@@ -1458,7 +1582,7 @@ final class ClayEngine {
         for i in items.indices where Int(itemLayers[i]) == slot {
             rows.append(LayerRow(index: i, item: items[i], node: nodeIDs[i],
                                  aabb: itemAABBs[i], local: localBounds[i],
-                                 slot: itemLayers[i]))
+                                 slot: itemLayers[i], batch: itemBatches[i]))
         }
         for row in rows.reversed() {
             items.remove(at: row.index)
@@ -1466,6 +1590,7 @@ final class ClayEngine {
             nodeIDs.remove(at: row.index)
             localBounds.remove(at: row.index)
             itemLayers.remove(at: row.index)
+            itemBatches.remove(at: row.index)
         }
         for i in itemLayers.indices where itemLayers[i] > Int32(slot) {
             itemLayers[i] -= 1
@@ -1496,6 +1621,7 @@ final class ClayEngine {
             nodeIDs.insert(row.node, at: row.index)
             localBounds.insert(row.local, at: row.index)
             itemLayers.insert(row.slot, at: row.index)
+            itemBatches.insert(row.batch, at: row.index)
         }
         if activeLayerSlot >= slot { activateLayer(slot: activeLayerSlot) }
         fieldCache = nil
@@ -1510,6 +1636,7 @@ final class ClayEngine {
         nodeIDs.insert(nodeIDs.remove(at: from), at: to)
         localBounds.insert(localBounds.remove(at: from), at: to)
         itemLayers.insert(itemLayers.remove(at: from), at: to)
+        itemBatches.insert(itemBatches.remove(at: from), at: to)
         dropCacheIfCovers(min(from, to))
         commit()
     }
@@ -2624,9 +2751,10 @@ final class ClayEngine {
     var isDirty: Bool { _ = uiVersion; return version != lastSavedVersion }
 
     private static let mirrorMagic: UInt32 = 0x4353_4D52 // "CSMR"
-    /// Format 2 appended the material preset; format 3 adds the layer
-    /// table + per-item layer slots. Formats 1/2 load as one layer.
-    private static let mirrorFormat: UInt32 = 3
+    /// Format 2 appended the material preset; format 3 the layer table +
+    /// per-item slots; format 4 per-item spray-batch ids. Older files are
+    /// exact truncations.
+    private static let mirrorFormat: UInt32 = 4
 
     /// The render mirror as blittable sidecar data — the C ABI has no scene
     /// enumeration, so the mirror persists alongside the document.
@@ -2664,6 +2792,7 @@ final class ClayEngine {
             append(nameBytes)
         }
         append(itemLayers)
+        append(itemBatches) // format 4
         return data
     }
 
@@ -2777,6 +2906,10 @@ final class ClayEngine {
                 newItemLayers = slots
             }
         }
+        var newItemBatches = [Int32](repeating: 0, count: itemCount)
+        if header[1] >= 4, let batches: [Int32] = readArray(count: itemCount) {
+            newItemBatches = batches
+        }
 
         if let old = doc { clay_document_destroy(old) }
         doc = newDoc
@@ -2791,6 +2924,8 @@ final class ClayEngine {
         activeLayerSlot = min(max(loadedActiveSlot, 0), loadedLayers.count - 1)
         layer = loadedLayers[activeLayerSlot].id
         itemLayers = newItemLayers
+        itemBatches = newItemBatches
+        nextBatchID = (newItemBatches.max() ?? 0) + 1
         mirrorAxes = Int32(bitPattern: header[4])
         radialCount = Int32(bitPattern: header[5])
         mirrorK = Float(bitPattern: header[6])
@@ -2890,6 +3025,7 @@ final class ClayEngine {
         sdfLayers = [SdfLayer(id: layerId, name: "Clay")]
         activeLayerSlot = 0
         itemLayers = []
+        itemBatches = []
         addPrimitive(CLAY_PRIM_SPHERE, params: [0.8],
                      at: SIMD3(0, 0.8, 0), op: CLAY_OP_ADD,
                      blendK: 0, color: Self.clayColor, recordMirror: true)

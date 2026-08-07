@@ -593,6 +593,34 @@ final class CameraAndInputTests: XCTestCase {
         state.pencilEnded(at: over)
     }
 
+    func testSprayShowsLiveGhostsAndCommitsWhereTheyWere() {
+        let state = ViewportState()
+        state.viewportSize = CGSize(width: 800, height: 600)
+        state.activate(.spray, announce: false)
+        state.shapeKind = .sphere
+        state.sprayFeel.spacing = 0.5 // dense trail for the assertion
+        XCTAssertTrue(state.previewItems.isEmpty)
+
+        state.pencilBegan(at: CGPoint(x: 300, y: 300), pressure: 0.6)
+        for x in stride(from: 310, through: 480, by: 10) {
+            state.pencilMoved(to: CGPoint(x: CGFloat(x), y: 300), pressure: 0.6)
+        }
+        let ghosts = state.previewItems
+        XCTAssertGreaterThan(ghosts.count, 3, "the stamp trail previews live")
+        XCTAssertLessThanOrEqual(ghosts.count, 64, "ghost cap")
+        XCTAssertEqual(ghosts.first?.prim, Int32(CLAY_PRIM_SPHERE.rawValue))
+
+        let before = state.engine.items.count
+        state.pencilEnded(at: CGPoint(x: 480, y: 300))
+        XCTAssertTrue(state.previewItems.isEmpty, "ghosts clear on commit")
+        XCTAssertGreaterThan(state.engine.items.count, before,
+                             "the lift committed the stamps the ghosts showed")
+        // Same preset, same resolve: the committed stamp count matches the
+        // final ghost count (ghost cap permitting).
+        XCTAssertEqual(state.engine.items.count - before, ghosts.count,
+                       "ghosts were an exact preview")
+    }
+
     func testHapticsFireOnStrokeEndAndRespectTheToggle() {
         let state = ViewportState()
         state.viewportSize = CGSize(width: 800, height: 600)

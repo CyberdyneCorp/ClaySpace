@@ -698,32 +698,42 @@ fragment FragOut raymarch_fragment(VertexOut in [[stage_in]],
         }
     }
 
-    // Pending-shape ghost (Shape tool press): march the preview item alone
-    // and tint its silhouette — solid where visible, faint where occluded —
-    // so kind, size, and landing spot read before committing on lift.
+    // Pending ghosts (Shape press: one; Spray drag: the stamp trail):
+    // march the combined min-field of every ghost with bound culling and
+    // tint the silhouette — solid where visible, faint where occluded —
+    // so kind, size, and landing spots read before committing on lift.
     int previewSlot = int(u.previewInfo.x);
-    if (previewSlot >= 0) {
-        constant SceneItem &ghost = items[previewSlot];
+    int previewCount = int(u.previewInfo.y);
+    if (previewSlot >= 0 && previewCount > 0) {
         float tg = 0.0;
         bool ghostHit = false;
-        for (int i = 0; i < 48 && tg < 24.0; i++) {
-            float d = sdItem(ro + rd * tg, ghost, ctx.pts);
+        for (int step = 0; step < 48 && tg < 24.0; step++) {
+            float3 gp = ro + rd * tg;
+            float d = 1e9;
+            for (int i = 0; i < previewCount; i++) {
+                constant SceneItem &ghost = items[previewSlot + i];
+                if (length(gp - ghost.boundCenter) - ghost.boundRadius >= d) continue;
+                d = min(d, sdItem(gp, ghost, ctx.pts));
+            }
             if (d < 0.0015 * max(tg, 1.0)) { ghostHit = true; break; }
-            tg += max(d * 0.95, 0.002);
+            tg += max(d * 0.95, 0.004);
         }
         if (ghostHit) {
+            float3 gp = ro + rd * tg;
+            // Nearest ghost owns the pixel's tint.
+            float best = 1e9;
+            float3 ghostColor = float3(1.0, 0.62, 0.15);
+            for (int i = 0; i < previewCount; i++) {
+                constant SceneItem &ghost = items[previewSlot + i];
+                if (length(gp - ghost.boundCenter) - ghost.boundRadius >= best) continue;
+                float d = sdItem(gp, ghost, ctx.pts);
+                if (d < best) { best = d; ghostColor = ghost.color; }
+            }
             bool frontDrawn = hit && (!groundCloser || t < tGround);
             float tFront = frontDrawn ? t : (groundCloser ? tGround : 1e9);
-            float3 gn = normalize(float3(
-                sdItem(ro + rd * tg + float3(0.002, 0, 0), ghost, ctx.pts) -
-                sdItem(ro + rd * tg - float3(0.002, 0, 0), ghost, ctx.pts),
-                sdItem(ro + rd * tg + float3(0, 0.002, 0), ghost, ctx.pts) -
-                sdItem(ro + rd * tg - float3(0, 0.002, 0), ghost, ctx.pts),
-                sdItem(ro + rd * tg + float3(0, 0, 0.002), ghost, ctx.pts) -
-                sdItem(ro + rd * tg - float3(0, 0, 0.002), ghost, ctx.pts)));
-            float shade = 0.45 + 0.55 * saturate(dot(gn, l));
-            float strength = tg <= tFront ? 0.55 : 0.22; // occluded = fainter
-            color = mix(color, ghost.color * shade, strength);
+            float strength = tg <= tFront ? 0.5 : 0.2; // occluded = fainter
+            color = mix(color, ghostColor * (0.5 + 0.5 * saturate(-rd.y + 0.6)),
+                        strength);
         }
     }
 
