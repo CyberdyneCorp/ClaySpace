@@ -177,6 +177,25 @@ final class ClayEngineTests: XCTestCase {
         XCTAssertGreaterThan(engine.safeStepScale, 0.02, "but stay marchable")
     }
 
+    func testMoveSessionKeepsTheGridStableUntilTheEnd() async {
+        // Mid-session bounds must NOT grow: a changed grid layout demotes
+        // every live bake from the partial slab to the ~300 ms full path,
+        // which is exactly the "no preview until pencil-up" failure.
+        let engine = ClayEngine()
+        await engine.bakeNow()
+        let aabbBefore = engine.itemAABBs[0]
+        engine.beginMoveSurfaceSession()
+        _ = engine.updateMoveSurfaceSession(center: SIMD3(0, 1.3, 0),
+                                            displacement: SIMD3(0, 0.35, 0),
+                                            radius: 0.6)
+        XCTAssertEqual(engine.itemAABBs[0].max, aabbBefore.max,
+                       "no padding while the drag is live")
+        XCTAssertEqual(engine.itemAABBs[0].min, aabbBefore.min)
+        engine.endMoveSurfaceSession()
+        XCTAssertGreaterThan(engine.itemAABBs[0].max.y, aabbBefore.max.y,
+                             "the pad lands once, at session end")
+    }
+
     func testCacheRaycastFallbackAgreesWithTheDocument() async {
         // The anchor of last resort when clay_raycast times out under
         // stacked warps: marching the baked cache must land on the same

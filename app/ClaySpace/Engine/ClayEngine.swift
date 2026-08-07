@@ -938,7 +938,21 @@ final class ClayEngine {
                               aabbs: [(min: SIMD3<Float>, max: SIMD3<Float>)],
                               bounds: [(center: SIMD3<Float>, radius: Float)],
                               maxReach: Float,
-                              applied: Bool)?
+                              applied: Bool,
+                              center: SIMD3<Float>,
+                              displacement: SIMD3<Float>,
+                              radius: Float)?
+
+    /// Live-session bake: IMMEDIATE and single-flight-throttled. The
+    /// debounced scheduler cancels its own timer on every call, so a
+    /// continuous drag starves it and nothing bakes until pencil-up.
+    private func bakeDirtyNowForLivePreview(_ region: (min: SIMD3<Float>, max: SIMD3<Float>)) {
+        markBakeDirty(region)
+        guard !bakeInFlight else { return } // flags stay pending; the next
+        // update (or the session-end full bake) picks them up.
+        let editVersion = version
+        Task { [weak self] in await self?.performBake(editVersion: editVersion) }
+    }
 
     /// Live Move drag: each update UNDOES the previous provisional warp
     /// (clay one-step undo + mirror-bounds snapshot restore) and applies
@@ -947,7 +961,7 @@ final class ClayEngine {
     func beginMoveSurfaceSession() {
         guard moveSession == nil, activeStroke == nil, transformIndex == nil,
               paramSessionIndex == nil else { return }
-        moveSession = (items, itemAABBs, localBounds, 0, false)
+        moveSession = (items, itemAABBs, localBounds, 0, false, .zero, .zero, 0)
     }
 
     @discardableResult
@@ -971,7 +985,7 @@ final class ClayEngine {
                       max: center + SIMD3(repeating: reach))
         guard drag > 1e-4 else {
             commit()
-            scheduleBakeDirty(region)
+            bakeDirtyNowForLivePreview(region)
             return 0
         }
         var params = clay_move_params()
@@ -985,15 +999,19 @@ final class ClayEngine {
                                             [displacement.x, displacement.y, displacement.z],
                                             &params, &applied)), applied > 0 else {
             commit()
-            scheduleBakeDirty(region)
+            bakeDirtyNowForLivePreview(region)
             return 0
         }
-        padBounds(around: center, reach: radius + drag, by: drag)
+        // Bounds padding waits for session END: growing itemAABBs changes
+        // the grid layout and demotes every live bake to the full path.
         undoLog.append(.warp)
         redoOps.removeAll()
         moveSession!.applied = true
+        moveSession!.center = center
+        moveSession!.displacement = displacement
+        moveSession!.radius = radius
         commit()
-        scheduleBakeDirty(region)
+        bakeDirtyNowForLivePreview(region)
         return applied
     }
 
@@ -1006,11 +1024,18 @@ final class ClayEngine {
     }
 
     /// Closes the session; the last applied warp (if any) stays as the
-    /// gesture's single undo step.
+    /// gesture's single undo step. Bounds pad HERE (once, directionally
+    /// relevant reach) and a full bake regrows the grid so geometry pulled
+    /// beyond the old cache box becomes visible and anchorable.
     func endMoveSurfaceSession() {
         guard let session = moveSession else { return }
         moveSession = nil
-        if session.applied { scheduleAutosave() }
+        guard session.applied else { return }
+        let drag = simd_length(session.displacement)
+        padBounds(around: session.center,
+                  reach: session.radius + drag, by: drag)
+        scheduleBake(debounceMilliseconds: 30)
+        scheduleAutosave()
     }
 
     /// Magnify (strength > 0) / pinch (strength < 0) about a world point:
