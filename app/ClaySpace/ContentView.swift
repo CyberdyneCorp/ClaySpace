@@ -63,21 +63,18 @@ struct ContentView: View {
                             VoxelBar(state: state)
                         }
                     }
-                    .padding(.bottom, 16)
                     .onGeometryChange(for: CGRect.self) {
                         $0.frame(in: .global)
                     } action: { state.chromeRects["bottomBars"] = $0 }
-                }
-                VStack {
-                    Spacer()
                     HStack {
                         Spacer()
-                        utilityCluster
+                        modeSwitch
+                            .padding(.top, 8)
                             .padding(.trailing, 14)
                             .padding(.bottom, 16)
                             .onGeometryChange(for: CGRect.self) {
                                 $0.frame(in: .global)
-                            } action: { state.chromeRects["utilityCluster"] = $0 }
+                            } action: { state.chromeRects["modeSwitch"] = $0 }
                     }
                 }
                 if let anchor = state.radialMenuLocation {
@@ -145,11 +142,13 @@ struct ContentView: View {
                             .font(.system(size: 17, weight: .semibold, design: .serif))
                             .foregroundStyle(.primary)
                             .lineLimit(1)
-                            .frame(minWidth: 70, maxWidth: 150, alignment: .leading)
                         Image(systemName: "chevron.down")
                             .font(.system(size: 9, weight: .bold))
                             .foregroundStyle(.secondary)
                     }
+                    // Cap on the PAIR keeps the chevron hugging the text;
+                    // the floor stops a squeeze from wrapping it vertical.
+                    .frame(minWidth: 82, maxWidth: 166, alignment: .leading)
                     Text(state.engine.isDirty ? "edited" : "saved")
                         .font(.system(size: 10))
                         .foregroundStyle(.secondary)
@@ -157,25 +156,15 @@ struct ContentView: View {
                 }
             }
             .accessibilityIdentifier("documentsButton")
-            Picker("Mode", selection: Binding(
-                get: { state.mode },
-                set: { state.setMode($0) })) {
-                Text("Smooth").tag(ViewportState.EditorMode.sdf)
-                Text("Voxels").tag(ViewportState.EditorMode.voxel)
-            }
-            .pickerStyle(.segmented)
-            .frame(width: 118)
-            .accessibilityIdentifier("modeSwitch")
-            .padding(.leading, 6)
             Spacer(minLength: 8)
             // ViewThatFits would measure these variants off the main actor
             // (MainActor-isolated state crash); pick by measured bar width
             // instead — all variants are fixed-width, thresholds static.
-            if topBarWidth >= 750 {
+            if topBarWidth >= 620 {
                 MirrorControls(state: state)
                 Divider().frame(height: 18)
                 brushDials(sliderWidth: 62)
-            } else if topBarWidth >= 670 {
+            } else if topBarWidth >= 540 {
                 MirrorControls(state: state)
                 Divider().frame(height: 18)
                 brushDials(sliderWidth: 44)
@@ -196,25 +185,27 @@ struct ContentView: View {
         }
     }
 
-    /// Version label + Gestures/Export, moved to the bottom-right to give
-    /// the top bar room for the brush dials.
-    private var utilityCluster: some View {
-        HStack(spacing: 8) {
-            Text(coreVersion)
-                .font(.system(size: 11, design: .monospaced))
-                .foregroundStyle(.secondary)
-            gesturesButton
-            exportButton
+    /// Smooth/Voxels switch, floating bottom-right in the viewport
+    /// (user sketch) — the top bar keeps only title, mirror and dials.
+    private var modeSwitch: some View {
+        Picker("Mode", selection: Binding(
+            get: { state.mode },
+            set: { state.setMode($0) })) {
+            Text("Smooth").tag(ViewportState.EditorMode.sdf)
+            Text("Voxels").tag(ViewportState.EditorMode.voxel)
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 6))
+        .pickerStyle(.segmented)
+        .frame(width: 150)
+        .accessibilityIdentifier("modeSwitch")
+        .padding(6)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
     }
 
     private var gesturesButton: some View {
         Button("Gestures") { showGestures = true }
             .font(.system(size: 13))
             .buttonStyle(.bordered)
+            .controlSize(.small)
             .tint(.secondary)
     }
 
@@ -222,6 +213,7 @@ struct ContentView: View {
         Button("Export") { showExport = true }
             .font(.system(size: 13))
             .buttonStyle(.borderedProminent)
+            .controlSize(.small)
             .tint(.orange)
             .accessibilityIdentifier("exportButton")
     }
@@ -522,6 +514,17 @@ struct ContentView: View {
             brushesSection
             colorsSection
             EditListPanel(state: state)
+            Divider()
+            HStack(spacing: 8) {
+                Text(coreVersion)
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+                Spacer(minLength: 4)
+                gesturesButton
+                exportButton
+            }
         }
         .padding(16)
         .frame(width: 270, alignment: .topLeading)

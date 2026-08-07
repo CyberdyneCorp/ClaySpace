@@ -43,6 +43,7 @@ struct MirrorControls: View {
                     if !radialOn {
                         Text("Radial")
                             .font(.system(size: 12))
+                            .fixedSize() // never "R…" — the title yields instead
                     }
                 }
                 .padding(.horizontal, 6)
