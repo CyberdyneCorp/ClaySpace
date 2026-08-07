@@ -108,8 +108,10 @@ final class MetalViewportView: UIView {
         guard let device = MTLCreateSystemDefaultDevice() else { return }
         metalLayer.device = device
         metalLayer.pixelFormat = .bgra8Unorm
-        metalLayer.framebufferOnly = true
         renderer = Renderer(device: device, pixelFormat: metalLayer.pixelFormat)
+        // The spatial scaler writes the drawable; framebuffer-only textures
+        // refuse non-display use.
+        metalLayer.framebufferOnly = !(renderer?.upscalingSupported ?? false)
 
         installRecognizers()
     }
@@ -349,17 +351,30 @@ final class MetalViewportView: UIView {
         updateDrawableSize()
     }
 
+    /// With MetalFX (docs/06 §2.1) the drawable stays NATIVE and the scene
+    /// renders to a reduced offscreen input; without it, the drawable
+    /// itself shrinks (the pre-upscaler behavior).
+    private var upscaling: Bool { renderer?.upscalingSupported ?? false }
+    /// Offscreen input scale: below-native even idle — the scaler pays it
+    /// back — and lower still while touching.
+    private var currentInputScale: CGFloat {
+        activeTouchCount > 0 ? 0.55 : 0.72
+    }
+
     private func updateDrawableSize() {
-        let scale = (window?.screen.scale ?? traitCollection.displayScale) * currentRenderScale
+        let screen = window?.screen.scale ?? traitCollection.displayScale
+        let scale = upscaling ? screen : screen * currentRenderScale
         let size = CGSize(width: bounds.width * scale, height: bounds.height * scale)
         if size.width > 0, size.height > 0 {
             metalLayer.drawableSize = size
         }
     }
 
+    private var lastDrawnInputScale: CGFloat = -1
+
     @objc private func step(_ link: CADisplayLink) {
         let targetScale = activeTouchCount > 0 ? Self.interactionRenderScale : 1.0
-        if targetScale != currentRenderScale {
+        if !upscaling, targetScale != currentRenderScale {
             currentRenderScale = targetScale
             updateDrawableSize()
         }
@@ -369,7 +384,9 @@ final class MetalViewportView: UIView {
         let selection = state.selectedIndex ?? -1
         let light = state.lightAngle
         let previewVersion = state.previewVersion
+        let inputScale = upscaling ? currentInputScale : 1
         guard camera != lastDrawnCamera
+                || inputScale != lastDrawnInputScale
                 || version != lastDrawnVersion
                 || selection != lastDrawnSelection
                 || light != lastDrawnLightAngle
@@ -389,6 +406,7 @@ final class MetalViewportView: UIView {
         lastDrawnSelection = selection
         lastDrawnLightAngle = light
         lastDrawnPreviewVersion = previewVersion
+        lastDrawnInputScale = inputScale
         lastDrawnVoxelVersion = state.engine.voxelMeshVersion
         renderer?.draw(to: drawable,
                        time: Float(CACurrentMediaTime() - startTime),
@@ -397,7 +415,8 @@ final class MetalViewportView: UIView {
                        selectedIndex: selection,
                        lightDir: state.lightDirection,
                        fullQuality: activeTouchCount == 0,
-                       preview: state.previewItems)
+                       preview: state.previewItems,
+                       inputScale: inputScale)
     }
 }
 

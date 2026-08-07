@@ -1,5 +1,8 @@
 import Metal
 import os
+#if canImport(MetalFX)
+import MetalFX
+#endif
 import QuartzCore
 import simd
 
@@ -71,8 +74,50 @@ final class Renderer {
     private let maskTexture: MTLTexture
     private var uploadedMaskVersion = -1
 
+    // MetalFX spatial upscaling (docs/06 §2.1): render the scene at a
+    // reduced input size and reconstruct native. Unsupported devices (and
+    // the simulator) keep the direct-to-drawable path.
+    let upscalingSupported: Bool
+    private var offscreenColor: MTLTexture?
+    private var scalerSizes = (inW: 0, inH: 0, outW: 0, outH: 0)
+    #if canImport(MetalFX)
+    private var spatialScaler: MTLFXSpatialScaler?
+    #endif
+
+    private func ensureUpscaler(inW: Int, inH: Int, outW: Int, outH: Int) -> Bool {
+        #if canImport(MetalFX)
+        guard upscalingSupported, inW > 0, inH > 0 else { return false }
+        if spatialScaler != nil, scalerSizes == (inW, inH, outW, outH) { return true }
+        let descriptor = MTLFXSpatialScalerDescriptor()
+        descriptor.inputWidth = inW
+        descriptor.inputHeight = inH
+        descriptor.outputWidth = outW
+        descriptor.outputHeight = outH
+        descriptor.colorTextureFormat = .bgra8Unorm
+        descriptor.outputTextureFormat = .bgra8Unorm
+        descriptor.colorProcessingMode = .perceptual
+        guard let scaler = descriptor.makeSpatialScaler(device: device) else { return false }
+        let colorDesc = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .bgra8Unorm, width: inW, height: inH, mipmapped: false)
+        colorDesc.usage = [.renderTarget, .shaderRead]
+        colorDesc.storageMode = .private
+        guard let color = device.makeTexture(descriptor: colorDesc) else { return false }
+        spatialScaler = scaler
+        offscreenColor = color
+        scalerSizes = (inW, inH, outW, outH)
+        return true
+        #else
+        return false
+        #endif
+    }
+
     init?(device: MTLDevice, pixelFormat: MTLPixelFormat) {
         self.device = device
+        #if canImport(MetalFX)
+        self.upscalingSupported = MTLFXSpatialScalerDescriptor.supportsDevice(device)
+        #else
+        self.upscalingSupported = false
+        #endif
         guard let queue = device.makeCommandQueue(),
               let library = device.makeDefaultLibrary(),
               let vertexFn = library.makeFunction(name: "fullscreen_vertex"),
@@ -198,7 +243,8 @@ final class Renderer {
               engine: ClayEngine, selectedIndex: Int,
               lightDir: SIMD3<Float> = simd_normalize(SIMD3(0.5, 0.8, 0.3)),
               fullQuality: Bool = true,
-              preview: [SceneItem] = []) {
+              preview: [SceneItem] = [],
+              inputScale: CGFloat = 1) {
         let items = engine.items
         let strokePoints = engine.strokePoints
         if engine.version != uploadedVersion {
@@ -310,13 +356,24 @@ final class Renderer {
                                  simd_length(mx - mn) * 0.5)
         }
 
+        // Upscaled path: scene renders into an offscreen input-sized target;
+        // the spatial scaler reconstructs into the native drawable.
+        let outW = drawable.texture.width
+        let outH = drawable.texture.height
+        let wantsUpscale = inputScale < 0.999
+        let upscaling = wantsUpscale && ensureUpscaler(
+            inW: max(Int(CGFloat(outW) * inputScale), 64),
+            inH: max(Int(CGFloat(outH) * inputScale), 64),
+            outW: outW, outH: outH)
+        let target = upscaling ? offscreenColor! : drawable.texture
+
         let pass = MTLRenderPassDescriptor()
-        pass.colorAttachments[0].texture = drawable.texture
+        pass.colorAttachments[0].texture = target
         pass.colorAttachments[0].loadAction = .clear
         pass.colorAttachments[0].storeAction = .store
         pass.colorAttachments[0].clearColor = MTLClearColor(red: 0.86, green: 0.85, blue: 0.84, alpha: 1)
-        if let depth = ensureDepthTexture(width: drawable.texture.width,
-                                          height: drawable.texture.height) {
+        if let depth = ensureDepthTexture(width: target.width,
+                                          height: target.height) {
             pass.depthAttachment.texture = depth
             pass.depthAttachment.loadAction = .clear
             pass.depthAttachment.storeAction = .dontCare
@@ -327,8 +384,8 @@ final class Renderer {
               let encoder = commands.makeRenderCommandEncoder(descriptor: pass)
         else { return }
 
-        let width = Float(drawable.texture.width)
-        let height = Float(max(drawable.texture.height, 1))
+        let width = Float(target.width)
+        let height = Float(max(target.height, 1))
         let basis = camera.basis
         let cache = engine.fieldCache
         let cacheUsable = cache != nil && uploadedCacheVersion == engine.fieldCacheVersion
@@ -402,6 +459,14 @@ final class Renderer {
                                           indexBufferOffset: 0)
         }
         encoder.endEncoding()
+
+        #if canImport(MetalFX)
+        if upscaling, let scaler = spatialScaler {
+            scaler.colorTexture = target
+            scaler.outputTexture = drawable.texture
+            scaler.encode(commandBuffer: commands)
+        }
+        #endif
 
         commands.addCompletedHandler { [gpuFrameTime] buffer in
             // MTLCommandBuffer isn't Sendable; only two doubles cross.
