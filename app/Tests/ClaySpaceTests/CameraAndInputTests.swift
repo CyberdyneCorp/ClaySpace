@@ -704,6 +704,49 @@ final class CameraAndInputTests: XCTestCase {
         state.sculptBrush = .standard
     }
 
+    func testHoverEchoesShowMirrorAndRadialTargets() {
+        let state = ViewportState()
+        state.viewportSize = CGSize(width: 800, height: 600)
+        state.activate(.sculpt, announce: false)
+        let center = CGPoint(x: 400, y: 300) // over the seeded ball
+
+        state.pencilHovered(at: center, altitude: .pi / 2)
+        XCTAssertNotNil(state.hoverGhost)
+        XCTAssertTrue(state.hoverEchoes.isEmpty, "no symmetry, no echoes")
+
+        // Mirror X: one dashed echo across the plane. Toggling symmetry
+        // refreshes the ghost even without pencil movement (throttle key).
+        state.engine.setMirror(axes: 1)
+        state.pencilHovered(at: center, altitude: .pi / 2)
+        XCTAssertEqual(state.hoverEchoes.count, 1)
+
+        // Radial 6 x mirror X = 12 stroke sites, minus the primary ghost.
+        state.engine.setRadial(count: 6)
+        state.pencilHovered(at: center, altitude: .pi / 2)
+        XCTAssertEqual(state.hoverEchoes.count, 11)
+
+        // Radial alone: the other five ring positions.
+        state.engine.setMirror(axes: 0)
+        state.pencilHovered(at: center, altitude: .pi / 2)
+        XCTAssertEqual(state.hoverEchoes.count, 5)
+
+        state.pencilHoverEnded()
+        XCTAssertTrue(state.hoverEchoes.isEmpty, "echoes clear with the ghost")
+    }
+
+    func testHoverEchoesInVoxelModeMirrorOnly() {
+        let state = ViewportState()
+        state.viewportSize = CGSize(width: 800, height: 600)
+        state.setMode(.voxel)
+        state.activate(.sculpt, announce: false)
+        state.engine.setMirror(axes: 1)
+        state.engine.setRadial(count: 6) // radial must NOT echo voxel stamps
+        state.pencilHovered(at: CGPoint(x: 400, y: 300), altitude: .pi / 2)
+        guard state.hoverGhost != nil else { return } // no pick over air is fine
+        XCTAssertEqual(state.hoverEchoes.count, 1, "voxel stamps mirror but never radial")
+        XCTAssertTrue(state.hoverEchoes.allSatisfy(\.isVoxel))
+    }
+
     // MARK: Top-bar brush dials (size / strength)
 
     func testBrushSizeDialScalesEveryStroke() {

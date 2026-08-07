@@ -317,6 +317,23 @@ struct ContentView: View {
         if let ghost = state.hoverGhost {
             ZStack(alignment: .topLeading) {
                 Color.clear
+                // Symmetry echoes: dashed, dimmer — where mirror/radial
+                // will land the same stroke.
+                ForEach(Array(state.hoverEchoes.enumerated()), id: \.offset) { _, echo in
+                    Group {
+                        if echo.isVoxel {
+                            Rectangle()
+                                .stroke(Color.orange.opacity(0.45),
+                                        style: StrokeStyle(lineWidth: 1.2, dash: [4, 3]))
+                        } else {
+                            Circle()
+                                .stroke(Color.orange.opacity(0.45),
+                                        style: StrokeStyle(lineWidth: 1.2, dash: [4, 3]))
+                        }
+                    }
+                    .frame(width: echo.radiusPoints * 2, height: echo.radiusPoints * 2)
+                    .position(echo.center)
+                }
                 Group {
                     if ghost.isVoxel {
                         Rectangle()

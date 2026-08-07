@@ -220,7 +220,12 @@ final class ViewportState {
         var isVoxel: Bool
     }
     /// Brush footprint under a hovering Pencil (M2+ iPads); nil = hidden.
-    var hoverGhost: HoverGhost?
+    var hoverGhost: HoverGhost? {
+        didSet { if hoverGhost == nil { hoverEchoes = [] } }
+    }
+    /// Symmetry echoes of the hover ghost: where mirror planes and radial
+    /// copies will land the same stroke. Dimmer, non-interactive cues.
+    var hoverEchoes: [HoverGhost] = []
     /// Pending-shape ghost while the Shape tool presses (rendered by the
     /// raymarcher as a translucent silhouette of the real primitive).
     var shapePreview: SceneItem? {
@@ -239,6 +244,7 @@ final class ViewportState {
     @ObservationIgnored fileprivate var lastHoverPoint: CGPoint?
     @ObservationIgnored fileprivate var lastHoverTool: Tool = .sculpt
     @ObservationIgnored fileprivate var lastHoverMode: EditorMode = .sdf
+    @ObservationIgnored fileprivate var lastHoverSymmetry: SIMD2<Int32> = .zero
 
     enum HapticEvent { case alignment, completed }
     /// Set by the viewport view — the canvas generator anchors to a UIView.
@@ -1419,12 +1425,15 @@ extension ViewportState: PencilToolSink {
         // Hover streams at Pencil rate; a raycast per sub-3pt jitter is
         // wasted work the eye can't see. Tool/mode switches reset the
         // throttle — the ghost's meaning changed even if the point didn't.
+        let symmetry = SIMD2(engine.mirrorAxes, engine.radialCount)
         if let last = lastHoverPoint, hoverGhost != nil,
            lastHoverTool == activeTool, lastHoverMode == mode,
+           lastHoverSymmetry == symmetry,
            hypot(point.x - last.x, point.y - last.y) < 3 { return }
         lastHoverPoint = point
         lastHoverTool = activeTool
         lastHoverMode = mode
+        lastHoverSymmetry = symmetry
         guard let ray = ray(through: point) else { hoverGhost = nil; return }
         if mode == .voxel {
             guard activeTool == .sculpt || activeTool == .erase || activeTool == .paint,
@@ -1438,6 +1447,9 @@ extension ViewportState: PencilToolSink {
             let world = (SIMD3<Float>(cell) + 0.5) * ClayEngine.voxelSize
             hoverGhost = ghost(at: world, worldRadius: ClayEngine.voxelSize * 0.5,
                                isVoxel: true)
+            hoverEchoes = symmetryEchoes(of: world,
+                                         worldRadius: ClayEngine.voxelSize * 0.5,
+                                         isVoxel: true)
             return
         }
         let hoverPressure: Float = 0.35 // preview at a middling press
@@ -1452,11 +1464,14 @@ extension ViewportState: PencilToolSink {
                 : activeTool == .spray ? 0.09 + hoverPressure * 0.25
                 : radius(for: hoverPressure, altitude: altitude) // sculpt/freeze
             hoverGhost = ghost(at: target, worldRadius: r, isVoxel: false)
+            hoverEchoes = symmetryEchoes(of: target, worldRadius: r, isVoxel: false)
         case .erase, .paint:
             guard let hit else { hoverGhost = nil; return }
-            hoverGhost = ghost(at: hit.position,
-                               worldRadius: radius(for: hoverPressure, altitude: altitude),
+            let eraseRadius = radius(for: hoverPressure, altitude: altitude)
+            hoverGhost = ghost(at: hit.position, worldRadius: eraseRadius,
                                isVoxel: false)
+            hoverEchoes = symmetryEchoes(of: hit.position, worldRadius: eraseRadius,
+                                         isVoxel: false)
         default:
             hoverGhost = nil
         }
@@ -1465,6 +1480,33 @@ extension ViewportState: PencilToolSink {
     func pencilHoverEnded() {
         hoverGhost = nil
         lastHoverPoint = nil
+    }
+
+    private func symmetryEchoes(of world: SIMD3<Float>, worldRadius: Float,
+                                isVoxel: Bool) -> [HoverGhost] {
+        let radialN = mode == .sdf ? max(Int(engine.radialCount), 1) : 1
+        let axes = Int(engine.mirrorAxes)
+        guard radialN > 1 || axes != 0 else { return [] }
+        var echoes: [HoverGhost] = []
+        for k in 0..<radialN {
+            let angle = Float(k) * 2 * .pi / Float(radialN)
+            let c = cos(angle), s = sin(angle)
+            let rotated = SIMD3(c * world.x + s * world.z, world.y,
+                                -s * world.x + c * world.z)
+            for combo in 0..<8 where combo & axes == combo {
+                if k == 0 && combo == 0 { continue } // the primary ghost
+                var p = rotated
+                if combo & 1 != 0 { p.x = -p.x }
+                if combo & 2 != 0 { p.y = -p.y }
+                if combo & 4 != 0 { p.z = -p.z }
+                if let echo = ghost(at: p, worldRadius: worldRadius,
+                                    isVoxel: isVoxel) {
+                    echoes.append(echo)
+                }
+                if echoes.count >= 32 { return echoes } // sanity cap
+            }
+        }
+        return echoes
     }
 
     private func ghost(at world: SIMD3<Float>, worldRadius: Float,
