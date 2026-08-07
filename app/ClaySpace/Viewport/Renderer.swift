@@ -27,7 +27,7 @@ final class Renderer {
         var mirrorAxes: Int32    // layer mirror bits (CLAY_MIRROR_*)
         var mirrorK: Float       // Mirror Blend seam width
         var selectedIndex: Int32 // highlighted item; -1 = none
-        var previewInfo: SIMD3<Float> = SIMD3(-1, 0, 0) // x = preview slot
+        var previewInfo: SIMD4<Float> = SIMD4(-1, 0, 0, 0) // x = preview slot, w = dark mode
         var gridOrigin: SIMD4<Float>    // xyz origin; w = cache enabled (0/1)
         var gridInvExtent: SIMD4<Float> // xyz = 1/extent; w = normal epsilon
         var gridScale: SIMD4<Float>     // xyz = dims/maxResolution
@@ -244,7 +244,8 @@ final class Renderer {
               lightDir: SIMD3<Float> = simd_normalize(SIMD3(0.5, 0.8, 0.3)),
               fullQuality: Bool = true,
               preview: [SceneItem] = [],
-              inputScale: CGFloat = 1) {
+              inputScale: CGFloat = 1,
+              darkMode: Bool = false) {
         let items = engine.items
         let strokePoints = engine.strokePoints
         if engine.version != uploadedVersion {
@@ -371,7 +372,9 @@ final class Renderer {
         pass.colorAttachments[0].texture = target
         pass.colorAttachments[0].loadAction = .clear
         pass.colorAttachments[0].storeAction = .store
-        pass.colorAttachments[0].clearColor = MTLClearColor(red: 0.86, green: 0.85, blue: 0.84, alpha: 1)
+        pass.colorAttachments[0].clearColor = darkMode
+            ? MTLClearColor(red: 0.012, green: 0.012, blue: 0.015, alpha: 1)
+            : MTLClearColor(red: 0.86, green: 0.85, blue: 0.84, alpha: 1)
         if let depth = ensureDepthTexture(width: target.width,
                                           height: target.height) {
             pass.depthAttachment.texture = depth
@@ -400,8 +403,9 @@ final class Renderer {
             mirrorAxes: engine.mirrorAxes,
             mirrorK: engine.mirrorK,
             selectedIndex: Int32(selectedIndex),
-            previewInfo: SIMD3(Float(previewSlot), Float(previewCount),
-                               0.9 * min(max(engine.safeStepScale, 0.5), 1.3)),
+            previewInfo: SIMD4(Float(previewSlot), Float(previewCount),
+                               0.9 * min(max(engine.safeStepScale, 0.5), 1.3),
+                               darkMode ? 1 : 0),
             gridOrigin: cacheUsable
                 ? SIMD4(cache!.origin.x, cache!.origin.y, cache!.origin.z, 1)
                 : SIMD4(0, 0, 0, 0),

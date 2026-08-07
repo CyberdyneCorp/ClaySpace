@@ -371,6 +371,7 @@ final class MetalViewportView: UIView {
     }
 
     private var lastDrawnInputScale: CGFloat = -1
+    private var lastDrawnDarkMode: Bool?
 
     @objc private func step(_ link: CADisplayLink) {
         let targetScale = activeTouchCount > 0 ? Self.interactionRenderScale : 1.0
@@ -385,6 +386,7 @@ final class MetalViewportView: UIView {
         let light = state.lightAngle
         let previewVersion = state.previewVersion
         let inputScale = upscaling ? currentInputScale : 1
+        let darkMode = state.isDarkMode
         guard camera != lastDrawnCamera
                 || inputScale != lastDrawnInputScale
                 || version != lastDrawnVersion
@@ -392,6 +394,7 @@ final class MetalViewportView: UIView {
                 || light != lastDrawnLightAngle
                 || previewVersion != lastDrawnPreviewVersion
                 || state.engine.voxelMeshVersion != lastDrawnVoxelVersion
+                || darkMode != lastDrawnDarkMode
                 || metalLayer.drawableSize != lastDrawnSize else { return }
 
         state.engine.rebuildVoxelMeshIfDirty() // throttled voxel drags
@@ -408,6 +411,7 @@ final class MetalViewportView: UIView {
         lastDrawnPreviewVersion = previewVersion
         lastDrawnInputScale = inputScale
         lastDrawnVoxelVersion = state.engine.voxelMeshVersion
+        lastDrawnDarkMode = darkMode
         renderer?.draw(to: drawable,
                        time: Float(CACurrentMediaTime() - startTime),
                        camera: camera,
@@ -416,7 +420,8 @@ final class MetalViewportView: UIView {
                        lightDir: state.lightDirection,
                        fullQuality: activeTouchCount == 0,
                        preview: state.previewItems,
-                       inputScale: inputScale)
+                       inputScale: inputScale,
+                       darkMode: darkMode)
     }
 }
 

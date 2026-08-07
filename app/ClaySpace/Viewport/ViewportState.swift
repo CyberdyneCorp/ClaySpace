@@ -410,6 +410,9 @@ final class ViewportState {
     /// Light azimuth about world Y; elevation is fixed at the study's
     /// pleasant ~53°. Default reproduces the original (0.5, 0.8, 0.3).
     var lightAngle: Float = 0.98
+    /// Effective appearance (set from SwiftUI's colorScheme): the shader
+    /// swaps its paper/ground palette to match the chrome.
+    var isDarkMode = false
 
     var lightDirection: SIMD3<Float> {
         let elevation: Float = 0.927

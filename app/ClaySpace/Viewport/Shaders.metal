@@ -17,7 +17,7 @@ struct Uniforms {
     int mirrorAxes;       // layer mirror bits (CLAY_MIRROR_*)
     float mirrorK;        // Mirror Blend seam width
     int selectedIndex;    // highlighted item; -1 = none
-    float3 previewInfo;   // x = pending-shape preview slot; -1 = none
+    float4 previewInfo;   // x = preview slot (-1 none), y = count, z = step scale, w = dark mode
     float4 gridOrigin;    // xyz cache origin; w = cache enabled (0/1)
     float4 gridInvExtent; // xyz = 1/extent; w = normal epsilon
     float4 gridScale;     // xyz = dims/maxResolution (texture sub-region)
@@ -637,9 +637,13 @@ fragment FragOut raymarch_fragment(VertexOut in [[stage_in]],
         t += max(d * stepScale, 0.0014 * max(t, 1.0)); // floor: grazing rays
     }
 
-    // Paper background.
-    float3 color = mix(float3(0.88, 0.87, 0.86), float3(0.80, 0.79, 0.78),
-                       saturate(0.5 - 0.5 * in.uv.y));
+    // Paper background (charcoal when the app runs dark).
+    const bool darkBg = u.previewInfo.w > 0.5;
+    float3 color = darkBg
+        ? mix(float3(0.013, 0.013, 0.016), float3(0.006, 0.006, 0.008),
+              saturate(0.5 - 0.5 * in.uv.y))
+        : mix(float3(0.88, 0.87, 0.86), float3(0.80, 0.79, 0.78),
+              saturate(0.5 - 0.5 * in.uv.y));
 
     const float3 l = normalize(u.lightDir.xyz);
 
@@ -649,11 +653,13 @@ fragment FragOut raymarch_fragment(VertexOut in [[stage_in]],
     if (groundCloser) {
         float3 gp = ro + rd * tGround;
         if (abs(gp.x) < 6.0 && abs(gp.z) < 6.0) {
-            float3 ground = float3(0.855, 0.845, 0.835);
-            // grid every 0.5 world units
+            float3 ground = darkBg ? float3(0.020, 0.020, 0.024)
+                                   : float3(0.855, 0.845, 0.835);
+            // grid every 0.5 world units (lines darken on paper,
+            // lighten on charcoal)
             float2 cell = abs(fract(gp.xz * 2.0) - 0.5);
             float line = smoothstep(0.47, 0.5, max(cell.x, cell.y));
-            ground = mix(ground, ground * 0.93, line);
+            ground = mix(ground, ground * (darkBg ? 2.1 : 0.93), line);
             // contact darkening + a directional soft shadow that follows
             // the light dial (task 4.2)
             float clearance = mapDist(gp, ctx);

@@ -15,6 +15,9 @@ struct ContentView: View {
     @State private var showBrushDials = false
     @State private var topBarWidth: CGFloat = 0
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.colorScheme) private var colorScheme
+    // 0 = follow system, 1 = light, 2 = dark (user toggle below)
+    @AppStorage("appearanceOverride") private var appearanceOverride = 0
     @AppStorage("hasSeenGesturesSheet") private var hasSeenGestures = false
     private let coreVersion: String = {
         var major: Int32 = 0, minor: Int32 = 0, patch: Int32 = 0
@@ -63,19 +66,10 @@ struct ContentView: View {
                             VoxelBar(state: state)
                         }
                     }
+                    .padding(.bottom, 16)
                     .onGeometryChange(for: CGRect.self) {
                         $0.frame(in: .global)
                     } action: { state.chromeRects["bottomBars"] = $0 }
-                    HStack {
-                        Spacer()
-                        modeSwitch
-                            .padding(.top, 8)
-                            .padding(.trailing, 14)
-                            .padding(.bottom, 16)
-                            .onGeometryChange(for: CGRect.self) {
-                                $0.frame(in: .global)
-                            } action: { state.chromeRects["modeSwitch"] = $0 }
-                    }
                 }
                 if let anchor = state.radialMenuLocation {
                     RadialMenu(
@@ -92,6 +86,11 @@ struct ContentView: View {
             }
         }
         .animation(.easeOut(duration: 0.2), value: state.inspectorVisible)
+        .preferredColorScheme(appearanceOverride == 1 ? .light
+                              : appearanceOverride == 2 ? .dark : nil)
+        .onChange(of: colorScheme, initial: true) { _, scheme in
+            state.isDarkMode = scheme == .dark
+        }
         .sheet(isPresented: $showGestures) { GesturesSheet() }
         .sheet(isPresented: $showExport) { ExportSheet(engine: state.engine) }
         .sheet(isPresented: $showDocuments) {
@@ -185,7 +184,7 @@ struct ContentView: View {
         }
     }
 
-    /// Smooth/Voxels switch, floating bottom-right in the viewport
+    /// Smooth/Voxels switch, in the Build panel above Gestures/Export
     /// (user sketch) — the top bar keeps only title, mirror and dials.
     private var modeSwitch: some View {
         Picker("Mode", selection: Binding(
@@ -195,10 +194,25 @@ struct ContentView: View {
             Text("Voxels").tag(ViewportState.EditorMode.voxel)
         }
         .pickerStyle(.segmented)
-        .frame(width: 150)
         .accessibilityIdentifier("modeSwitch")
-        .padding(6)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    /// Light/dark toggle: flips to the opposite of the EFFECTIVE scheme,
+    /// so the first tap always visibly switches even from "follow system".
+    private var appearanceToggle: some View {
+        Button {
+            appearanceOverride = colorScheme == .dark ? 1 : 2
+        } label: {
+            Image(systemName: colorScheme == .dark ? "sun.max" : "moon")
+                .font(.system(size: 13))
+                .frame(width: 34, height: 30)
+                .foregroundStyle(.primary)
+                .background(
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(Color.primary.opacity(0.06))
+                )
+        }
+        .accessibilityIdentifier("appearanceToggle")
     }
 
     private var gesturesButton: some View {
@@ -514,6 +528,10 @@ struct ContentView: View {
             brushesSection
             colorsSection
             EditListPanel(state: state)
+            HStack(spacing: 8) {
+                modeSwitch
+                appearanceToggle
+            }
             Divider()
             HStack(spacing: 8) {
                 Text(coreVersion)
