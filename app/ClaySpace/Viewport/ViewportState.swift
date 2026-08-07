@@ -511,8 +511,10 @@ final class ViewportState {
         var target = camera
         if axis.y > 0.5 {
             target.elevation = OrbitCamera.elevationLimit
+            target.azimuth = 0 // cancel the turn: an unrotated top view
         } else if axis.y < -0.5 {
             target.elevation = -OrbitCamera.elevationLimit
+            target.azimuth = 0
         } else {
             target.elevation = 0
             target.azimuth = atan2(axis.x, axis.z)

@@ -57,6 +57,25 @@ final class CameraAndInputTests: XCTestCase {
         XCTAssertTrue(OrbitCamera.interpolate(from: persp, to: ortho, t: 0.1).isOrthographic)
     }
 
+    func testAxisSnapCancelsResidualRotation() {
+        // X/Z snaps already align the azimuth exactly; the Y (top/bottom)
+        // snap must cancel the current "Turn" too, not keep it.
+        let state = ViewportState()
+        state.viewportSize = CGSize(width: 800, height: 600)
+        state.camera.azimuth = 2.3 // a mid-orbit turn
+        state.camera.elevation = 0.4
+        state.snapToAxis(SIMD3(0, 1, 0), named: "Top")
+        // The recall animates; wait for it to land.
+        let deadline = Date().addingTimeInterval(2)
+        while state.camera.azimuth.magnitude > 0.01, Date() < deadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        }
+        XCTAssertEqual(state.camera.azimuth, 0, accuracy: 0.02,
+                       "top view lands with the turn cancelled")
+        XCTAssertEqual(state.camera.elevation, OrbitCamera.elevationLimit,
+                       accuracy: 0.02)
+    }
+
     // MARK: Screen-point → world-ray
 
     func testRayThroughCenterMatchesCameraForward() throws {
