@@ -30,6 +30,9 @@ final class Renderer {
         var lightDir: SIMD4<Float>      // xyz normalized (light dial)
         var material: SIMD4<Float>      // spec strength, shininess, metalness
         var layerBits: SIMD4<UInt32>    // visibility mask, mirror packed, count
+        var maskOrigin: SIMD4<Float>    // xyz freeze-field origin; w = enabled
+        var maskInvExtent: SIMD4<Float> // xyz = 1/extent
+        var maskScale: SIMD4<Float>     // xyz = dims/maxResolution
     }
 
     static let maxItems = 256
@@ -52,6 +55,8 @@ final class Renderer {
     private var voxelIndexBuffer: MTLBuffer?
     private var voxelIndexCount = 0
     private var uploadedVoxelVersion = -1
+    private let maskTexture: MTLTexture
+    private var uploadedMaskVersion = -1
 
     init?(device: MTLDevice, pixelFormat: MTLPixelFormat) {
         self.device = device
@@ -91,6 +96,14 @@ final class Renderer {
         distanceDesc.depth = n
         distanceDesc.usage = .shaderRead
         distanceDesc.storageMode = .shared
+        let maskDesc = MTLTextureDescriptor()
+        maskDesc.textureType = .type3D
+        maskDesc.pixelFormat = .r8Unorm
+        maskDesc.width = ClayEngine.MaskField.maxResolution
+        maskDesc.height = ClayEngine.MaskField.maxResolution
+        maskDesc.depth = ClayEngine.MaskField.maxResolution
+        maskDesc.usage = .shaderRead
+        maskDesc.storageMode = .shared
         let colorDesc = MTLTextureDescriptor()
         colorDesc.textureType = .type3D
         colorDesc.pixelFormat = .rgba8Unorm
@@ -111,7 +124,8 @@ final class Renderer {
                   length: MemoryLayout<SIMD4<Float>>.stride * ClayEngine.maxStrokePoints,
                   options: .storageModeShared),
               let distanceTexture = device.makeTexture(descriptor: distanceDesc),
-              let colorTexture = device.makeTexture(descriptor: colorDesc)
+              let colorTexture = device.makeTexture(descriptor: colorDesc),
+              let maskTexture = device.makeTexture(descriptor: maskDesc)
         else { return nil }
 
         self.queue = queue
@@ -123,6 +137,7 @@ final class Renderer {
         self.strokePointBuffer = strokePointBuffer
         self.distanceTexture = distanceTexture
         self.colorTexture = colorTexture
+        self.maskTexture = maskTexture
     }
 
     private func uploadVoxelMesh(_ engine: ClayEngine) {
@@ -205,6 +220,19 @@ final class Renderer {
         }
         uploadVoxelMesh(engine)
 
+        // Freeze tint field (active SDF layer's mask), lazy per version.
+        let maskField = engine.maskField()
+        if let field = maskField, engine.maskFieldVersion != uploadedMaskVersion {
+            let nx = Int(field.dims.x), ny = Int(field.dims.y), nz = Int(field.dims.z)
+            field.weights.withUnsafeBytes { raw in
+                maskTexture.replace(region: MTLRegionMake3D(0, 0, 0, nx, ny, nz),
+                                    mipmapLevel: 0, slice: 0,
+                                    withBytes: raw.baseAddress!,
+                                    bytesPerRow: nx, bytesPerImage: nx * ny)
+            }
+        }
+        uploadedMaskVersion = engine.maskFieldVersion
+
         // Pending-shape ghost: one extra item past the live list; the
         // shader marches it separately and tints its silhouette.
         var previewSlot: Int32 = -1
@@ -267,7 +295,18 @@ final class Renderer {
             layerBits: SIMD4(engine.layerVisibilityMask,
                              engine.layerMirrorPacked,
                              UInt32(max(engine.sdfLayers.count, 1)),
-                             fullQuality ? 1 : 0)
+                             fullQuality ? 1 : 0),
+            maskOrigin: maskField.map {
+                SIMD4($0.origin.x, $0.origin.y, $0.origin.z, 1)
+            } ?? SIMD4(0, 0, 0, 0),
+            maskInvExtent: maskField.map {
+                SIMD4(1 / $0.extent.x, 1 / $0.extent.y, 1 / $0.extent.z, 0)
+            } ?? SIMD4(repeating: 0),
+            maskScale: maskField.map {
+                let n = Float(ClayEngine.MaskField.maxResolution)
+                return SIMD4(Float($0.dims.x) / n, Float($0.dims.y) / n,
+                             Float($0.dims.z) / n, 0)
+            } ?? SIMD4(repeating: 0)
         )
 
         encoder.setRenderPipelineState(pipeline)
@@ -277,6 +316,7 @@ final class Renderer {
         encoder.setFragmentBuffer(strokePointBuffer, offset: 0, index: 2)
         encoder.setFragmentTexture(distanceTexture, index: 0)
         encoder.setFragmentTexture(colorTexture, index: 1)
+        encoder.setFragmentTexture(maskTexture, index: 2)
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
 
         if voxelIndexCount > 0,

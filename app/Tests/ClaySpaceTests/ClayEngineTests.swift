@@ -454,6 +454,38 @@ final class ClayEngineTests: XCTestCase {
         XCTAssertGreaterThan(unfrozen, 3, "thawed, the spray lands")
     }
 
+    func testMaskFieldBakesForTheFreezeTint() throws {
+        let engine = ClayEngine()
+        XCTAssertNil(engine.maskField(), "no mask, no tint field")
+
+        // Freeze a spot on the SDF layer: the field covers it with weight.
+        XCTAssertTrue(engine.maskPaint(at: SIMD3(0, 1.2, 0), radius: 0.3,
+                                       erase: false, voxelContext: false))
+        let field = try XCTUnwrap(engine.maskField())
+        XCTAssertLessThanOrEqual(Int(max(field.dims.x, max(field.dims.y, field.dims.z))),
+                                 ClayEngine.MaskField.maxResolution)
+
+        func weight(at p: SIMD3<Float>) -> Float {
+            let uvw = (p - field.origin) / field.extent
+            guard uvw.min() >= 0, uvw.max() <= 1 else { return 0 }
+            let x = min(Int(uvw.x * Float(field.dims.x)), Int(field.dims.x) - 1)
+            let y = min(Int(uvw.y * Float(field.dims.y)), Int(field.dims.y) - 1)
+            let z = min(Int(uvw.z * Float(field.dims.z)), Int(field.dims.z) - 1)
+            let index = (z * Int(field.dims.y) + y) * Int(field.dims.x) + x
+            return Float(field.weights[index]) / 255
+        }
+        XCTAssertGreaterThan(weight(at: SIMD3(0, 1.2, 0)), 0.9,
+                             "painted spot reads frozen")
+        XCTAssertEqual(weight(at: SIMD3(3, 1.2, 0)), 0, "far away reads thawed")
+
+        // The field follows the mask version: clear -> gone.
+        let version = engine.maskFieldVersion
+        engine.clearMask(voxelContext: false)
+        XCTAssertNil(engine.maskField())
+        XCTAssertGreaterThan(engine.maskFieldVersion, version,
+                             "renderer re-uploads on change")
+    }
+
     func testMasksSurviveSaveLoad() throws {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("mask_\(UUID().uuidString)")

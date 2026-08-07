@@ -66,7 +66,7 @@
 
 ### Brush suite follow-ups (post 6.x/7.x, from device use)
 - [x] Trim tool (ZBrush Trim Rect/Circle/Lasso via clay_cut_create): marquee overlay -> cut frame on the plane through the scene center, camera basis, prism cut as an ordinary undoable item; Remove|Keep = SUBTRACT|INTERSECT; preview inert until the bake lands (no analytic extrude kernel — unknown prims now contribute nothing instead of falling back to a sphere)
-- [x] Freeze tool (clay_mask): hard-edged world-space mask brush per layer (voxel layer in Voxels mode, active SDF layer in Smooth), gating stamp brushes, sculpt verbs and spray stamps; Invert/Clear; frozen voxels tint ice blue via clay_mask_sample_many at mesh rebuild; masks ride the document (verified save/load); mask paints are tool state (ClayCore does not journal mask ops)
+- [x] Freeze tool (clay_mask): hard-edged world-space mask brush per layer (voxel layer in Voxels mode, active SDF layer in Smooth), gating stamp brushes, sculpt verbs and spray stamps; Invert/Clear; frozen regions tint ice blue in BOTH representations — voxel vertices via clay_mask_sample_many at mesh rebuild, smooth clay via a 48-cap 3D weight texture baked from the active layer's mask (clay_mask_bounds + sample_many) and sampled in the raymarcher's shading; masks ride the document (verified save/load); mask paints are tool state (ClayCore does not journal mask ops)
 
 ## 8. Materials & color
 

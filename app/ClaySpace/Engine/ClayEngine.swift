@@ -1407,6 +1407,7 @@ final class ClayEngine {
     func activateLayer(slot: Int) {
         guard sdfLayers.indices.contains(slot) else { return }
         maskHandles.removeAll() // borrowed per-layer handles refetch lazily
+        maskVersion += 1        // the freeze tint follows the active layer
         activeLayerSlot = slot
         layer = sdfLayers[slot].id
         mirrorAxes = sdfLayers[slot].mirrorAxes
@@ -1721,6 +1722,79 @@ final class ClayEngine {
               let handle else { return nil }
         maskHandles[layerId] = handle
         return handle
+    }
+
+    /// Small dense weight grid of the ACTIVE SDF layer's mask, for the
+    /// raymarcher's freeze tint (the smooth-clay analog of the voxel
+    /// mesh's ice-blue vertices). Rebuilt lazily per maskVersion.
+    struct MaskField {
+        static let maxResolution = 48
+        var origin: SIMD3<Float>
+        var extent: SIMD3<Float>
+        var dims: SIMD3<Int32>
+        var weights: [UInt8] // row-major x-fastest, 0…255 = weight 0…1
+    }
+    @ObservationIgnored private var maskFieldCache: MaskField??
+    @ObservationIgnored private var maskFieldBuiltVersion = -1
+    @ObservationIgnored private(set) var maskFieldVersion = 0
+
+    /// The current freeze field, or nil when the active layer's mask is
+    /// empty. Cached until the mask changes.
+    func maskField() -> MaskField? {
+        if maskFieldBuiltVersion == maskVersion, let cached = maskFieldCache {
+            return cached
+        }
+        maskFieldBuiltVersion = maskVersion
+        maskFieldVersion += 1
+        guard let handle = gatingMask(voxelContext: false) else {
+            maskFieldCache = MaskField??.some(nil)
+            return nil
+        }
+        var minCell = [Int32](repeating: 0, count: 3)
+        var maxCell = [Int32](repeating: 0, count: 3)
+        var hasBounds: Int32 = 0
+        guard clay_mask_bounds(handle, &minCell, &maxCell, &hasBounds) == CLAY_OK,
+              hasBounds == 1 else {
+            maskFieldCache = MaskField??.some(nil)
+            return nil
+        }
+        var cellSize: Float = Self.voxelSize
+        _ = clay_mask_cell_size(handle, &cellSize)
+        let pad: Float = cellSize * 2
+        let origin = SIMD3(Float(minCell[0]), Float(minCell[1]), Float(minCell[2]))
+            * cellSize - SIMD3(repeating: pad)
+        let top = (SIMD3(Float(maxCell[0]), Float(maxCell[1]), Float(maxCell[2]))
+            + SIMD3(repeating: 1)) * cellSize + SIMD3(repeating: pad)
+        let extent = simd_max(top - origin, SIMD3(repeating: cellSize))
+        let longest = max(extent.x, max(extent.y, extent.z))
+        func dim(_ e: Float) -> Int32 {
+            Int32(max(2, min(MaskField.maxResolution,
+                             Int((e / longest * Float(MaskField.maxResolution)).rounded()))))
+        }
+        let dims = SIMD3(dim(extent.x), dim(extent.y), dim(extent.z))
+
+        let nx = Int(dims.x), ny = Int(dims.y), nz = Int(dims.z)
+        var points = [Float]()
+        points.reserveCapacity(nx * ny * nz * 3)
+        for z in 0..<nz {
+            for y in 0..<ny {
+                for x in 0..<nx {
+                    points.append(origin.x + (Float(x) + 0.5) / Float(nx) * extent.x)
+                    points.append(origin.y + (Float(y) + 0.5) / Float(ny) * extent.y)
+                    points.append(origin.z + (Float(z) + 0.5) / Float(nz) * extent.z)
+                }
+            }
+        }
+        var values = [Float](repeating: 0, count: nx * ny * nz)
+        guard clay_mask_sample_many(handle, points, nx * ny * nz, &values) == CLAY_OK
+        else {
+            maskFieldCache = MaskField??.some(nil)
+            return nil
+        }
+        let field = MaskField(origin: origin, extent: extent, dims: dims,
+                              weights: values.map { UInt8(min(max($0, 0), 1) * 255) })
+        maskFieldCache = field
+        return field
     }
 
     /// The mask gating edits in the current context: the voxel layer's in
@@ -2733,6 +2807,7 @@ final class ClayEngine {
         fieldCacheVersion += 1
         _ = check(clay_document_enable_undo(newDoc))
         maskHandles.removeAll()
+        maskVersion += 1
         voxelGrid = nil
         voxelLayer = 0
         paletteIndexByColor.removeAll()

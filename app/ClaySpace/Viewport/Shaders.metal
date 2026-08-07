@@ -24,6 +24,9 @@ struct Uniforms {
     float4 lightDir;      // xyz normalized light direction (light dial)
     float4 material;      // x spec strength, y shininess, z metalness
     uint4 layerBits;      // x vis mask, y mirror (4b/slot), z count, w quality
+    float4 maskOrigin;    // xyz freeze-field origin; w = enabled
+    float4 maskInvExtent; // xyz = 1/extent
+    float4 maskScale;     // xyz = dims/maxResolution (texture sub-region)
 };
 
 // Must match SceneItem in ClayEngine.swift (80 bytes).
@@ -594,7 +597,8 @@ fragment FragOut raymarch_fragment(VertexOut in [[stage_in]],
                                   constant SceneItem *items [[buffer(1)]],
                                   constant float4 *strokePts [[buffer(2)]],
                                   texture3d<float> distanceTex [[texture(0)]],
-                                  texture3d<float> colorTex [[texture(1)]]) {
+                                  texture3d<float> colorTex [[texture(1)]],
+                                  texture3d<float> maskTex [[texture(2)]]) {
     FieldCtx ctx{items, u.itemCount, u.bakedCount, strokePts,
                  distanceTex, colorTex, u.gridOrigin, u.gridInvExtent,
                  u.gridScale, u.layerBits.x, u.layerBits.y,
@@ -671,6 +675,19 @@ fragment FragOut raymarch_fragment(VertexOut in [[stage_in]],
         float3 diffuseAlbedo = albedo * (1.0 - 0.55 * u.material.z);
         color = diffuseAlbedo * (0.35 * ao + 0.65 * diffuse * mix(1.0, ao, 0.35))
               + spec * specTint + rim * 0.18 * ao;
+
+        // Freeze tint (clay_mask): frozen smooth clay shifts toward the
+        // same ice blue the voxel mesh uses.
+        if (u.maskOrigin.w > 0.5) {
+            float3 uvw = (p - u.maskOrigin.xyz) * u.maskInvExtent.xyz;
+            if (all(uvw >= 0.0) && all(uvw <= 1.0)) {
+                float w = maskTex.sample(fieldSampler, uvw * u.maskScale.xyz).r;
+                if (w > 0.02) {
+                    color = mix(color, float3(0.45, 0.75, 1.0) * (0.4 + 0.6 * diffuse),
+                                min(w, 1.0) * 0.6);
+                }
+            }
+        }
 
         // Selection highlight: warm glow where the selected item's own
         // field owns the surface (fades over its blend reach).
