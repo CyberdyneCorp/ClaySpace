@@ -326,6 +326,7 @@ final class ViewportState {
     @ObservationIgnored fileprivate var strokeTravel: Float = 0
     @ObservationIgnored fileprivate var moveDrag:
         (anchor: SIMD3<Float>, current: SIMD3<Float>, radius: Float)?
+    @ObservationIgnored fileprivate var moveEventCount = 0
     @ObservationIgnored fileprivate var warpAnchor: SIMD3<Float>?
     @ObservationIgnored fileprivate var warpRadius: Float = 0
 
@@ -931,7 +932,9 @@ extension ViewportState: PencilToolSink {
                 * sculptBrush.radiusScale
             if sculptBrush == .move {
                 moveDrag = (anchorHit.position, anchorHit.position, warpR)
+                moveEventCount = 0
                 strokePlane = (anchorHit.position, camera.basis.forward)
+                engine.beginMoveSurfaceSession()
             } else {
                 warpAnchor = anchorHit.position
                 warpRadius = warpR
@@ -1003,10 +1006,18 @@ extension ViewportState: PencilToolSink {
             freezePaint(at: point, pressure: max(pressure, 0.1))
             return
         }
-        if activeTool == .sculpt, moveDrag != nil, gizmoDrag == nil {
+        if activeTool == .sculpt, let drag = moveDrag, gizmoDrag == nil {
             if let ray = ray(through: point), let plane = strokePlane,
                let p = intersect(ray: ray, plane: plane) {
                 moveDrag?.current = p
+                // Live preview: re-apply the running total every other
+                // event (each apply is an undo+reapply on the clay side).
+                moveEventCount += 1
+                if moveEventCount % 2 == 0 {
+                    engine.updateMoveSurfaceSession(center: drag.anchor,
+                                                    displacement: p - drag.anchor,
+                                                    radius: drag.radius * 1.2)
+                }
             }
             return
         }
@@ -1217,6 +1228,13 @@ extension ViewportState: PencilToolSink {
     func pencilCancelled() {
         pencilStart = nil
         strokePlane = nil
+        if let drag = moveDrag {
+            // Revert any provisional warp: zero displacement, then close.
+            _ = engine.updateMoveSurfaceSession(center: drag.anchor,
+                                                displacement: .zero,
+                                                radius: drag.radius * 1.2)
+            engine.endMoveSurfaceSession()
+        }
         moveDrag = nil
         warpAnchor = nil
         lastStrokePoint = nil
@@ -1265,9 +1283,10 @@ extension ViewportState: PencilToolSink {
             moveDrag = nil
             strokePlane = nil
             let displacement = drag.current - drag.anchor
-            let applied = engine.moveSurface(center: drag.anchor,
-                                             displacement: displacement,
-                                             radius: drag.radius * 1.2)
+            let applied = engine.updateMoveSurfaceSession(center: drag.anchor,
+                                                          displacement: displacement,
+                                                          radius: drag.radius * 1.2)
+            engine.endMoveSurfaceSession()
             if applied > 0 {
                 emitHaptic(.completed, at: point)
             } else if simd_length(displacement) > 1e-3 {

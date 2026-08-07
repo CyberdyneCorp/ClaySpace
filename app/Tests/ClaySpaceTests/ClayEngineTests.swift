@@ -117,6 +117,66 @@ final class ClayEngineTests: XCTestCase {
         XCTAssertTrue(engine.undo())
     }
 
+    func testMoveSessionAppliesFinalDisplacementOnlyOnceAndUndoes() {
+        let engine = ClayEngine()
+        XCTAssertTrue(engine.addShape(CLAY_PRIM_SPHERE, params: [0.5],
+                                      at: SIMD3(0, 0.8, 0), op: CLAY_OP_ADD,
+                                      blendK: 0, color: ClayEngine.clayColor))
+        let tip = { engine.raycast(origin: SIMD3(0, 3, 0),
+                                   direction: SIMD3(0, -1, 0))?.position.y ?? 0 }
+        let original = tip()
+
+        // Live session: growing displacements re-apply, never stack.
+        engine.beginMoveSurfaceSession()
+        _ = engine.updateMoveSurfaceSession(center: SIMD3(0, 1.3, 0),
+                                            displacement: SIMD3(0, 0.15, 0), radius: 0.6)
+        _ = engine.updateMoveSurfaceSession(center: SIMD3(0, 1.3, 0),
+                                            displacement: SIMD3(0, 0.4, 0), radius: 0.6)
+        engine.endMoveSurfaceSession()
+        let sessionTip = tip()
+
+        // The whole session is exactly ONE clay step above the add, and
+        // the provisional applies left no stale redo entries.
+        XCTAssertEqual(engine.clayUndoDepths.undo, 2, "add + one warp")
+        XCTAssertEqual(engine.clayUndoDepths.redo, 0, "no stale provisionals")
+        XCTAssertTrue(engine.undo(), "one step for the whole session")
+        XCTAssertEqual(tip(), original, accuracy: 0.02)
+
+        // Redo restores the FINAL displacement…
+        XCTAssertTrue(engine.redo())
+        XCTAssertEqual(tip(), sessionTip, accuracy: 0.02)
+
+        // …and equals the same displacement applied in one shot — proof
+        // the intermediate live applies never accumulated.
+        XCTAssertTrue(engine.undo())
+        XCTAssertGreaterThan(engine.moveSurface(center: SIMD3(0, 1.3, 0),
+                                                displacement: SIMD3(0, 0.4, 0),
+                                                radius: 0.6), 0)
+        XCTAssertEqual(tip(), sessionTip, accuracy: 0.03)
+    }
+
+    func testReliefStrokesLowerTheSafeStepScale() async {
+        // The mechanism behind "strokes disappear": relief adds declared
+        // Lipschitz, the safe scale drops below the old 0.5 clamp, and the
+        // marcher must honor it. This documents the drop is real.
+        let engine = ClayEngine()
+        XCTAssertTrue(engine.addShape(CLAY_PRIM_SPHERE, params: [0.6],
+                                      at: SIMD3(0, 0.8, 0), op: CLAY_OP_ADD,
+                                      blendK: 0, color: ClayEngine.clayColor))
+        for i in 0..<3 {
+            XCTAssertTrue(engine.beginStroke(at: SIMD3(Float(i) * 0.1, 0.8, 0.6),
+                                             radius: 0.2, op: CLAY_OP_RELIEF,
+                                             blendK: 0.1,
+                                             color: ClayEngine.clayColor,
+                                             rounding: 0.15))
+            engine.endStroke()
+        }
+        await engine.bakeNow()
+        XCTAssertLessThan(engine.safeStepScale, 1.0,
+                          "stacked reliefs declare extra steepness")
+        XCTAssertGreaterThan(engine.safeStepScale, 0.02, "but stay marchable")
+    }
+
     func testVoxelMagnifyVerb() {
         let engine = ClayEngine()
         XCTAssertTrue(engine.ensureVoxelLayer())

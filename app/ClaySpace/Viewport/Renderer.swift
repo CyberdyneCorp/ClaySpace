@@ -503,7 +503,7 @@ final class Renderer {
             mirrorK: engine.mirrorK,
             selectedIndex: Int32(selectedIndex),
             previewInfo: SIMD4(Float(previewSlot), Float(previewCount),
-                               0.9 * min(max(engine.safeStepScale, 0.5), 1.3),
+                               0.9 * min(max(engine.safeStepScale, 0.12), 1.3),
                                darkMode ? 1 : 0),
             gridOrigin: cacheUsable
                 ? SIMD4(cache!.origin.x, cache!.origin.y, cache!.origin.z, 1)

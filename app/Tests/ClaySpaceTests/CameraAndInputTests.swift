@@ -769,6 +769,66 @@ final class CameraAndInputTests: XCTestCase {
         XCTAssertGreaterThan(close, 0.003, "but never below the floor")
     }
 
+    func testReproSculptAfterRepeatedMoveDrags() {
+        let state = ViewportState()
+        state.viewportSize = CGSize(width: 800, height: 600)
+        state.activate(.sculpt, announce: false)
+
+        func moveDrag(fromX: CGFloat, toX: CGFloat) {
+            state.sculptBrush = .move
+            state.pencilBegan(at: CGPoint(x: fromX, y: 300), pressure: 0.6)
+            var x = fromX + 10
+            let step: CGFloat = toX > fromX ? 10 : -10
+            while (step > 0 && x <= toX) || (step < 0 && x >= toX) {
+                state.pencilMoved(to: CGPoint(x: x, y: 300), pressure: 0.6)
+                x += step
+            }
+            state.pencilEnded(at: CGPoint(x: toX, y: 300))
+        }
+        moveDrag(fromX: 400, toX: 480)
+        moveDrag(fromX: 380, toX: 300)
+
+        state.sculptBrush = .standard
+        let before = state.engine.items.count
+        state.pencilBegan(at: CGPoint(x: 400, y: 300), pressure: 0.5)
+        state.pencilEnded(at: CGPoint(x: 400, y: 300))
+        XCTAssertGreaterThan(state.engine.items.count, before,
+                             "sculpting survives repeated Move drags")
+        XCTAssertNotNil(state.engine.raycast(origin: SIMD3(0, 0.8, 3),
+                                             direction: SIMD3(0, 0, -1)),
+                        "the surface still raycasts after the warps")
+    }
+
+    func testMoveBrushPreviewsLiveAndStaysOneUndoStep() {
+        let state = ViewportState()
+        state.viewportSize = CGSize(width: 800, height: 600)
+        state.activate(.sculpt, announce: false)
+        state.sculptBrush = .move
+        let probe = { () -> Float in
+            state.engine.raycast(origin: SIMD3(0.25, 0.8, 3),
+                                 direction: SIMD3(0, 0, -1))?.position.z ?? 0
+        }
+        let original = probe()
+
+        state.pencilBegan(at: CGPoint(x: 400, y: 300), pressure: 0.6)
+        for x in stride(from: 410, through: 490, by: 10) {
+            state.pencilMoved(to: CGPoint(x: CGFloat(x), y: 300), pressure: 0.6)
+        }
+        // LIVE: the document already shows the drag BEFORE pencil-up.
+        XCTAssertGreaterThan(probe(), original + 0.01,
+                             "the surface follows the drag mid-gesture")
+        state.pencilEnded(at: CGPoint(x: 490, y: 300))
+        let final = probe()
+        XCTAssertGreaterThan(final, original + 0.01)
+
+        // The whole gesture is ONE undo step, not one per live update.
+        state.requestUndo()
+        XCTAssertEqual(probe(), original, accuracy: 0.02,
+                       "single undo restores the pre-drag surface")
+        state.sculptBrush = .standard
+    }
+
+
     // MARK: Top-bar brush dials (size / strength)
 
     func testBrushSizeDialScalesEveryStroke() {

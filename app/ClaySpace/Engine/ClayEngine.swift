@@ -934,6 +934,85 @@ final class ClayEngine {
         return applied
     }
 
+    private var moveSession: (items: [SceneItem],
+                              aabbs: [(min: SIMD3<Float>, max: SIMD3<Float>)],
+                              bounds: [(center: SIMD3<Float>, radius: Float)],
+                              maxReach: Float,
+                              applied: Bool)?
+
+    /// Live Move drag: each update UNDOES the previous provisional warp
+    /// (clay one-step undo + mirror-bounds snapshot restore) and applies
+    /// the current total displacement, baking only the touched region —
+    /// so the drag previews live and still lands as ONE undo step.
+    func beginMoveSurfaceSession() {
+        guard moveSession == nil, activeStroke == nil, transformIndex == nil,
+              paramSessionIndex == nil else { return }
+        moveSession = (items, itemAABBs, localBounds, 0, false)
+    }
+
+    @discardableResult
+    func updateMoveSurfaceSession(center: SIMD3<Float>,
+                                  displacement: SIMD3<Float>,
+                                  radius: Float) -> Int {
+        guard let doc, moveSession != nil, radius > 0 else { return 0 }
+        if moveSession!.applied {
+            var undone: Int32 = 0
+            _ = clay_document_undo(doc, &undone)
+            if case .warp = undoLog.last { undoLog.removeLast() }
+            items = moveSession!.items
+            itemAABBs = moveSession!.aabbs
+            localBounds = moveSession!.bounds
+            moveSession!.applied = false
+        }
+        let drag = simd_length(displacement)
+        moveSession!.maxReach = max(moveSession!.maxReach, radius + drag + 0.1)
+        let reach = moveSession!.maxReach
+        let region = (min: center - SIMD3(repeating: reach),
+                      max: center + SIMD3(repeating: reach))
+        guard drag > 1e-4 else {
+            commit()
+            scheduleBakeDirty(region)
+            return 0
+        }
+        var params = clay_move_params()
+        params.struct_size = UInt32(MemoryLayout<clay_move_params>.size)
+        params.radius = radius
+        params.ease = CLAY_EASE_LINEAR
+        params.front_only = 1
+        var applied = 0
+        guard check(clay_layer_move_surface(doc, layer,
+                                            [center.x, center.y, center.z],
+                                            [displacement.x, displacement.y, displacement.z],
+                                            &params, &applied)), applied > 0 else {
+            commit()
+            scheduleBakeDirty(region)
+            return 0
+        }
+        padBounds(around: center, reach: radius + drag, by: drag)
+        undoLog.append(.warp)
+        redoOps.removeAll()
+        moveSession!.applied = true
+        commit()
+        scheduleBakeDirty(region)
+        return applied
+    }
+
+    /// Clay-side undo/redo depths (tests + diagnostics).
+    var clayUndoDepths: (undo: Int, redo: Int) {
+        guard let doc else { return (0, 0) }
+        var u = 0, r = 0
+        _ = clay_document_undo_state(doc, nil, &u, &r)
+        return (u, r)
+    }
+
+    /// Closes the session; the last applied warp (if any) stays as the
+    /// gesture's single undo step.
+    func endMoveSurfaceSession() {
+        guard let session = moveSession else { return }
+        moveSession = nil
+        if session.applied { scheduleAutosave() }
+    }
+
     /// Magnify (strength > 0) / pinch (strength < 0) about a world point:
     /// a CLAY_DEFORM_MAGNIFY warp on every item the region reaches, mapped
     /// into each item's LOCAL frame. Grouped: one undo step.
