@@ -274,6 +274,54 @@ final class ClayEngineTests: XCTestCase {
         XCTAssertEqual(topAt(SIMD3(1.5, 0, 0)), primaryBefore, accuracy: 0.02)
     }
 
+    func testMaskFreezesSculptStrokesAndWarps() {
+        // The ABI contract: SDF edits consume the mask when a stroke
+        // becomes items. A frozen crown must shrug off every brush family.
+        let engine = ClayEngine()
+        // Freeze a generous cap over the seed ball's crown.
+        for dx in stride(from: Float(-0.4), through: 0.4, by: 0.1) {
+            for dz in stride(from: Float(-0.4), through: 0.4, by: 0.1) {
+                _ = engine.maskPaint(at: SIMD3(dx, 1.55, dz), radius: 0.3,
+                                     erase: false, voxelContext: false)
+            }
+        }
+        XCTAssertLessThan(engine.maskWeight(at: SIMD3(0, 1.55, 0)), 0.05,
+                          "the crown is frozen")
+        let top = { engine.raycast(origin: SIMD3(0, 3, 0),
+                                   direction: SIMD3(0, -1, 0))?.position.y ?? -9 }
+        let before = top()
+
+        // A relief stroke ON the frozen crown refuses to start.
+        XCTAssertFalse(engine.beginStroke(at: SIMD3(0, 1.58, 0), radius: 0.2,
+                                          op: CLAY_OP_RELIEF, blendK: 0.1,
+                                          color: ClayEngine.clayColor, rounding: 0.15))
+        // Warps at the frozen crown do nothing.
+        XCTAssertEqual(engine.magnifySurface(center: SIMD3(0, 1.55, 0),
+                                             radius: 0.4, strength: 0.5), 0)
+        XCTAssertFalse(engine.polishSurface(center: SIMD3(0, before, 0),
+                                            normal: SIMD3(0, 1, 0), radius: 0.4,
+                                            strength: 1,
+                                            mode: CLAY_FLATTEN_CUT_ONLY))
+        XCTAssertFalse(engine.moveTopologicalSurface(anchor: SIMD3(0, before, 0),
+                                                     displacement: SIMD3(0, 0.3, 0),
+                                                     radius: 0.4))
+        engine.beginMoveSurfaceSession()
+        _ = engine.updateMoveSurfaceSession(center: SIMD3(0, 1.55, 0),
+                                            displacement: SIMD3(0, 0.4, 0),
+                                            radius: 0.5)
+        engine.endMoveSurfaceSession()
+        XCTAssertEqual(top(), before, accuracy: 0.01, "the crown never moved")
+
+        // An UNMASKED flank still sculpts normally.
+        XCTAssertTrue(engine.beginStroke(at: SIMD3(0, 0.8, 0.8), radius: 0.2,
+                                         op: CLAY_OP_RELIEF, blendK: 0.1,
+                                         color: ClayEngine.clayColor, rounding: 0.15))
+        engine.endStroke()
+        let front = engine.raycast(origin: SIMD3(0, 0.8, 3),
+                                   direction: SIMD3(0, 0, -1))?.position.z ?? -9
+        XCTAssertGreaterThan(front, 0.82, "unmasked clay still takes the stroke")
+    }
+
     func testTubeToolResolvesAPathIntoARope() {
         let engine = ClayEngine()
         let before = engine.items.count

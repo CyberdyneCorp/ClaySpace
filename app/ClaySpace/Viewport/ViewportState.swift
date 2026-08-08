@@ -1408,7 +1408,8 @@ extension ViewportState: PencilToolSink {
                     let amplitude = warpRadius * 0.1 * (0.3 + 1.4 * brushStrength)
                     if engine.noiseSurface(index: picked.index,
                                            amplitude: amplitude,
-                                           frequency: 3 / max(warpRadius, 0.05)) {
+                                           frequency: 3 / max(warpRadius, 0.05),
+                                           at: picked.position) {
                         emitHaptic(.completed, at: point)
                     }
                 }

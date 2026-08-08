@@ -817,6 +817,9 @@ final class ClayEngine {
                      rounding: Float = 0) -> Bool {
         guard let doc, activeStroke == nil,
               strokePoints.count < Self.maxStrokePoints else { return false }
+        let gate = maskWeight(at: position)
+        guard gate > 0.05 else { return false } // frozen where it starts
+        let radius = radius * gate
 
         _ = check(clay_document_begin_undo_group(doc))
         guard let item = clay_item_create(Self.strokePrim, nil, 0) else {
@@ -880,6 +883,7 @@ final class ClayEngine {
         guard let doc, let node = activeStroke,
               strokePoints.count < Self.maxStrokePoints,
               Int(items[items.count - 1].params.y) < Self.maxPointsPerStroke else { return }
+        let radius = max(radius * maskWeight(at: position), 0.006)
 
         let point: [Float] = [position.x, position.y, position.z, radius]
         guard check(clay_layer_append_stroke(doc, layer, node, point, 1)) else { return }
@@ -1002,6 +1006,7 @@ final class ClayEngine {
             localBounds = moveSession!.bounds
             moveSession!.applied = false
         }
+        let displacement = displacement * maskWeight(at: center)
         let drag = simd_length(displacement)
         moveSession!.maxReach = max(moveSession!.maxReach, radius + drag + 0.1)
         let reach = moveSession!.maxReach
@@ -1168,6 +1173,10 @@ final class ClayEngine {
     func addTube(points: [SIMD4<Float>], color: SIMD3<Float>) -> Bool {
         guard let doc, points.count >= 2, activeStroke == nil,
               items.count < Renderer.maxItems else { return false }
+        let points = points.map { p -> SIMD4<Float> in
+            SIMD4(p.x, p.y, p.z, p.w * maskWeight(at: SIMD3(p.x, p.y, p.z)))
+        }
+        guard points.contains(where: { $0.w > 0.01 }) else { return false }
         var params = clay_tube_params()
         params.struct_size = UInt32(MemoryLayout<clay_tube_params>.size)
         params.point_type = Int32(CLAY_POINT_SPLINE.rawValue)
@@ -1329,6 +1338,8 @@ final class ClayEngine {
     func polishSurface(center: SIMD3<Float>, normal: SIMD3<Float>, radius: Float,
                        strength: Float, mode: clay_flatten_mode) -> Bool {
         guard radius > 0, strength > 0, simd_length(normal) > 1e-4 else { return false }
+        let strength = strength * maskWeight(at: center)
+        guard strength > 1e-3 else { return false } // frozen
         let n = simd_normalize(normal)
         let pad = radius * 1.6 + 0.05
         let box = (min: center - SIMD3(repeating: pad),
@@ -1354,6 +1365,7 @@ final class ClayEngine {
     @discardableResult
     func moveTopologicalSurface(anchor: SIMD3<Float>, displacement: SIMD3<Float>,
                                 radius: Float) -> Bool {
+        let displacement = displacement * maskWeight(at: anchor)
         guard radius > 0, simd_length(displacement) > 1e-4 else { return false }
         let drag = simd_length(displacement)
         let pad = radius + drag + 0.1
@@ -1381,6 +1393,8 @@ final class ClayEngine {
         guard let doc, activeStroke == nil, transformIndex == nil,
               paramSessionIndex == nil, radius > 0, abs(strength) > 1e-4
         else { return 0 }
+        let strength = strength * maskWeight(at: center)
+        guard abs(strength) > 1e-3 else { return 0 } // frozen
         _ = check(clay_document_begin_undo_group(doc))
         var applied = 0
         for index in items.indices where itemLayers[index] == Int32(activeLayerSlot) {
@@ -1417,10 +1431,12 @@ final class ClayEngine {
     /// (CLAY_DEFORM_NOISE: amplitude, frequency, octaves, gain, seed).
     @discardableResult
     func noiseSurface(index: Int, amplitude: Float, frequency: Float,
-                      seed: Float = 7) -> Bool {
+                      seed: Float = 7, at anchor: SIMD3<Float>? = nil) -> Bool {
         guard let doc, items.indices.contains(index), activeStroke == nil,
               transformIndex == nil, paramSessionIndex == nil,
               amplitude > 0, frequency > 0 else { return false }
+        let amplitude = amplitude * maskWeight(at: anchor ?? items[index].boundCenter)
+        guard amplitude > 1e-4 else { return false } // frozen
         let scale = items[index].scale == 0 ? 1 : items[index].scale
         let deformParams: [Float] = [amplitude / scale, frequency * scale,
                                      4, 0.5, seed]
@@ -2814,6 +2830,18 @@ final class ClayEngine {
     }
 
     /// A non-empty mask for brush gating, or nil (empty masks gate nothing).
+    /// The edit weight the layer mask leaves at a world point: 1 - mask,
+    /// so 1 where unmasked and 0 where frozen. SDF edits are declarative
+    /// items — the ABI's contract is that they consume the mask when a
+    /// stroke becomes items, which is here.
+    func maskWeight(at p: SIMD3<Float>) -> Float {
+        guard let handle = gatingMask(voxelContext: false) else { return 1 }
+        var value: Float = 0
+        guard clay_mask_sample(handle, [p.x, p.y, p.z], &value) == CLAY_OK
+        else { return 1 }
+        return max(0, 1 - value)
+    }
+
     private func gatingMask(voxelContext: Bool) -> OpaquePointer? {
         guard let handle = contextMask(voxelContext: voxelContext, create: false)
         else { return nil }
