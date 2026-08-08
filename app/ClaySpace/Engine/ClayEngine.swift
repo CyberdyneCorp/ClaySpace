@@ -1332,6 +1332,103 @@ final class ClayEngine {
         endTubeEdit(index: index)
     }
 
+    /// A tube needs two points to be a tube; the ceiling keeps a runaway
+    /// subdivide from turning every handle drag into a full re-bake.
+    static let tubePointRange = 2...128
+    /// Per-point radius limits: below the cell size a segment stops
+    /// depositing, above 0.6 the rope swallows the model it grew from.
+    static let tubeRadiusRange: ClosedRange<Float> = 0.02...0.6
+
+    /// Catmull-Rom sample in index space, radius included, so a resample
+    /// rides the same curve ClayCore sweeps and carries the taper with it.
+    /// The spline overshoots on tight corners — the radius is clamped back
+    /// into the bracketing pair rather than allowed to bulge or go
+    /// negative between two thin points.
+    static func sampleTube(_ path: [SIMD4<Float>], at t: Float) -> SIMD4<Float> {
+        let clamped = max(0, min(t, Float(path.count - 1)))
+        let i = min(Int(clamped), path.count - 2)
+        let f = clamped - Float(i)
+        let p0 = path[max(i - 1, 0)]
+        let p1 = path[i]
+        let p2 = path[i + 1]
+        let p3 = path[min(i + 2, path.count - 1)]
+        // Spelled out term by term: the one-liner form is past what the
+        // type checker will solve for SIMD4 in reasonable time.
+        let f2: Float = f * f
+        let f3: Float = f2 * f
+        let t0: SIMD4<Float> = p1 * 2
+        let t1: SIMD4<Float> = (p2 - p0) * f
+        let quad: SIMD4<Float> = p0 * 2 - p1 * 5 + p2 * 4 - p3
+        let cubic: SIMD4<Float> = p1 * 3 - p0 - p2 * 3 + p3
+        let sample: SIMD4<Float> = (t0 + t1 + quad * f2 + cubic * f3) * 0.5
+        let lo = min(p1.w, p2.w), hi = max(p1.w, p2.w)
+        return SIMD4(sample.x, sample.y, sample.z,
+                     max(tubeRadiusRange.lowerBound, min(max(sample.w, lo), hi)))
+    }
+
+    /// One panel action = one clay step, same grouping the drag uses.
+    private func editTube(index: Int,
+                          _ transform: ([SIMD4<Float>]) -> [SIMD4<Float>]) -> Bool {
+        guard let path = tubePath(at: index) else { return false }
+        beginTubeEdit(index: index)
+        guard tubeEditSnapshot != nil else { return false } // busy: leave it alone
+        let ok = updateTubeEdit(index: index, points: transform(path))
+        endTubeEdit(index: index)
+        return ok
+    }
+
+    /// Resample the whole path to `count` points along its own spline:
+    /// the curve and its taper survive, only the handle density changes.
+    @discardableResult
+    func resampleTube(index: Int, to count: Int) -> Bool {
+        guard let path = tubePath(at: index), path.count >= 2 else { return false }
+        let n = min(max(count, Self.tubePointRange.lowerBound),
+                    Self.tubePointRange.upperBound)
+        guard n != path.count else { return false }
+        let step = Float(path.count - 1) / Float(n - 1)
+        let points = (0..<n).map { Self.sampleTube(path, at: Float($0) * step) }
+        return editTube(index: index) { _ in points }
+    }
+
+    /// Insert a control point on the curve beside `pointIndex` — after it,
+    /// or before it at the tail, so the tube never grows past its own end.
+    /// Returns where the new point landed.
+    func insertTubePoint(index: Int, near pointIndex: Int) -> Int? {
+        guard let path = tubePath(at: index), path.indices.contains(pointIndex),
+              path.count < Self.tubePointRange.upperBound else { return nil }
+        let forward = pointIndex + 1 < path.count
+        let sample = Self.sampleTube(path, at: Float(pointIndex) + (forward ? 0.5 : -0.5))
+        let insertAt = forward ? pointIndex + 1 : pointIndex
+        guard editTube(index: index, { points in
+            var points = points
+            points.insert(sample, at: insertAt)
+            return points
+        }) else { return nil }
+        return insertAt
+    }
+
+    @discardableResult
+    func removeTubePoint(index: Int, at pointIndex: Int) -> Bool {
+        guard let path = tubePath(at: index), path.indices.contains(pointIndex),
+              path.count > Self.tubePointRange.lowerBound else { return false }
+        return editTube(index: index) { points in
+            var points = points
+            points.remove(at: pointIndex)
+            return points
+        }
+    }
+
+    /// Retune one point's radius INSIDE a caller-held session, so a whole
+    /// slider drag previews live and still undoes as one step.
+    @discardableResult
+    func setTubePointRadius(index: Int, at pointIndex: Int, radius: Float) -> Bool {
+        guard tubeEditSnapshot != nil, var path = tubePath(at: index),
+              path.indices.contains(pointIndex) else { return false }
+        path[pointIndex].w = min(max(radius, Self.tubeRadiusRange.lowerBound),
+                                 Self.tubeRadiusRange.upperBound)
+        return updateTubeEdit(index: index, points: path)
+    }
+
     /// Regional volume swap — the interactive path to ClayCore's
     /// volume-only verbs: sample the document's own field around the brush
     /// (clay_item_volume_from_document), transform THAT item with the

@@ -1005,6 +1005,61 @@ final class CameraAndInputTests: XCTestCase {
                        pointBefore.y, accuracy: 0.02)
     }
 
+    func testTubePanelEditsPointCountAndPointRadius() {
+        let state = ViewportState()
+        state.viewportSize = CGSize(width: 800, height: 600)
+        state.activate(.sculpt, announce: false)
+        state.sculptBrush = .tube
+        state.pencilBegan(at: CGPoint(x: 320, y: 300), pressure: 0.5)
+        for x in stride(from: 330, through: 500, by: 12) {
+            state.pencilMoved(to: CGPoint(x: CGFloat(x), y: 300), pressure: 0.5)
+        }
+        state.pencilEnded(at: CGPoint(x: 500, y: 300))
+        let tubeIndex = state.engine.items.count - 1
+
+        // Selecting the row in the edit list opens the path, same as a tap.
+        state.selectedIndex = tubeIndex
+        XCTAssertEqual(state.tubeEditIndex, tubeIndex)
+        XCTAssertNil(state.tubeHandles, "handles stay hidden under a sculpt brush")
+        state.activate(.move, announce: false)
+        XCTAssertNotNil(state.tubeHandles)
+
+        guard let count = state.tubePointCount, count > 3 else {
+            return XCTFail("a drawn tube has a path")
+        }
+        state.tubeSelectedPoint = 2
+
+        // Add beside the selection, and the selection follows the new point
+        // so a run of taps keeps subdividing the same stretch.
+        state.addTubePoint()
+        XCTAssertEqual(state.tubePointCount, count + 1)
+        XCTAssertEqual(state.tubeSelectedPoint, 3)
+        state.removeTubePoint()
+        XCTAssertEqual(state.tubePointCount, count)
+        XCTAssertEqual(state.tubeSelectedPoint, 3)
+
+        // A resample carries the selection proportionally, never past the end.
+        state.resampleTube(to: 5)
+        XCTAssertEqual(state.tubePointCount, 5)
+        XCTAssertNotNil(state.tubeSelectedPoint)
+        XCTAssertLessThan(state.tubeSelectedPoint ?? 99, 5)
+
+        // Radius drag: live updates, one undo step.
+        let before = state.tubeSelectedRadius ?? 0
+        state.beginTubeRadiusEdit()
+        state.updateTubeRadius(0.3)
+        state.updateTubeRadius(0.42)
+        state.endTubeRadiusEdit()
+        XCTAssertEqual(state.tubeSelectedRadius ?? 0, 0.42, accuracy: 0.001)
+        state.requestUndo()
+        XCTAssertEqual(state.tubeSelectedRadius ?? 0, before, accuracy: 0.001)
+
+        // Selecting something else closes the path.
+        state.selectedIndex = nil
+        XCTAssertNil(state.tubeEditIndex)
+        XCTAssertNil(state.tubeSelectedPoint)
+    }
+
     // MARK: Top-bar brush dials (size / strength)
 
     func testBrushSizeDialScalesEveryStroke() {

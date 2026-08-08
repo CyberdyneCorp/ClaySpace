@@ -52,7 +52,17 @@ final class ViewportState {
     }
 
     /// Selected item's mirror index (Select/Move tools); nil = none.
-    var selectedIndex: Int?
+    /// Selecting a tube — by tapping it OR by tapping its row in the edit
+    /// list — opens its path for editing; any other selection closes it.
+    var selectedIndex: Int? {
+        didSet {
+            guard selectedIndex != oldValue else { return }
+            tubeEditIndex = selectedIndex.flatMap {
+                engine.tubePath(at: $0) != nil ? $0 : nil
+            }
+            tubeSelectedPoint = nil
+        }
+    }
 
     // MARK: Color (materials-color spec)
 
@@ -361,14 +371,18 @@ final class ViewportState {
 
     /// Tube editing: selecting a placed tube (Move tool) shows its control
     /// points; dragging one reshapes the curve, tapping one selects it so
-    /// the Size dial retunes that point's radius.
+    /// the edit panel (and the Size dial) retunes that point's radius.
     var tubeEditIndex: Int?
     var tubeSelectedPoint: Int?
     @ObservationIgnored fileprivate var tubePointDrag: Int?
     @ObservationIgnored fileprivate var tubeDragMoved = false
 
+    /// Handles are drawn only where they can be grabbed — the pencil-down
+    /// path claims them for Move/Select alone, so showing them under a
+    /// sculpt brush would promise a drag that sculpts instead.
     var tubeHandles: [(index: Int, point: CGPoint)]? {
-        guard let editIndex = tubeEditIndex,
+        guard activeTool == .move || activeTool == .select,
+              let editIndex = tubeEditIndex,
               let path = engine.tubePath(at: editIndex) else { return nil }
         var handles: [(index: Int, point: CGPoint)] = []
         for (i, p) in path.enumerated() {
@@ -377,6 +391,73 @@ final class ViewportState {
             }
         }
         return handles.isEmpty ? nil : handles
+    }
+
+    /// Path length of the tube being edited — the edit panel's readout.
+    var tubePointCount: Int? {
+        tubeEditIndex.flatMap { engine.tubePath(at: $0)?.count }
+    }
+
+    /// Radius of the selected control point, for the panel's slider.
+    var tubeSelectedRadius: Float? {
+        guard let editIndex = tubeEditIndex, let point = tubeSelectedPoint,
+              let path = engine.tubePath(at: editIndex),
+              path.indices.contains(point) else { return nil }
+        return path[point].w
+    }
+
+    // MARK: Tube edits from the panel
+    //
+    // Each one is a single undo step in the engine; the job here is to keep
+    // the selected point pointing at the same place on the curve after the
+    // path underneath it changes length.
+
+    /// Resample the whole path; the selection rides along proportionally.
+    func resampleTube(to count: Int) {
+        guard let editIndex = tubeEditIndex,
+              let before = engine.tubePath(at: editIndex)?.count,
+              engine.resampleTube(index: editIndex, to: count),
+              let after = engine.tubePath(at: editIndex)?.count else { return }
+        if let point = tubeSelectedPoint, before > 1 {
+            let ratio = Float(point) / Float(before - 1) * Float(after - 1)
+            tubeSelectedPoint = min(after - 1, max(0, Int(ratio.rounded())))
+        }
+        showToast("Tube · \(after) points")
+    }
+
+    /// Add a point beside the selected one and move the selection to it,
+    /// so a run of taps keeps subdividing the same stretch of curve.
+    func addTubePoint() {
+        guard let editIndex = tubeEditIndex, let point = tubeSelectedPoint,
+              let inserted = engine.insertTubePoint(index: editIndex, near: point)
+        else { return }
+        tubeSelectedPoint = inserted
+        showToast("Point added")
+    }
+
+    /// Drop the selected point; the neighbour it leaves behind takes over
+    /// the selection so repeated taps thin out one region.
+    func removeTubePoint() {
+        guard let editIndex = tubeEditIndex, let point = tubeSelectedPoint,
+              engine.removeTubePoint(index: editIndex, at: point) else { return }
+        let count = engine.tubePath(at: editIndex)?.count ?? 0
+        tubeSelectedPoint = count > 0 ? min(point, count - 1) : nil
+        showToast("Point removed")
+    }
+
+    /// Radius slider: the whole drag is one engine session, so it previews
+    /// live and unwinds in a single undo.
+    func beginTubeRadiusEdit() {
+        if let editIndex = tubeEditIndex { engine.beginTubeEdit(index: editIndex) }
+    }
+
+    func updateTubeRadius(_ radius: Float) {
+        guard let editIndex = tubeEditIndex, let point = tubeSelectedPoint else { return }
+        _ = engine.setTubePointRadius(index: editIndex, at: point, radius: radius)
+    }
+
+    func endTubeRadiusEdit() {
+        if let editIndex = tubeEditIndex { engine.endTubeEdit(index: editIndex) }
     }
 
     /// The brush FOOTPRINT (radius + relief rounding) must clear the
@@ -984,21 +1065,16 @@ extension ViewportState: PencilToolSink {
             }
             if let picked = engine.pick(origin: ray.origin, direction: ray.direction) {
                 if selectedIndex != picked.index {
-                    selectedIndex = picked.index
+                    selectedIndex = picked.index // opens a tube's path
                     showToast("Selected shape \(picked.index)")
                 }
-                tubeEditIndex = engine.tubePath(at: picked.index) != nil
-                    ? picked.index : nil
-                if tubeEditIndex == nil { tubeSelectedPoint = nil }
                 if engine.beginTransform(index: picked.index) {
                     dragStartItemPosition = engine.items[picked.index].position
                     dragStartHit = picked.position
                     strokePlane = (picked.position, camera.basis.forward)
                 }
             } else if selectedIndex != nil {
-                selectedIndex = nil
-                tubeEditIndex = nil
-                tubeSelectedPoint = nil
+                selectedIndex = nil // closes any open tube path
                 showToast("Deselected")
             }
             return

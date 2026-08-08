@@ -31,6 +31,21 @@ Dragging the Pencil in SDF mode with the Sculpt (or Erase) tool SHALL create a s
 - **WHEN** the user completes a stroke and invokes undo
 - **THEN** the entire stroke SHALL be removed as a single step
 
+### Requirement: Tube path editing
+Selecting a placed tube SHALL open its path for editing: its control points SHALL be shown as viewport handles wherever they can be grabbed, and the edit panel SHALL expose the path's point count and the selected point's radius. The user SHALL be able to resample the whole path to a higher or lower point count, insert or remove a single point beside the selected one, and retune that point's radius. A path SHALL keep at least two points. Every such edit SHALL preview live and commit as a single undo step.
+
+#### Scenario: Resampling preserves the rope
+- **WHEN** the user halves (or doubles) the point count of a placed tube
+- **THEN** the handle density SHALL change while the swept surface and its taper stay in place, and the selected point SHALL remain on the same stretch of curve
+
+#### Scenario: Point added beside the selection
+- **WHEN** the user adds a point with the third of eight control points selected
+- **THEN** a new point SHALL appear on the curve between the third and fourth, the selection SHALL move to it, and the tube's ends SHALL be unchanged
+
+#### Scenario: Per-point radius
+- **WHEN** the user selects a control point and drags the radius slider
+- **THEN** only that point's radius SHALL change — tapering the tube there — and the whole drag SHALL undo in one step
+
 ### Requirement: Mirror symmetry with blended seam
 SDF layers SHALL support non-destructive mirror symmetry on any combination of the X, Y, and Z planes. Mirroring SHALL apply to primitives and strokes alike. A Mirror Blend control SHALL smooth the seam where mirrored geometry meets, with radius values allowed to exceed the standard blend range.
 

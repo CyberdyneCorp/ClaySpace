@@ -311,6 +311,78 @@ final class ClayEngineTests: XCTestCase {
         XCTAssertEqual(mid(), before + 0.5, accuracy: 0.05)
     }
 
+    func testTubePointCountIsEditableAndKeepsTheRope() {
+        let engine = ClayEngine()
+        var path: [SIMD4<Float>] = []
+        for i in 0...6 { path.append(SIMD4(-0.9 + Float(i) * 0.3, 2.2, 0, 0.15)) }
+        XCTAssertTrue(engine.addTube(points: path, color: ClayEngine.clayColor))
+        let index = engine.items.count - 1
+        let mid = { engine.raycast(origin: SIMD3(0, 4, 0),
+                                   direction: SIMD3(0, -1, 0))?.position.y ?? -9 }
+        let surface = mid()
+
+        // Resampling changes the handle density, NOT the rope: the points
+        // are lifted off the same spline ClayCore sweeps.
+        XCTAssertTrue(engine.resampleTube(index: index, to: 4))
+        XCTAssertEqual(engine.tubePath(at: index)?.count, 4)
+        XCTAssertEqual(mid(), surface, accuracy: 0.05, "fewer points, same surface")
+        XCTAssertTrue(engine.resampleTube(index: index, to: 13))
+        XCTAssertEqual(engine.tubePath(at: index)?.count, 13)
+        XCTAssertEqual(mid(), surface, accuracy: 0.05, "more points, same surface")
+
+        // Insert lands after the point; the removal puts it back.
+        XCTAssertEqual(engine.insertTubePoint(index: index, near: 5), 6)
+        XCTAssertEqual(engine.tubePath(at: index)?.count, 14)
+        XCTAssertTrue(engine.removeTubePoint(index: index, at: 6))
+        XCTAssertEqual(engine.tubePath(at: index)?.count, 13)
+        XCTAssertEqual(mid(), surface, accuracy: 0.05)
+
+        // At the tail it inserts BEFORE the end, so the tube cannot grow
+        // past its own tip.
+        let tail = (engine.tubePath(at: index)?.count ?? 1) - 1
+        let tipX = engine.tubePath(at: index)?[tail].x ?? 0
+        XCTAssertEqual(engine.insertTubePoint(index: index, near: tail), tail)
+        XCTAssertEqual(engine.tubePath(at: index)?.last?.x ?? 0, tipX, accuracy: 0.001,
+                       "the end point is still the end point")
+
+        // Every action above is exactly one undo step (5 of them).
+        for _ in 0..<5 { XCTAssertTrue(engine.undo()) }
+        XCTAssertEqual(engine.tubePath(at: index)?.count, path.count,
+                       "the original path is back after one undo per action")
+
+        // A tube needs two points; the floor holds.
+        XCTAssertTrue(engine.resampleTube(index: index, to: 2))
+        XCTAssertFalse(engine.removeTubePoint(index: index, at: 0),
+                       "removing the second-to-last point is refused")
+    }
+
+    func testTubePointRadiusIsRetunedInsideASession() {
+        let engine = ClayEngine()
+        var path: [SIMD4<Float>] = []
+        for i in 0...6 { path.append(SIMD4(-0.9 + Float(i) * 0.3, 2.2, 0, 0.15)) }
+        XCTAssertTrue(engine.addTube(points: path, color: ClayEngine.clayColor))
+        let index = engine.items.count - 1
+
+        // The panel slider owns the session: a whole drag is one step.
+        engine.beginTubeEdit(index: index)
+        XCTAssertTrue(engine.setTubePointRadius(index: index, at: 3, radius: 0.25))
+        XCTAssertTrue(engine.setTubePointRadius(index: index, at: 3, radius: 0.35))
+        engine.endTubeEdit(index: index)
+        XCTAssertEqual(engine.tubePath(at: index)?[3].w ?? 0, 0.35, accuracy: 0.001)
+        XCTAssertTrue(engine.undo())
+        XCTAssertEqual(engine.tubePath(at: index)?[3].w ?? 0, 0.15, accuracy: 0.001,
+                       "the whole drag unwound in one step")
+
+        // Out of range values clamp; outside a session it refuses, so a
+        // stray slider callback can never land an ungrouped edit.
+        engine.beginTubeEdit(index: index)
+        XCTAssertTrue(engine.setTubePointRadius(index: index, at: 0, radius: 9))
+        engine.endTubeEdit(index: index)
+        XCTAssertEqual(engine.tubePath(at: index)?[0].w ?? 0,
+                       ClayEngine.tubeRadiusRange.upperBound, accuracy: 0.001)
+        XCTAssertFalse(engine.setTubePointRadius(index: index, at: 0, radius: 0.2))
+    }
+
     func testMaskFreezesSculptStrokesAndWarps() {
         // The ABI contract: SDF edits consume the mask when a stroke
         // becomes items. A frozen crown must shrug off every brush family.

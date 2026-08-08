@@ -13,6 +13,9 @@ struct EditListPanel: View {
     @State private var blendK: Float = 0
     @State private var thickness: Float = 1
     @State private var appliedThickness: Float = 1
+    /// Selected tube point's radius, mirrored from the engine — the
+    /// viewport can move the selection out from under the slider.
+    @State private var pointRadius: Float = 0.15
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -82,6 +85,8 @@ struct EditListPanel: View {
             }
         }
         .onChange(of: state.selectedIndex) { syncFromSelection() }
+        .onChange(of: state.tubeSelectedPoint) { syncTubeRadius() }
+        .onChange(of: pointRadius) { state.updateTubeRadius(pointRadius) }
         .onAppear { syncFromSelection() }
     }
 
@@ -247,6 +252,10 @@ struct EditListPanel: View {
                 }
             }
 
+            if state.tubeEditIndex == index, let points = state.tubePointCount {
+                tubeEditor(count: points)
+            }
+
             HStack {
                 Button {
                     state.frameSelection()
@@ -271,6 +280,84 @@ struct EditListPanel: View {
         .font(.system(size: 12))
     }
 
+    /// Tube path controls: resample the whole path, add/remove a point next
+    /// to the selected handle, and retune that handle's radius. Handles are
+    /// picked in the viewport (Move tool) — this panel edits the one chosen
+    /// there, so everything below the count row waits on a selection.
+    @ViewBuilder
+    private func tubeEditor(count: Int) -> some View {
+        let range = ClayEngine.tubePointRange
+        Divider()
+        HStack(spacing: 6) {
+            Image(systemName: "scribble.variable")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+            Text("Tube · \(count) pts")
+            Spacer()
+            stepper(symbol: "minus", id: "tubePointsMinus",
+                    enabled: count > range.lowerBound) {
+                state.resampleTube(to: (count + 1) / 2)
+                syncTubeRadius()
+            }
+            stepper(symbol: "plus", id: "tubePointsPlus",
+                    enabled: count < range.upperBound) {
+                state.resampleTube(to: min(count * 2 - 1, range.upperBound))
+                syncTubeRadius()
+            }
+        }
+
+        if let point = state.tubeSelectedPoint, point < count {
+            HStack(spacing: 6) {
+                Text("Point \(point + 1)")
+                    .foregroundStyle(.secondary)
+                Spacer()
+                stepper(symbol: "minus.circle", id: "tubePointRemove",
+                        enabled: count > range.lowerBound) {
+                    state.removeTubePoint()
+                    syncTubeRadius()
+                }
+                stepper(symbol: "plus.circle", id: "tubePointAdd",
+                        enabled: count < range.upperBound) {
+                    state.addTubePoint()
+                    syncTubeRadius()
+                }
+            }
+            HStack(spacing: 6) {
+                Image(systemName: "smallcircle.filled.circle")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                Slider(value: $pointRadius, in: ClayEngine.tubeRadiusRange) { editing in
+                    // The whole drag is one engine session: live preview,
+                    // single undo step.
+                    if editing { state.beginTubeRadiusEdit() }
+                    else { state.endTubeRadiusEdit() }
+                }
+                .tint(.orange)
+                .accessibilityIdentifier("tubePointRadius")
+                .accessibilityLabel("Point radius")
+            }
+        } else {
+            Text("Tap a control point in the viewport to tune it")
+                .font(.system(size: 10))
+                .foregroundStyle(.tertiary)
+        }
+    }
+
+    private func stepper(symbol: String, id: String, enabled: Bool,
+                         action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 12))
+                .frame(width: 26, height: 24)
+                .background(Color.primary.opacity(0.06),
+                            in: RoundedRectangle(cornerRadius: 4))
+        }
+        .buttonStyle(.plain)
+        .disabled(!enabled)
+        .foregroundStyle(enabled ? Color.primary : Color.secondary.opacity(0.4))
+        .accessibilityIdentifier(id)
+    }
+
     private func select(_ index: Int) {
         state.selectedIndex = state.selectedIndex == index ? nil : index
     }
@@ -289,6 +376,14 @@ struct EditListPanel: View {
            state.engine.items.indices.contains(index) {
             blendK = state.engine.items[index].blendK
         }
+        syncTubeRadius()
+    }
+
+    /// Pull the slider back onto the engine's value. Called whenever the
+    /// point changes AND after every path edit — a resample or a removal
+    /// can leave the same index sitting on a different radius.
+    private func syncTubeRadius() {
+        if let radius = state.tubeSelectedRadius { pointRadius = radius }
     }
 
     private func symbol(for item: SceneItem) -> String {
