@@ -33,12 +33,15 @@ run_device() {
 import json, sys
 data = json.load(open(sys.argv[1]))
 for dev in data.get("result", {}).get("devices", []):
-    props = dev.get("deviceProperties", {})
     hw = dev.get("hardwareProperties", {})
     state = dev.get("connectionProperties", {}).get("tunnelState", "")
     if "iPad" in hw.get("deviceType", "") or "iPad" in hw.get("marketingName", ""):
-        if state == "connected":
-            print(dev["identifier"], hw.get("marketingName", "iPad").replace(" ", "_"))
+        # xcodebuild destinations take the hardware UDID; the devicectl
+        # "identifier" is a different CoreDevice id it will not match.
+        # NOTE: no apostrophes in here — the heredoc sits inside a process
+        # substitution and bash gives up looking for the closing paren.
+        if state == "connected" and hw.get("udid"):
+            print(hw["udid"], hw.get("marketingName", "iPad").replace(" ", "_"))
             break
 EOF
 ) || true
