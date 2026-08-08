@@ -331,7 +331,7 @@ final class ViewportState {
     /// After the apply it HOLDS until the next bake lands, so the surface
     /// never snaps back while the CPU catches up.
     var movePreview: (center: SIMD3<Float>, displacement: SIMD3<Float>,
-                      radius: Float)?
+                      radius: Float, sectors: Int)?
     @ObservationIgnored fileprivate var movePreviewHoldVersion: Int?
     @ObservationIgnored fileprivate var warpAnchor: SIMD3<Float>?
     @ObservationIgnored fileprivate var warpRadius: Float = 0
@@ -1021,7 +1021,8 @@ extension ViewportState: PencilToolSink {
                 // cached field): per-frame, zero CPU bake in the loop.
                 let (asked, radius) = ClayEngine.calibratedMove(
                     displacement: p - drag.anchor, radius: drag.radius * 1.2)
-                movePreview = (drag.anchor, asked, radius)
+                movePreview = (drag.anchor, asked, radius,
+                               max(Int(engine.radialCount), 1))
             }
             return
         }
@@ -1686,7 +1687,7 @@ extension ViewportState: PencilToolSink {
     /// The Move preview to render this frame; releases the post-apply
     /// hold once a fresh bake (containing the real warp) has landed.
     var activeMovePreview: (center: SIMD3<Float>, displacement: SIMD3<Float>,
-                            radius: Float)? {
+                            radius: Float, sectors: Int)? {
         if let hold = movePreviewHoldVersion {
             if engine.fieldCacheVersion != hold {
                 movePreviewHoldVersion = nil

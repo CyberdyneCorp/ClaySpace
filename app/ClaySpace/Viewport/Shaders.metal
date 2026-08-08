@@ -462,10 +462,21 @@ static float sampleCache(float3 p, FieldCtx ctx) {
 /// weight read at the SAMPLE point with linear ease — the exact warp
 /// clay_layer_move_surface applies, previewed before it lands.
 static float3 movePreviewWarp(float3 p, FieldCtx ctx) {
-    if (ctx.moveB.w < 0.5) { return p; }
-    float t = length(p - ctx.moveA.xyz) / max(ctx.moveA.w, 1e-4);
-    if (t >= 1.0) { return p; }
-    return p - ctx.moveB.xyz * (1.0 - t);
+    int sectors = int(ctx.moveB.w);
+    if (sectors < 1) { return p; }
+    // Radial: the real apply repeats per sector about world Y; the ring
+    // regions are disjoint, so summing the independent warps matches.
+    for (int k = 0; k < min(sectors, 16); k++) {
+        float angle = float(k) * 2.0 * M_PI_F / float(sectors);
+        float c = cos(angle), sn = sin(angle);
+        float3 rc = float3(c * ctx.moveA.x + sn * ctx.moveA.z, ctx.moveA.y,
+                           -sn * ctx.moveA.x + c * ctx.moveA.z);
+        float3 rd = float3(c * ctx.moveB.x + sn * ctx.moveB.z, ctx.moveB.y,
+                           -sn * ctx.moveB.x + c * ctx.moveB.z);
+        float t = length(p - rc) / max(ctx.moveA.w, 1e-4);
+        if (t < 1.0) { p -= rd * (1.0 - t); }
+    }
+    return p;
 }
 
 static float mapDist(float3 rawP, FieldCtx ctx) {

@@ -327,7 +327,7 @@ final class Renderer {
               darkMode: Bool = false,
               polyframe: Bool = false,
               movePreview: (center: SIMD3<Float>, displacement: SIMD3<Float>,
-                            radius: Float)? = nil) {
+                            radius: Float, sectors: Int)? = nil) {
         let items = engine.items
         let strokePoints = engine.strokePoints
         if engine.version != uploadedVersion {
@@ -549,7 +549,8 @@ final class Renderer {
                 SIMD4($0.center.x, $0.center.y, $0.center.z, $0.radius)
             } ?? .zero,
             movePreviewB: movePreview.map {
-                SIMD4($0.displacement.x, $0.displacement.y, $0.displacement.z, 1)
+                SIMD4($0.displacement.x, $0.displacement.y, $0.displacement.z,
+                      Float(max($0.sectors, 1)))
             } ?? .zero
         )
         prevCamera = (camera.position, basis.right, basis.up, basis.forward,

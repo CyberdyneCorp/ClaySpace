@@ -237,6 +237,43 @@ final class ClayEngineTests: XCTestCase {
                           "five cuts must not degrade cache resolution")
     }
 
+    func testMoveBrushWorksAnchoredOnAnyRadialCopy() {
+        // The warp lands in the item's BASE frame and radial repeat
+        // replicates it — so a copy-anchored drag used to warp empty base
+        // space and do nothing. Sector applies fix it: whichever copy you
+        // grab, the whole ring follows, as one undo step.
+        let engine = ClayEngine()
+        engine.setRadial(count: 6)
+        XCTAssertTrue(engine.beginStroke(at: SIMD3(1.5, 0.8, 0), radius: 0.25,
+                                         op: CLAY_OP_ADD, blendK: 0,
+                                         color: ClayEngine.clayColor))
+        engine.endStroke()
+        let copyAngle = Float.pi / 3
+        let copyPos = SIMD3<Float>(1.5 * cos(copyAngle), 0.8, -1.5 * sin(copyAngle))
+        let topAt = { (p: SIMD3<Float>) -> Float in
+            engine.raycast(origin: SIMD3(p.x, 3, p.z),
+                           direction: SIMD3(0, -1, 0))?.position.y ?? -9
+        }
+        let primaryBefore = topAt(SIMD3(1.5, 0, 0))
+        let copyBefore = topAt(copyPos)
+
+        // Anchor ON A COPY, pull up: the ring follows.
+        engine.beginMoveSurfaceSession()
+        XCTAssertGreaterThan(engine.updateMoveSurfaceSession(
+            center: SIMD3(copyPos.x, copyBefore, copyPos.z),
+            displacement: SIMD3(0, 0.3, 0), radius: 0.35), 0)
+        engine.endMoveSurfaceSession()
+        XCTAssertGreaterThan(topAt(copyPos), copyBefore + 0.15,
+                             "the grabbed copy moved")
+        XCTAssertGreaterThan(topAt(SIMD3(1.5, 0, 0)), primaryBefore + 0.15,
+                             "…and the ring moved with it (radial symmetry)")
+
+        // The whole ring move is ONE undo step.
+        XCTAssertTrue(engine.undo())
+        XCTAssertEqual(topAt(copyPos), copyBefore, accuracy: 0.02)
+        XCTAssertEqual(topAt(SIMD3(1.5, 0, 0)), primaryBefore, accuracy: 0.02)
+    }
+
     func testCacheRaycastFallbackAgreesWithTheDocument() async {
         // The anchor of last resort when clay_raycast times out under
         // stacked warps: marching the baked cache must land on the same

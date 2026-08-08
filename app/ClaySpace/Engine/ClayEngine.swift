@@ -981,8 +981,14 @@ final class ClayEngine {
         let drag = simd_length(displacement)
         moveSession!.maxReach = max(moveSession!.maxReach, radius + drag + 0.1)
         let reach = moveSession!.maxReach
-        let region = (min: center - SIMD3(repeating: reach),
+        var region = (min: center - SIMD3(repeating: reach),
                       max: center + SIMD3(repeating: reach))
+        if radialCount >= 2 {
+            // The sector applies touch the whole ring.
+            let ringRadius = simd_length(SIMD2(center.x, center.z)) + reach
+            region = (min: SIMD3(-ringRadius, region.min.y, -ringRadius),
+                      max: SIMD3(ringRadius, region.max.y, ringRadius))
+        }
         guard drag > 1e-4 else {
             commit()
             bakeDirtyNowForLivePreview(region)
@@ -1002,10 +1008,17 @@ final class ClayEngine {
         params.radius = effectiveRadius
         params.ease = CLAY_EASE_LINEAR
         params.front_only = 1
+        // RADIAL: the warp lands in each item's BASE frame and the repeat
+        // replicates it — so a drag anchored on a COPY would warp empty
+        // base space and do nothing. Rotate the anchor (and displacement)
+        // into the sector holding the BASE geometry and apply ONCE: the
+        // repeat carries the warp to every copy, still one clay step.
+        let (rc, rd) = baseSectorAnchor(center: center, displacement: asked,
+                                        reach: effectiveRadius)
         var applied = 0
         guard check(clay_layer_move_surface(doc, layer,
-                                            [center.x, center.y, center.z],
-                                            [asked.x, asked.y, asked.z],
+                                            [rc.x, rc.y, rc.z],
+                                            [rd.x, rd.y, rd.z],
                                             &params, &applied)), applied > 0 else {
             commit()
             bakeDirtyNowForLivePreview(region)
@@ -1030,6 +1043,51 @@ final class ClayEngine {
         var u = 0, r = 0
         _ = clay_document_undo_state(doc, nil, &u, &r)
         return (u, r)
+    }
+
+    /// With radial repeat armed, a drag may anchor on any COPY — but the
+    /// warp must land where the BASE geometry lives. Pick the sector
+    /// rotation that brings the anchor closest to a reached item's base
+    /// (stroke chain mean, or the item's authored position).
+    private func baseSectorAnchor(center: SIMD3<Float>, displacement: SIMD3<Float>,
+                                  reach: Float)
+        -> (SIMD3<Float>, SIMD3<Float>) {
+        let sectors = Int(radialCount)
+        guard sectors >= 2 else { return (center, displacement) }
+        var bases: [SIMD3<Float>] = []
+        for index in items.indices where itemLayers[index] == Int32(activeLayerSlot) {
+            let aabb = itemAABBs[index]
+            let nearest = simd_clamp(center, aabb.min, aabb.max)
+            guard simd_distance(nearest, center) <= reach + 0.2 else { continue }
+            let item = items[index]
+            if item.prim == Self.strokePrim {
+                let start = Int(item.params.x), count = max(Int(item.params.y), 1)
+                var mean = SIMD3<Float>.zero
+                for i in start..<min(start + count, strokePoints.count) {
+                    mean += SIMD3(strokePoints[i].x, strokePoints[i].y, strokePoints[i].z)
+                }
+                bases.append(mean / Float(count))
+            } else {
+                bases.append(item.position)
+            }
+        }
+        guard !bases.isEmpty else { return (center, displacement) }
+        var best = (center, displacement)
+        var bestDistance = Float.greatestFiniteMagnitude
+        for k in 0..<sectors {
+            let angle = Float(k) * 2 * .pi / Float(sectors)
+            let c = cos(angle), sn = sin(angle)
+            let rc = SIMD3(c * center.x + sn * center.z, center.y,
+                           -sn * center.x + c * center.z)
+            let nearest = bases.map { simd_distance($0, rc) }.min() ?? .greatestFiniteMagnitude
+            if nearest < bestDistance {
+                bestDistance = nearest
+                let rd = SIMD3(c * displacement.x + sn * displacement.z, displacement.y,
+                               -sn * displacement.x + c * displacement.z)
+                best = (rc, rd)
+            }
+        }
+        return best
     }
 
     /// The calibration shared by the final apply AND the shader-side live

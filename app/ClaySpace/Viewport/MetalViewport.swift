@@ -396,7 +396,8 @@ final class MetalViewportView: UIView {
         let polyframe = state.showPolyframe
         let movePreview = state.activeMovePreview
         let moveKey = movePreview.map {
-            SIMD4($0.displacement, $0.radius) + SIMD4($0.center, 1)
+            SIMD4($0.displacement, $0.radius)
+                + SIMD4($0.center, Float(1 + $0.sectors))
         } ?? .zero
         let changed = camera != lastDrawnCamera
             || inputScale != lastDrawnInputScale
