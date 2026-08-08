@@ -541,6 +541,9 @@ final class ClayEngine {
         case rect(halfWidth: Float, halfHeight: Float)
         case circle(radius: Float)
         case lasso(polygonXY: [Float]) // pairs in cut-plane world units
+        /// Open stroke in frame coords (x, y, z=0, r=0 quads) + the frame
+        /// side its closure covers + the closing extent in frame units.
+        case curve(pointsXYZR: [Float], side: Int32, extent: (Float, Float))
     }
 
     /// Public scene bounds for sizing cut frames.
@@ -572,6 +575,27 @@ final class ClayEngine {
 
         var polygon: [Float] = []
         switch shape {
+        case .curve(let pointsXYZR, let side, let extent):
+            // ZBrush Trim Curve: the ENGINE closes the open stroke against
+            // the frame side (clay_cut_polygon_from_open_curve) — joining
+            // the endpoints ourselves would cut a sliver instead.
+            desc.shape = Int32(CLAY_CUT_POLYGON.rawValue)
+            let count = pointsXYZR.count / 4
+            let types = [Int32](repeating: Int32(CLAY_POINT_SPLINE.rawValue),
+                                count: count)
+            let ext: [Float] = [extent.0, extent.1]
+            var outCount = 0
+            let tolerance = max(extent.0, extent.1) * 0.002
+            guard check(clay_cut_polygon_from_open_curve(pointsXYZR, count, types,
+                                                         side, ext, tolerance,
+                                                         nil, &outCount)),
+                  outCount >= 3 else { return false }
+            polygon = [Float](repeating: 0, count: outCount * 2)
+            guard check(clay_cut_polygon_from_open_curve(pointsXYZR, count, types,
+                                                         side, ext, tolerance,
+                                                         &polygon, &outCount)) else {
+                return false
+            }
         case .rect(let halfWidth, let halfHeight):
             desc.shape = Int32(CLAY_CUT_RECT.rawValue)
             desc.half_width = halfWidth
@@ -1132,6 +1156,219 @@ final class ClayEngine {
             localBounds[index].radius += simd_length(displacement) + margin
             items[index].boundRadius += simd_length(displacement) + margin
             refreshWorldBound(index)
+        }
+    }
+
+    // MARK: ClayCore 0.23 brushes (Tube, hPolish/Flatten, Move Topological)
+
+    /// Tube tool (Nomad Sculpt): a drawn path becomes a rope/pipe via
+    /// clay_tube_create — swept-sphere, exact field, arc-length tapered by
+    /// the three radii (start = first point's, mid, end).
+    @discardableResult
+    func addTube(points: [SIMD4<Float>], color: SIMD3<Float>) -> Bool {
+        guard let doc, points.count >= 2, activeStroke == nil,
+              items.count < Renderer.maxItems else { return false }
+        var params = clay_tube_params()
+        params.struct_size = UInt32(MemoryLayout<clay_tube_params>.size)
+        params.point_type = Int32(CLAY_POINT_SPLINE.rawValue)
+        params.radius_start = points.first!.w
+        params.radius_mid = points[points.count / 2].w
+        params.radius_end = points.last!.w
+        params.closed = 0
+        params.tolerance = 0
+        params.blend_k = 0
+        var xyz: [Float] = []
+        xyz.reserveCapacity(points.count * 3)
+        for p in points { xyz.append(contentsOf: [p.x, p.y, p.z]) }
+        guard let item = clay_tube_create(xyz, points.count, &params, -1, nil, 0) else {
+            lastError = String(cString: clay_last_error())
+            return false
+        }
+        clay_item_set_op(item, Int32(CLAY_OP_ADD.rawValue))
+        clay_item_set_color(item, [color.x, color.y, color.z])
+        clay_item_set_mirror(item, mirrorAxes != 0 ? 1 : 0)
+        if radialCount >= 2 { clay_item_set_repeat_radial(item, radialCount, 0) }
+        var node: clay_node_id = 0
+        let added = check(clay_layer_add_item(doc, layer, item, &node))
+        clay_item_destroy(item)
+        guard added else { return false }
+
+        // Mirror row: the raymarcher has no tube kernel — inert until the
+        // bake lands, like cuts. Bounds from the path and widest radius.
+        var mn = SIMD3<Float>(repeating: .greatestFiniteMagnitude)
+        var mx = -mn
+        var maxR: Float = 0
+        for p in points {
+            mn = simd_min(mn, SIMD3(p.x, p.y, p.z))
+            mx = simd_max(mx, SIMD3(p.x, p.y, p.z))
+            maxR = max(maxR, p.w)
+        }
+        let pad = maxR * 1.5 + 0.05
+        var aabb = (min: mn - SIMD3(repeating: pad), max: mx + SIMD3(repeating: pad))
+        let center = (aabb.min + aabb.max) * 0.5
+        var bound = (center, simd_distance(aabb.min, aabb.max) * 0.5 + 0.02)
+        if radialCount >= 2 {
+            bound = Self.ringBound(center: bound.0, radius: bound.1)
+            aabb = Self.ringAABB(aabb)
+        }
+        items.append(SceneItem(
+            position: .zero, scale: 1, rotation: SIMD4(0, 0, 0, 1),
+            params: SIMD4(repeating: 0), color: color, blendK: 0,
+            prim: Int32(CLAY_PRIM_VOLUME.rawValue),
+            op: Int32(CLAY_OP_ADD.rawValue), blend: 0, rounding: 0,
+            boundCenter: bound.0, boundRadius: bound.1,
+            mirrorFlag: mirrorAxes != 0 ? 1 : 0,
+            radialCount: Float(radialCount), layerSlot: Float(activeLayerSlot)))
+        itemAABBs.append(aabb)
+        nodeIDs.append(node)
+        localBounds.append(bound)
+        itemLayers.append(Int32(activeLayerSlot))
+        itemBatches.append(0)
+        undoLog.append(.add)
+        redoOps.removeAll()
+        commit()
+        scheduleBake()
+        scheduleAutosave()
+        return true
+    }
+
+    /// Regional volume swap — the interactive path to ClayCore's
+    /// volume-only verbs: sample the document's own field around the brush
+    /// (clay_item_volume_from_document), transform THAT item with the
+    /// engine verb, then land it as a PAIR — hard-subtract the region box,
+    /// hard-add the transformed volume: (a - box) ∪ v IS v inside the box.
+    /// (CLAY_OP_REPLACE was tried first and is wrong here: op_replace only
+    /// acts inside the item's solid, so it can never plane material DOWN.)
+    /// Outside the verb's region the volume matches the field it was
+    /// sampled from, so the seam is continuous; grouped as ONE undo step.
+    private func replaceRegion(box: (min: SIMD3<Float>, max: SIMD3<Float>),
+                               cellSize: Float,
+                               transform: (OpaquePointer, SIMD3<Float>) -> Bool) -> Bool {
+        guard let doc, activeStroke == nil, items.count + 1 < Renderer.maxItems
+        else { return false }
+        var vp = clay_volume_params()
+        vp.struct_size = UInt32(MemoryLayout<clay_volume_params>.size)
+        vp.cell_size = cellSize
+        // Band the WHOLE box: the default 3-cell band truncates the rest
+        // of the region to near-zero bounds, and rays crossing the box
+        // crawl until clay_raycast's budget runs out.
+        vp.band = simd_length(box.max - box.min)
+        var vitem: OpaquePointer?
+        let boxMin: [Float] = [box.min.x, box.min.y, box.min.z]
+        let boxMax: [Float] = [box.max.x, box.max.y, box.max.z]
+        guard check(clay_item_volume_from_document(doc, &vp, boxMin, boxMax, &vitem)),
+              let vitem else { return false }
+        guard transform(vitem, .zero) else {
+            lastError = String(cString: clay_last_error())
+            clay_item_destroy(vitem)
+            return false
+        }
+        clay_item_set_op(vitem, Int32(CLAY_OP_ADD.rawValue))
+        clay_item_set_blend(vitem, Int32(CLAY_BLEND_HARD.rawValue), 0)
+        clay_item_set_color(vitem, [ClayEngine.clayColor.x, ClayEngine.clayColor.y,
+                                    ClayEngine.clayColor.z])
+
+        // The carve box sits slightly INSIDE the sampled volume so the
+        // volume's own field bridges the seam.
+        let center = (box.min + box.max) * 0.5
+        let half = (box.max - box.min) * 0.5 - SIMD3(repeating: cellSize)
+        guard let boxItem = clay_item_create(Int32(CLAY_PRIM_BOX.rawValue),
+                                             [half.x, half.y, half.z], 3) else {
+            lastError = String(cString: clay_last_error())
+            clay_item_destroy(vitem)
+            return false
+        }
+        clay_item_set_position(boxItem, [center.x, center.y, center.z])
+        clay_item_set_op(boxItem, Int32(CLAY_OP_SUBTRACT.rawValue))
+        clay_item_set_blend(boxItem, Int32(CLAY_BLEND_HARD.rawValue), 0)
+
+        _ = check(clay_document_begin_undo_group(doc))
+        var boxNode: clay_node_id = 0
+        var volNode: clay_node_id = 0
+        let addedBox = check(clay_layer_add_item(doc, layer, boxItem, &boxNode))
+        let addedVol = addedBox && check(clay_layer_add_item(doc, layer, vitem, &volNode))
+        clay_item_destroy(boxItem)
+        clay_item_destroy(vitem)
+        _ = check(clay_document_end_undo_group(doc))
+        guard addedVol else {
+            if addedBox { _ = clay_document_undo(doc, nil) }
+            return false
+        }
+
+        // Mirror rows: BOTH bake-only (prim VOLUME) — an analytic box
+        // carve would flash a crater for the frames before the bake lands.
+        let span = simd_length(box.max - box.min)
+        for (node, op) in [(boxNode, CLAY_OP_SUBTRACT), (volNode, CLAY_OP_ADD)] {
+            items.append(SceneItem(
+                position: .zero, scale: 1, rotation: SIMD4(0, 0, 0, 1),
+                params: SIMD4(repeating: 0), color: ClayEngine.clayColor, blendK: 0,
+                prim: Int32(CLAY_PRIM_VOLUME.rawValue),
+                op: Int32(op.rawValue), blend: 0, rounding: 0,
+                boundCenter: center, boundRadius: span * 0.5 + 0.02,
+                mirrorFlag: 0, radialCount: 0, layerSlot: Float(activeLayerSlot)))
+            itemAABBs.append((box.min - SIMD3(repeating: 0.02),
+                              box.max + SIMD3(repeating: 0.02)))
+            nodeIDs.append(node)
+            localBounds.append((center, span * 0.5 + 0.02))
+            itemLayers.append(Int32(activeLayerSlot))
+            itemBatches.append(0)
+        }
+        undoLog.append(.addBatch(count: 2))
+        redoOps.removeAll()
+        commit()
+        scheduleBakeDirty(box)
+        scheduleAutosave()
+        return true
+    }
+
+    /// hPolish / Planar / Flatten (clay_item_volume_flatten): the anchor's
+    /// tangent plane is sunk slightly into the surface; CUT_ONLY leaves a
+    /// crisp facet against untouched clay (the hard-surface family),
+    /// TWO_SIDED is ZBrush's Flatten (hollows fill too).
+    @discardableResult
+    func polishSurface(center: SIMD3<Float>, normal: SIMD3<Float>, radius: Float,
+                       strength: Float, mode: clay_flatten_mode) -> Bool {
+        guard radius > 0, strength > 0, simd_length(normal) > 1e-4 else { return false }
+        let n = simd_normalize(normal)
+        let pad = radius * 1.6 + 0.05
+        let box = (min: center - SIMD3(repeating: pad),
+                   max: center + SIMD3(repeating: pad))
+        let planePoint = center - n * (radius * 0.25 * strength)
+        return replaceRegion(box: box, cellSize: max(radius / 14, 0.006)) { vitem, _ in
+            var fp = clay_flatten_params()
+            fp.struct_size = UInt32(MemoryLayout<clay_flatten_params>.size)
+            fp.plane_point = (planePoint.x, planePoint.y, planePoint.z)
+            fp.plane_normal = (n.x, n.y, n.z)
+            fp.strength = min(strength, 1)
+            fp.centre = (center.x, center.y, center.z)
+            fp.region_radius = radius
+            fp.falloff = radius * 0.4
+            fp.mode = Int32(mode.rawValue)
+            return clay_item_volume_flatten(vitem, &fp) == CLAY_OK
+        }
+    }
+
+    /// Move Topological (clay_item_volume_move_topological): the drag's
+    /// falloff is measured ALONG the material, so parts close in space but
+    /// far along the surface stay put.
+    @discardableResult
+    func moveTopologicalSurface(anchor: SIMD3<Float>, displacement: SIMD3<Float>,
+                                radius: Float) -> Bool {
+        guard radius > 0, simd_length(displacement) > 1e-4 else { return false }
+        let drag = simd_length(displacement)
+        let pad = radius + drag + 0.1
+        var box = (min: anchor - SIMD3(repeating: pad),
+                   max: anchor + SIMD3(repeating: pad))
+        box.min += simd_min(displacement, .zero)
+        box.max += simd_max(displacement, .zero)
+        return replaceRegion(box: box, cellSize: max(radius / 12, 0.008)) { vitem, _ in
+            var tp = clay_topological_move_params()
+            tp.struct_size = UInt32(MemoryLayout<clay_topological_move_params>.size)
+            tp.anchor = (anchor.x, anchor.y, anchor.z)
+            tp.radius = radius
+            tp.displacement = (displacement.x, displacement.y, displacement.z)
+            tp.ease = CLAY_EASE_LINEAR
+            return clay_item_volume_move_topological(vitem, &tp) == CLAY_OK
         }
     }
 

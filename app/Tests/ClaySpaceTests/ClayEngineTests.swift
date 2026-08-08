@@ -274,6 +274,57 @@ final class ClayEngineTests: XCTestCase {
         XCTAssertEqual(topAt(SIMD3(1.5, 0, 0)), primaryBefore, accuracy: 0.02)
     }
 
+    func testTubeToolResolvesAPathIntoARope() {
+        let engine = ClayEngine()
+        let before = engine.items.count
+        var path: [SIMD4<Float>] = []
+        for i in 0...8 {
+            let x = -1.0 + Float(i) * 0.25
+            path.append(SIMD4(x, 2.2, 0, 0.15))
+        }
+        XCTAssertTrue(engine.addTube(points: path, color: ClayEngine.clayColor))
+        XCTAssertEqual(engine.items.count, before + 1)
+        let top = engine.raycast(origin: SIMD3(0, 3.5, 0),
+                                 direction: SIMD3(0, -1, 0))?.position.y ?? -9
+        XCTAssertEqual(top, 2.35, accuracy: 0.08, "swept-sphere tube under the ray")
+        XCTAssertTrue(engine.undo())
+        XCTAssertEqual(engine.items.count, before)
+    }
+
+    func testPolishCutsAFacetAndFlattenFillsToo() {
+        // hPolish (CUT_ONLY) via the regional-volume REPLACE path: the
+        // seed ball's crown gets a facet; the flank stays untouched.
+        let engine = ClayEngine()
+        let top = { engine.raycast(origin: SIMD3(0, 3, 0),
+                                   direction: SIMD3(0, -1, 0))?.position.y ?? -9 }
+        let flank = { engine.raycast(origin: SIMD3(3, 0.8, 0),
+                                     direction: SIMD3(-1, 0, 0))?.position.x ?? -9 }
+        let topBefore = top(), flankBefore = flank()
+        XCTAssertTrue(engine.polishSurface(center: SIMD3(0, topBefore, 0),
+                                           normal: SIMD3(0, 1, 0), radius: 0.4,
+                                           strength: 1,
+                                           mode: CLAY_FLATTEN_CUT_ONLY))
+        let topAfter = top()
+        XCTAssertLessThan(topAfter, topBefore - 0.02, "the crown was cut to a facet")
+        XCTAssertGreaterThan(topAfter, topBefore - 0.25, "…not gouged away")
+        XCTAssertEqual(flank(), flankBefore, accuracy: 0.02, "flank untouched")
+        XCTAssertTrue(engine.undo(), "one step (the REPLACE add)")
+        XCTAssertEqual(top(), topBefore, accuracy: 0.02)
+    }
+
+    func testMoveTopologicalPullsAlongTheMaterial() {
+        let engine = ClayEngine()
+        let top = { engine.raycast(origin: SIMD3(0, 3, 0),
+                                   direction: SIMD3(0, -1, 0))?.position.y ?? -9 }
+        let before = top()
+        XCTAssertTrue(engine.moveTopologicalSurface(anchor: SIMD3(0, before, 0),
+                                                    displacement: SIMD3(0, 0.25, 0),
+                                                    radius: 0.45))
+        XCTAssertGreaterThan(top(), before + 0.05, "the crown followed the drag")
+        XCTAssertTrue(engine.undo())
+        XCTAssertEqual(top(), before, accuracy: 0.02)
+    }
+
     func testCacheRaycastFallbackAgreesWithTheDocument() async {
         // The anchor of last resort when clay_raycast times out under
         // stacked warps: marching the baked cache must land on the same

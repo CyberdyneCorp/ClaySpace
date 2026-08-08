@@ -871,6 +871,40 @@ final class CameraAndInputTests: XCTestCase {
     }
 
 
+    func testTubeBrushDrawsARopeAndTrimCurveTakesASide() {
+        let state = ViewportState()
+        state.viewportSize = CGSize(width: 800, height: 600)
+        state.activate(.sculpt, announce: false)
+        state.sculptBrush = .tube
+        let before = state.engine.items.count
+        state.pencilBegan(at: CGPoint(x: 340, y: 300), pressure: 0.5)
+        for x in stride(from: 350, through: 470, by: 12) {
+            state.pencilMoved(to: CGPoint(x: CGFloat(x), y: 300), pressure: 0.5)
+        }
+        state.pencilEnded(at: CGPoint(x: 470, y: 300))
+        XCTAssertEqual(state.engine.items.count, before + 1, "one tube item")
+        state.requestUndo()
+        state.sculptBrush = .standard
+
+        // Trim Curve: a left-to-right stroke across the ball removes the
+        // half BELOW the curve (right of travel).
+        let bottom = { () -> Float in
+            state.engine.raycast(origin: SIMD3(0, -2, 0),
+                                 direction: SIMD3(0, 1, 0))?.position.y ?? -9
+        }
+        let bottomBefore = bottom()
+        state.activate(.trim, announce: false)
+        state.trimShape = .curve
+        state.pencilBegan(at: CGPoint(x: 250, y: 300), pressure: 0.5)
+        for x in stride(from: 260, through: 550, by: 15) {
+            state.pencilMoved(to: CGPoint(x: CGFloat(x), y: 300), pressure: 0.5)
+        }
+        state.pencilEnded(at: CGPoint(x: 550, y: 300))
+        XCTAssertGreaterThan(bottom(), bottomBefore + 0.2,
+                             "the lower half went with the curve's covered side")
+        state.requestUndo()
+    }
+
     // MARK: Top-bar brush dials (size / strength)
 
     func testBrushSizeDialScalesEveryStroke() {

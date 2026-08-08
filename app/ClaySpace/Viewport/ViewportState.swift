@@ -268,7 +268,8 @@ final class ViewportState {
     /// so it never chases its own fresh surface); Snake Hook pulls free
     /// tendrils on the view plane with a tapering radius.
     enum SculptBrush: String, CaseIterable, Identifiable {
-        case standard, crease, carve, snakeHook, move, magnify, pinch, noise
+        case standard, crease, carve, snakeHook, move, moveTopo, tube,
+             polish, flatten, magnify, pinch, noise
 
         /// How far the chain center sits from the surface, in radii.
         /// Standard/Crease are surface-relief REGIONS (CLAY_OP_RELIEF /
@@ -298,6 +299,10 @@ final class ViewportState {
             case .carve: "Carve"
             case .snakeHook: "Snake Hook"
             case .move: "Move"
+            case .moveTopo: "Move Topo"
+            case .tube: "Tube"
+            case .polish: "hPolish"
+            case .flatten: "Flatten"
             case .magnify: "Magnify"
             case .pinch: "Pinch"
             case .noise: "Noise"
@@ -310,6 +315,10 @@ final class ViewportState {
             case .carve: "minus.circle"
             case .snakeHook: "point.topleft.down.to.point.bottomright.curvepath"
             case .move: "hand.draw"
+            case .moveTopo: "hand.tap"
+            case .tube: "scribble.variable"
+            case .polish: "triangle.bottomhalf.filled"
+            case .flatten: "rectangle.compress.vertical"
             case .magnify: "arrow.up.left.and.arrow.down.right.circle"
             case .pinch: "arrow.right.and.line.vertical.and.arrow.left"
             case .noise: "water.waves"
@@ -319,8 +328,14 @@ final class ViewportState {
         /// Engine-side warps (ClayCore 0.22): they act on the assembled
         /// surface via clay_layer_move_surface / add_deformer, not strokes.
         var isWarp: Bool {
-            self == .move || self == .magnify || self == .pinch || self == .noise
+            switch self {
+            case .move, .moveTopo, .polish, .flatten, .magnify, .pinch, .noise:
+                true
+            default: false
+            }
         }
+        /// Tube collects a PATH and resolves it on pencil-up.
+        var isPath: Bool { self == .tube }
     }
     var sculptBrush: SculptBrush = .standard
     @ObservationIgnored fileprivate var strokeTravel: Float = 0
@@ -334,7 +349,9 @@ final class ViewportState {
                       radius: Float, sectors: Int)?
     @ObservationIgnored fileprivate var movePreviewHoldVersion: Int?
     @ObservationIgnored fileprivate var warpAnchor: SIMD3<Float>?
+    @ObservationIgnored fileprivate var warpNormal: SIMD3<Float> = SIMD3(0, 1, 0)
     @ObservationIgnored fileprivate var warpRadius: Float = 0
+    @ObservationIgnored fileprivate var tubePoints: [SIMD4<Float>] = []
 
     /// Top-bar brush dials. Size multiplies every brush footprint (0.5 =
     /// the pre-dial behavior; pressure still breathes inside it); strength
@@ -350,7 +367,7 @@ final class ViewportState {
 
     /// Trim tool (ZBrush Trim Rect/Circle/Lasso): marquee shape + side.
     enum TrimShape: String, CaseIterable, Identifiable {
-        case rect, circle, lasso
+        case rect, circle, lasso, curve
         var id: String { rawValue }
         var title: String { rawValue.capitalized }
     }
@@ -879,7 +896,8 @@ extension ViewportState: PencilToolSink {
         if activeTool == .trim {
             trimStart = point
             trimLassoPoints = [point]
-            trimOverlay = trimShape == .lasso ? .lasso([point])
+            trimOverlay = (trimShape == .lasso || trimShape == .curve)
+                ? .lasso([point])
                 : trimShape == .circle ? .circle(center: point, radius: 0)
                 : .rect(CGRect(origin: point, size: .zero))
             return
@@ -938,14 +956,23 @@ extension ViewportState: PencilToolSink {
             let warpR = radius(for: max(pressure, 0.1), altitude: altitude,
                                at: anchorHit.position)
                 * sculptBrush.radiusScale
-            if sculptBrush == .move {
+            if sculptBrush == .move || sculptBrush == .moveTopo {
                 moveDrag = (anchorHit.position, anchorHit.position, warpR)
                 strokePlane = (anchorHit.position, camera.basis.forward)
-                engine.beginMoveSurfaceSession()
+                if sculptBrush == .move { engine.beginMoveSurfaceSession() }
             } else {
                 warpAnchor = anchorHit.position
+                warpNormal = anchorHit.normal
                 warpRadius = warpR
             }
+            return
+        }
+        if activeTool == .sculpt, sculptBrush.isPath {
+            let start = hit?.position ?? groundPoint(on: ray)
+            guard let start else { return }
+            let r = radius(for: max(pressure, 0.1), altitude: altitude, at: start)
+            tubePoints = [SIMD4(start.x, start.y, start.z, r)]
+            strokePlane = (start, camera.basis.forward)
             return
         }
 
@@ -1019,10 +1046,29 @@ extension ViewportState: PencilToolSink {
                 moveDrag?.current = p
                 // Live preview is SHADER-side (grab-parity warp of the
                 // cached field): per-frame, zero CPU bake in the loop.
+                // For Move Topological it is an approximation — the real
+                // apply weights along the material and lands on pencil-up.
                 let (asked, radius) = ClayEngine.calibratedMove(
                     displacement: p - drag.anchor, radius: drag.radius * 1.2)
-                movePreview = (drag.anchor, asked, radius,
-                               max(Int(engine.radialCount), 1))
+                movePreview = (drag.anchor,
+                               sculptBrush == .moveTopo ? p - drag.anchor : asked,
+                               radius, max(Int(engine.radialCount), 1))
+            }
+            return
+        }
+        if activeTool == .sculpt, sculptBrush.isPath, !tubePoints.isEmpty,
+           gizmoDrag == nil {
+            guard let ray = ray(through: point) else { return }
+            let hit = engine.raycast(origin: ray.origin, direction: ray.direction)
+            var target = hit?.position
+            if target == nil, let plane = strokePlane {
+                target = intersect(ray: ray, plane: plane)
+            }
+            guard let target else { return }
+            let r = radius(for: max(pressure, 0.1), altitude: altitude, at: target)
+            let last = tubePoints[tubePoints.count - 1]
+            if simd_distance(SIMD3(last.x, last.y, last.z), target) > r * 0.45 {
+                tubePoints.append(SIMD4(target.x, target.y, target.z, r))
             }
             return
         }
@@ -1038,7 +1084,7 @@ extension ViewportState: PencilToolSink {
                 trimOverlay = .circle(center: start,
                                       radius: hypot(point.x - start.x,
                                                     point.y - start.y))
-            case .lasso:
+            case .lasso, .curve:
                 if let last = trimLassoPoints.last,
                    hypot(point.x - last.x, point.y - last.y) > 6 {
                     trimLassoPoints.append(point)
@@ -1244,6 +1290,7 @@ extension ViewportState: PencilToolSink {
         movePreview = nil
         movePreviewHoldVersion = nil
         warpAnchor = nil
+        tubePoints = []
         lastStrokePoint = nil
         dragStartItemPosition = nil
         dragStartHit = nil
@@ -1286,6 +1333,33 @@ extension ViewportState: PencilToolSink {
             applyTrim(endingAt: point)
             return
         }
+        if let drag = moveDrag, sculptBrush == .moveTopo {
+            moveDrag = nil
+            strokePlane = nil
+            let displacement = drag.current - drag.anchor
+            if engine.moveTopologicalSurface(anchor: drag.anchor,
+                                             displacement: displacement,
+                                             radius: drag.radius * 1.2) {
+                movePreviewHoldVersion = engine.fieldCacheVersion
+                emitHaptic(.completed, at: point)
+            } else {
+                movePreview = nil
+                if simd_length(displacement) > 1e-3 {
+                    showToast("Move Topo needs a surface region")
+                }
+            }
+            return
+        }
+        if !tubePoints.isEmpty {
+            let path = tubePoints
+            tubePoints = []
+            strokePlane = nil
+            if path.count >= 2, engine.addTube(points: path, color: activeColor) {
+                emitHaptic(.completed, at: point)
+                showToast("Tube")
+            }
+            return
+        }
         if let drag = moveDrag {
             moveDrag = nil
             strokePlane = nil
@@ -1310,6 +1384,16 @@ extension ViewportState: PencilToolSink {
         if let anchor = warpAnchor {
             warpAnchor = nil
             switch sculptBrush {
+            case .polish, .flatten:
+                let strength = 0.3 + 0.7 * brushStrength
+                if engine.polishSurface(center: anchor, normal: warpNormal,
+                                        radius: warpRadius * 1.3,
+                                        strength: strength,
+                                        mode: sculptBrush == .polish
+                                            ? CLAY_FLATTEN_CUT_ONLY
+                                            : CLAY_FLATTEN_TWO_SIDED) {
+                    emitHaptic(.completed, at: point)
+                }
             case .magnify, .pinch:
                 let strength = (0.15 + 0.6 * brushStrength)
                     * (sculptBrush == .pinch ? -1 : 1)
@@ -1446,6 +1530,31 @@ extension ViewportState: PencilToolSink {
                 polygon.append(simd_dot(d, basis.up))
             }
             cut(shape: .lasso(polygonXY: polygon), origin: centroid, basis: basis)
+        case .curve:
+            // ZBrush Trim Curve: an OPEN stroke; the engine closes it
+            // against the frame on the side to the RIGHT of the travel.
+            guard trimLassoPoints.count >= 2 else { return }
+            let worldPoints = trimLassoPoints.compactMap { unproject($0) }
+            guard worldPoints.count >= 2, let first = worldPoints.first,
+                  let last = worldPoints.last else { return }
+            let centroid = worldPoints.reduce(SIMD3<Float>.zero, +)
+                / Float(worldPoints.count)
+            var quads: [Float] = []
+            for p in worldPoints {
+                let d = p - centroid
+                quads.append(contentsOf: [simd_dot(d, basis.right),
+                                          simd_dot(d, basis.up), 0, 0])
+            }
+            let travel = last - first
+            let tx = simd_dot(travel, basis.right)
+            let ty = simd_dot(travel, basis.up)
+            let side: Int32 = abs(tx) >= abs(ty)
+                ? Int32((tx >= 0 ? CLAY_TRIM_BELOW : CLAY_TRIM_ABOVE).rawValue)
+                : Int32((ty >= 0 ? CLAY_TRIM_RIGHT : CLAY_TRIM_LEFT).rawValue)
+            let span = simd_length(bounds.max - bounds.min) + 1
+            cut(shape: .curve(pointsXYZR: quads, side: side,
+                              extent: (span, span)),
+                origin: centroid, basis: basis)
         }
     }
 
