@@ -352,6 +352,26 @@ final class ViewportState {
     @ObservationIgnored fileprivate var warpNormal: SIMD3<Float> = SIMD3(0, 1, 0)
     @ObservationIgnored fileprivate var warpRadius: Float = 0
     @ObservationIgnored fileprivate var tubePoints: [SIMD4<Float>] = []
+    /// Mask-boundary stroke splitting: relief/incise deposit through their
+    /// per-ITEM rounding, so thinning points cannot gate them — the chain
+    /// must END where clay freezes and RESTART where it thaws (ZBrush).
+    @ObservationIgnored fileprivate var strokeParams:
+        (op: clay_op, blend: Float, rounding: Float)?
+    @ObservationIgnored fileprivate var strokeSuspended = false
+
+    /// The brush FOOTPRINT (radius + relief rounding) must clear the
+    /// mask, not just the chain center — an anchor at the boundary still
+    /// overhangs frozen clay by radius + falloff.
+    fileprivate func maskFootprintGate(at p: SIMD3<Float>, along dir: SIMD3<Float>,
+                                       footprint: Float) -> Float {
+        var gate = engine.maskWeight(at: p)
+        if simd_length(dir) > 1e-5 {
+            let d = simd_normalize(dir)
+            gate = min(gate, engine.maskWeight(at: p + d * footprint))
+            gate = min(gate, engine.maskWeight(at: p - d * footprint))
+        }
+        return gate
+    }
 
     /// Top-bar brush dials. Size multiplies every brush footprint (0.5 =
     /// the pre-dial behavior; pressure still breathes inside it); strength
@@ -1017,6 +1037,15 @@ extension ViewportState: PencilToolSink {
             }
         }
         strokeTravel = 0
+        let anchorGate = maskFootprintGate(at: start, along: camera.basis.right,
+                                           footprint: r + rounding)
+        if anchorGate < 0.35 {
+            strokePlane = (start, camera.basis.forward)
+            lastStrokePoint = start
+            strokeParams = (op, blend, rounding)
+            strokeSuspended = true
+            return
+        }
         if engine.beginStroke(at: start, radius: r, op: op,
                               blendK: blend, color: activeColor,
                               rounding: rounding) {
@@ -1025,6 +1054,8 @@ extension ViewportState: PencilToolSink {
             // freshly-built surface.
             strokePlane = (start, camera.basis.forward)
             lastStrokePoint = start
+            strokeParams = (op, blend, rounding)
+            strokeSuspended = false
         } else if let error = engine.lastError {
             showToast("Stroke failed: \(error)")
         }
@@ -1229,7 +1260,7 @@ extension ViewportState: PencilToolSink {
             return
         }
 
-        guard engine.isStroking,
+        guard engine.isStroking || strokeSuspended,
               let plane = strokePlane,
               let last = lastStrokePoint,
               let ray = ray(through: point) else { return }
@@ -1267,6 +1298,28 @@ extension ViewportState: PencilToolSink {
         // Decimate: only append once the Pencil has travelled a fraction of
         // the brush radius, so point counts stay low and segments smooth.
         guard simd_distance(p, last) > r * 0.45 else { return }
+
+        // Mask boundaries SPLIT the stroke: end the chain entering frozen
+        // clay, begin a fresh one leaving it. Per-point thinning cannot
+        // gate relief/incise, whose footprint is the item's rounding.
+        let footprint = r + (strokeParams?.rounding ?? 0)
+        let gate = maskFootprintGate(at: p, along: p - last, footprint: footprint)
+        if gate < 0.35 {
+            if engine.isStroking { engine.endStroke() }
+            strokeSuspended = true
+            lastStrokePoint = p
+            return
+        }
+        if strokeSuspended, let params = strokeParams {
+            strokeSuspended = false
+            strokeTravel = 0
+            if engine.beginStroke(at: p, radius: r, op: params.op,
+                                  blendK: params.blend, color: activeColor,
+                                  rounding: params.rounding) {
+                lastStrokePoint = p
+            }
+            return
+        }
         strokeTravel += simd_distance(p, last)
         engine.appendStrokePoint(p, radius: r)
         lastStrokePoint = p
@@ -1291,6 +1344,8 @@ extension ViewportState: PencilToolSink {
         movePreviewHoldVersion = nil
         warpAnchor = nil
         tubePoints = []
+        strokeSuspended = false
+        strokeParams = nil
         lastStrokePoint = nil
         dragStartItemPosition = nil
         dragStartHit = nil
@@ -1434,6 +1489,15 @@ extension ViewportState: PencilToolSink {
         if engine.isStroking {
             engine.endStroke()
             emitHaptic(.completed, at: point)
+            strokePlane = nil
+            lastStrokePoint = nil
+            strokeSuspended = false
+            strokeParams = nil
+            return
+        }
+        if strokeSuspended {
+            strokeSuspended = false
+            strokeParams = nil
             strokePlane = nil
             lastStrokePoint = nil
             return

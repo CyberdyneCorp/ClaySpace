@@ -905,6 +905,48 @@ final class CameraAndInputTests: XCTestCase {
         state.requestUndo()
     }
 
+    func testStrokeSplitsAtMaskBoundaries() {
+        // The user repro: a Crease stroke drawn ACROSS a frozen band cut
+        // straight through it (relief/incise deposit via their per-item
+        // rounding, which point-thinning cannot gate). The stroke must
+        // split: one chain before the band, one after, nothing inside.
+        let state = ViewportState()
+        state.viewportSize = CGSize(width: 800, height: 600)
+        state.activate(.sculpt, announce: false)
+        // Freeze a vertical band across the ball's front, mid-face.
+        for y in stride(from: Float(0.3), through: 1.4, by: 0.08) {
+            for z in stride(from: Float(0.4), through: 1.0, by: 0.08) {
+                _ = state.engine.maskPaint(at: SIMD3(0, y, z), radius: 0.22,
+                                           erase: false, voxelContext: false)
+            }
+        }
+        XCTAssertLessThan(state.engine.maskWeight(at: SIMD3(0, 0.8, 0.78)), 0.05)
+
+        state.sculptBrush = .crease
+        let itemsBefore = state.engine.items.count
+        let bandDepth = { () -> Float in
+            state.engine.raycast(origin: SIMD3(0, 0.8, 3),
+                                 direction: SIMD3(0, 0, -1))?.position.z ?? -9
+        }
+        let depthBefore = bandDepth()
+        state.pencilBegan(at: CGPoint(x: 250, y: 300), pressure: 0.5)
+        for x in stride(from: 260, through: 660, by: 8) {
+            state.pencilMoved(to: CGPoint(x: CGFloat(x), y: 300), pressure: 0.5)
+        }
+        state.pencilEnded(at: CGPoint(x: 660, y: 300))
+
+        XCTAssertEqual(state.engine.items.count, itemsBefore + 2,
+                       "the stroke split into two chains around the band")
+        XCTAssertEqual(bandDepth(), depthBefore, accuracy: 0.015,
+                       "no groove inside the frozen band")
+        // The band's inner shoulder too: the restart anchor's footprint
+        // must clear the mask, not overhang it.
+        let shoulder = state.engine.raycast(origin: SIMD3(0.15, 0.8, 3),
+                                            direction: SIMD3(0, 0, -1))?.position.z ?? -9
+        XCTAssertEqual(shoulder, sqrt(0.64 - 0.15 * 0.15), accuracy: 0.02,
+                       "no groove on the frozen shoulder either")
+    }
+
     // MARK: Top-bar brush dials (size / strength)
 
     func testBrushSizeDialScalesEveryStroke() {
