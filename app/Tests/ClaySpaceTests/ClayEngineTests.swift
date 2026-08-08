@@ -212,6 +212,31 @@ final class ClayEngineTests: XCTestCase {
         XCTAssertTrue(engine.undo())
     }
 
+    func testRepeatedCutsDoNotInflateTheBakeGrid() async {
+        // Five rect cuts melted the model: each cut's whole-scene
+        // circumsphere bound compounded the scene bounds ~sqrt(3) per cut,
+        // stretching the fixed-budget grid until the object had a handful
+        // of cells. Material-removing ops must never grow the grid.
+        let engine = ClayEngine()
+        await engine.bakeNow()
+        let voxelBefore = engine.fieldCache?.voxelSize ?? 0
+        XCTAssertGreaterThan(voxelBefore, 0)
+
+        for i in 0..<5 {
+            let angle = Float(i) * 0.7
+            XCTAssertTrue(engine.applyCut(origin: SIMD3(1.4, 0.8, 0),
+                                          right: SIMD3(cos(angle), 0, sin(angle)),
+                                          up: SIMD3(0, 1, 0),
+                                          forward: SIMD3(-sin(angle), 0, cos(angle)),
+                                          shape: .rect(halfWidth: 0.3, halfHeight: 2),
+                                          keep: false))
+        }
+        await engine.bakeNow()
+        let voxelAfter = engine.fieldCache?.voxelSize ?? 1e9
+        XCTAssertLessThan(voxelAfter, voxelBefore * 1.3,
+                          "five cuts must not degrade cache resolution")
+    }
+
     func testCacheRaycastFallbackAgreesWithTheDocument() async {
         // The anchor of last resort when clay_raycast times out under
         // stacked warps: marching the baked cache must land on the same

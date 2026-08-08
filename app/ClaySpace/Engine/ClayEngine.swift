@@ -612,8 +612,8 @@ final class ClayEngine {
             boundCenter: center, boundRadius: radius,
             mirrorFlag: 0, radialCount: 0,
             layerSlot: Float(activeLayerSlot)))
-        itemAABBs.append((center - SIMD3(repeating: radius),
-                          center + SIMD3(repeating: radius)))
+        itemAABBs.append((bounds.min - SIMD3(repeating: 0.1),
+                          bounds.max + SIMD3(repeating: 0.1)))
         nodeIDs.append(node)
         localBounds.append((SIMD3.zero, radius))
         itemLayers.append(Int32(activeLayerSlot))
@@ -2250,6 +2250,20 @@ final class ClayEngine {
         var mn = SIMD3<Float>(repeating: .greatestFiniteMagnitude)
         var mx = -mn
         for (index, aabb) in itemAABBs.enumerated() {
+            // Subtract/intersect/paint/incise only REMOVE or recolor
+            // material — they cannot extend the surface, so they must not
+            // grow the bake grid. (Cuts especially: their bound is the
+            // whole-scene circumsphere, which would compound ~sqrt(3) per
+            // cut and melt the model into a handful of cells.)
+            if items.indices.contains(index) {
+                let op = items[index].op
+                if op == Int32(CLAY_OP_SUBTRACT.rawValue)
+                    || op == Int32(CLAY_OP_INTERSECT.rawValue)
+                    || op == Int32(CLAY_OP_PAINT.rawValue)
+                    || op == Int32(CLAY_OP_INCISE.rawValue) {
+                    continue
+                }
+            }
             mn = simd_min(mn, aabb.min)
             mx = simd_max(mx, aabb.max)
             // A mirrored item also occupies its reflections (+ seam blend),
