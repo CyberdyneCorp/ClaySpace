@@ -326,7 +326,13 @@ final class ViewportState {
     @ObservationIgnored fileprivate var strokeTravel: Float = 0
     @ObservationIgnored fileprivate var moveDrag:
         (anchor: SIMD3<Float>, current: SIMD3<Float>, radius: Float)?
-    @ObservationIgnored fileprivate var moveEventCount = 0
+    /// Shader-side Move preview (grab parity in the raymarcher): tracked
+    /// every pencil event, applied to the document only on pencil-up.
+    /// After the apply it HOLDS until the next bake lands, so the surface
+    /// never snaps back while the CPU catches up.
+    var movePreview: (center: SIMD3<Float>, displacement: SIMD3<Float>,
+                      radius: Float)?
+    @ObservationIgnored fileprivate var movePreviewHoldVersion: Int?
     @ObservationIgnored fileprivate var warpAnchor: SIMD3<Float>?
     @ObservationIgnored fileprivate var warpRadius: Float = 0
 
@@ -934,7 +940,6 @@ extension ViewportState: PencilToolSink {
                 * sculptBrush.radiusScale
             if sculptBrush == .move {
                 moveDrag = (anchorHit.position, anchorHit.position, warpR)
-                moveEventCount = 0
                 strokePlane = (anchorHit.position, camera.basis.forward)
                 engine.beginMoveSurfaceSession()
             } else {
@@ -1012,14 +1017,11 @@ extension ViewportState: PencilToolSink {
             if let ray = ray(through: point), let plane = strokePlane,
                let p = intersect(ray: ray, plane: plane) {
                 moveDrag?.current = p
-                // Live preview: re-apply the running total every other
-                // event (each apply is an undo+reapply on the clay side).
-                moveEventCount += 1
-                if moveEventCount % 2 == 0 {
-                    engine.updateMoveSurfaceSession(center: drag.anchor,
-                                                    displacement: p - drag.anchor,
-                                                    radius: drag.radius * 1.2)
-                }
+                // Live preview is SHADER-side (grab-parity warp of the
+                // cached field): per-frame, zero CPU bake in the loop.
+                let (asked, radius) = ClayEngine.calibratedMove(
+                    displacement: p - drag.anchor, radius: drag.radius * 1.2)
+                movePreview = (drag.anchor, asked, radius)
             }
             return
         }
@@ -1238,6 +1240,8 @@ extension ViewportState: PencilToolSink {
             engine.endMoveSurfaceSession()
         }
         moveDrag = nil
+        movePreview = nil
+        movePreviewHoldVersion = nil
         warpAnchor = nil
         lastStrokePoint = nil
         dragStartItemPosition = nil
@@ -1290,9 +1294,15 @@ extension ViewportState: PencilToolSink {
                                                           radius: drag.radius * 1.2)
             engine.endMoveSurfaceSession()
             if applied > 0 {
+                // Hold the shader preview until the post-apply bake lands
+                // (fieldCacheVersion bumps) — no snap-back gap.
+                movePreviewHoldVersion = engine.fieldCacheVersion
                 emitHaptic(.completed, at: point)
-            } else if simd_length(displacement) > 1e-3 {
-                showToast("Move reached nothing")
+            } else {
+                movePreview = nil
+                if simd_length(displacement) > 1e-3 {
+                    showToast("Move reached nothing")
+                }
             }
             return
         }
@@ -1671,6 +1681,21 @@ extension ViewportState: PencilToolSink {
         return HoverGhost(center: c,
                           radiusPoints: max(hypot(e.x - c.x, e.y - c.y), 3),
                           isVoxel: isVoxel)
+    }
+
+    /// The Move preview to render this frame; releases the post-apply
+    /// hold once a fresh bake (containing the real warp) has landed.
+    var activeMovePreview: (center: SIMD3<Float>, displacement: SIMD3<Float>,
+                            radius: Float)? {
+        if let hold = movePreviewHoldVersion {
+            if engine.fieldCacheVersion != hold {
+                movePreviewHoldVersion = nil
+                movePreview = nil
+                return nil
+            }
+            return movePreview
+        }
+        return moveDrag != nil ? movePreview : nil
     }
 
     /// Forward projection — the exact inverse of ray(through:).

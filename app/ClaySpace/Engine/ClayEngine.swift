@@ -993,11 +993,10 @@ final class ClayEngine {
         // moves ~0.31). Calibrate: widen the region with the drag and ask
         // for the inverse-decay displacement, so the surface tracks the
         // finger instead of stalling a fraction of the way there.
-        let effectiveRadius = radius + drag
-        let amplification = min(effectiveRadius / max(radius, 0.02), 4)
-        let asked = displacement * amplification
+        let (asked, effectiveRadius) = Self.calibratedMove(displacement: displacement,
+                                                          radius: radius)
         moveSession!.maxReach = max(moveSession!.maxReach,
-                                    effectiveRadius + drag * amplification + 0.1)
+                                    effectiveRadius + simd_length(asked) + 0.1)
         var params = clay_move_params()
         params.struct_size = UInt32(MemoryLayout<clay_move_params>.size)
         params.radius = effectiveRadius
@@ -1031,6 +1030,16 @@ final class ClayEngine {
         var u = 0, r = 0
         _ = clay_document_undo_state(doc, nil, &u, &r)
         return (u, r)
+    }
+
+    /// The calibration shared by the final apply AND the shader-side live
+    /// preview, so what you see during the drag is what lands.
+    nonisolated static func calibratedMove(displacement: SIMD3<Float>, radius: Float)
+        -> (asked: SIMD3<Float>, effectiveRadius: Float) {
+        let drag = simd_length(displacement)
+        let effectiveRadius = radius + drag
+        let amplification = min(effectiveRadius / max(radius, 0.02), 4)
+        return (displacement * amplification, effectiveRadius)
     }
 
     /// Closes the session; the last applied warp (if any) stays as the

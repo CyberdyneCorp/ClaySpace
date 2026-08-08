@@ -33,6 +33,8 @@ struct Uniforms {
     float4 prevForward;   // xyz prev-frame camera forward
     float4 prevPosition;  // xyz prev camera position; w = temporal active
     float4 temporalInfo;  // xy = jitter (NDC, added to in.uv); z = prev lens; w = prev orthoHalfHeight
+    float4 movePreviewA;  // xyz = drag anchor; w = effective region radius
+    float4 movePreviewB;  // xyz = calibrated displacement; w = active (0/1)
 };
 
 // Must match SceneItem in ClayEngine.swift (80 bytes).
@@ -393,6 +395,8 @@ struct FieldCtx {
     uint layerMirror;    // mirror axes, 4 bits per slot
     int layerCount;
     float mirrorK;       // Mirror Blend seam width
+    float4 moveA;        // live Move drag: anchor xyz, effective radius w
+    float4 moveB;        // calibrated displacement xyz, active w
 };
 
 // Item distance including its mirror copies — ClayCore's emit_item order
@@ -454,7 +458,18 @@ static float sampleCache(float3 p, FieldCtx ctx) {
 
 // Quadratic smin in mix form: h drives both distance and color blending
 // (docs/01 §2.2 — material mix falls out of the falloff).
-static float mapDist(float3 p, FieldCtx ctx) {
+/// ClayCore grab parity (deform.h): d'(p) = d(p - D * w(p)), the region
+/// weight read at the SAMPLE point with linear ease — the exact warp
+/// clay_layer_move_surface applies, previewed before it lands.
+static float3 movePreviewWarp(float3 p, FieldCtx ctx) {
+    if (ctx.moveB.w < 0.5) { return p; }
+    float t = length(p - ctx.moveA.xyz) / max(ctx.moveA.w, 1e-4);
+    if (t >= 1.0) { return p; }
+    return p - ctx.moveB.xyz * (1.0 - t);
+}
+
+static float mapDist(float3 rawP, FieldCtx ctx) {
+    float3 p = movePreviewWarp(rawP, ctx);
     constant SceneItem *items = ctx.items;
     bool cached = ctx.gridOrigin.w > 0.5;
     float d = cached ? sampleCache(p, ctx) : 1e9;
@@ -519,7 +534,8 @@ static float mapDist(float3 p, FieldCtx ctx) {
     return d;
 }
 
-static float4 mapShade(float3 p, FieldCtx ctx) {
+static float4 mapShade(float3 rawP, FieldCtx ctx) {
+    float3 p = movePreviewWarp(rawP, ctx);
     constant SceneItem *items = ctx.items;
     bool cached = ctx.gridOrigin.w > 0.5;
     float cacheD = 1e9;
@@ -661,7 +677,8 @@ fragment FragOut raymarch_fragment(VertexOut in [[stage_in]],
     FieldCtx ctx{items, u.itemCount, u.bakedCount, strokePts,
                  distanceTex, colorTex, u.gridOrigin, u.gridInvExtent,
                  u.gridScale, u.layerBits.x, u.layerBits.y,
-                 int(u.layerBits.z), u.mirrorK};
+                 int(u.layerBits.z), u.mirrorK,
+                 u.movePreviewA, u.movePreviewB};
     const float aspect = u.params.x;
     const float lens = u.params.z;
     const float orthoHalfHeight = u.params.w;

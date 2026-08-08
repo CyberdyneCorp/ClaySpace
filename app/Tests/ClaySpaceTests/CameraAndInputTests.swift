@@ -818,7 +818,7 @@ final class CameraAndInputTests: XCTestCase {
                         "the surface still raycasts after the warps")
     }
 
-    func testMoveBrushPreviewsLiveAndStaysOneUndoStep() {
+    func testMoveBrushPreviewsLiveAndStaysOneUndoStep() async {
         let state = ViewportState()
         state.viewportSize = CGSize(width: 800, height: 600)
         state.activate(.sculpt, announce: false)
@@ -841,12 +841,27 @@ final class CameraAndInputTests: XCTestCase {
         for x in stride(from: 410, through: 490, by: 10) {
             state.pencilMoved(to: CGPoint(x: CGFloat(x), y: 300), pressure: 0.6)
         }
-        // LIVE: the document already shows the drag BEFORE pencil-up.
-        XCTAssertGreaterThan((asymmetry() - original) * sign, 0.02,
-                             "the surface follows the drag mid-gesture")
+        // LIVE: the preview is SHADER-side per-frame — the document stays
+        // untouched mid-gesture (that is what makes it instant)…
+        XCTAssertEqual(asymmetry(), original, accuracy: 0.005,
+                       "the document is pristine while the shader previews")
+        guard let preview = state.activeMovePreview else {
+            return XCTFail("mid-drag shader preview is active")
+        }
+        // …and shows exactly what the final apply will land (shared
+        // calibration): asked displacement, not the raw drag.
+        let drag = preview.displacement
+        XCTAssertGreaterThan(simd_length(drag), 0.3, "calibrated pull tracked the drag")
+
         state.pencilEnded(at: CGPoint(x: 490, y: 300))
         let final = asymmetry()
-        XCTAssertGreaterThan((final - original) * sign, 0.02)
+        XCTAssertGreaterThan((final - original) * sign, 0.02,
+                             "pencil-up lands the real warp")
+        XCTAssertNotNil(state.activeMovePreview,
+                        "the preview HOLDS until the post-apply bake lands")
+        await state.engine.bakeNow()
+        XCTAssertNil(state.activeMovePreview,
+                     "a landed bake releases the hold — no snap-back gap")
 
         // The whole gesture is ONE undo step, not one per live update.
         state.requestUndo()

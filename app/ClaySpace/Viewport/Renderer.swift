@@ -43,6 +43,8 @@ final class Renderer {
         var prevForward: SIMD4<Float> = .zero
         var prevPosition: SIMD4<Float> = .zero // xyz prev camera; w = temporal active
         var temporalInfo: SIMD4<Float> = .zero // xy jitter NDC; z prev lens; w prev ortho
+        var movePreviewA: SIMD4<Float> = .zero // drag anchor xyz; w effective radius
+        var movePreviewB: SIMD4<Float> = .zero // calibrated displacement xyz; w active
     }
 
     static let maxItems = 256
@@ -323,7 +325,9 @@ final class Renderer {
               preview: [SceneItem] = [],
               inputScale: CGFloat = 1,
               darkMode: Bool = false,
-              polyframe: Bool = false) {
+              polyframe: Bool = false,
+              movePreview: (center: SIMD3<Float>, displacement: SIMD3<Float>,
+                            radius: Float)? = nil) {
         let items = engine.items
         let strokePoints = engine.strokePoints
         if engine.version != uploadedVersion {
@@ -540,7 +544,13 @@ final class Renderer {
             prevForward: SIMD4(prev.forward, polyframe ? 1 : 0),
             prevPosition: SIMD4(prev.position, useTemporal ? 1 : 0),
             temporalInfo: SIMD4(2 * jitterPx.x / width, -2 * jitterPx.y / height,
-                                prev.lens, prev.ortho)
+                                prev.lens, prev.ortho),
+            movePreviewA: movePreview.map {
+                SIMD4($0.center.x, $0.center.y, $0.center.z, $0.radius)
+            } ?? .zero,
+            movePreviewB: movePreview.map {
+                SIMD4($0.displacement.x, $0.displacement.y, $0.displacement.z, 1)
+            } ?? .zero
         )
         prevCamera = (camera.position, basis.right, basis.up, basis.forward,
                       camera.lens, camera.orthoHalfHeight)
