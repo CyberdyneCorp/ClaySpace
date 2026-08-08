@@ -359,6 +359,26 @@ final class ViewportState {
         (op: clay_op, blend: Float, rounding: Float)?
     @ObservationIgnored fileprivate var strokeSuspended = false
 
+    /// Tube editing: selecting a placed tube (Move tool) shows its control
+    /// points; dragging one reshapes the curve, tapping one selects it so
+    /// the Size dial retunes that point's radius.
+    var tubeEditIndex: Int?
+    var tubeSelectedPoint: Int?
+    @ObservationIgnored fileprivate var tubePointDrag: Int?
+    @ObservationIgnored fileprivate var tubeDragMoved = false
+
+    var tubeHandles: [(index: Int, point: CGPoint)]? {
+        guard let editIndex = tubeEditIndex,
+              let path = engine.tubePath(at: editIndex) else { return nil }
+        var handles: [(index: Int, point: CGPoint)] = []
+        for (i, p) in path.enumerated() {
+            if let sp = screenPoint(for: SIMD3(p.x, p.y, p.z)) {
+                handles.append((i, sp))
+            }
+        }
+        return handles.isEmpty ? nil : handles
+    }
+
     /// The brush FOOTPRINT (radius + relief rounding) must clear the
     /// mask in EVERY direction, not just the chain center or the travel
     /// axis — a big brush overhangs frozen clay sideways too.
@@ -371,7 +391,17 @@ final class ViewportState {
     /// the pre-dial behavior; pressure still breathes inside it); strength
     /// maps per family — relief amplitude for Standard/Carve, the engine's
     /// coverage strength for voxel brushes and spray stamps.
-    var brushSize: Float = 0.5
+    var brushSize: Float = 0.5 {
+        didSet {
+            guard let editIndex = tubeEditIndex, let pointIndex = tubeSelectedPoint,
+                  var path = engine.tubePath(at: editIndex),
+                  path.indices.contains(pointIndex) else { return }
+            path[pointIndex].w = 0.03 + 0.4 * brushSize
+            engine.beginTubeEdit(index: editIndex)
+            _ = engine.updateTubeEdit(index: editIndex, points: path)
+            engine.endTubeEdit(index: editIndex)
+        }
+    }
     var brushStrength: Float = 0.5 {
         didSet { engine.brushStrength = 0.4 + 1.2 * brushStrength }
     }
@@ -939,11 +969,27 @@ extension ViewportState: PencilToolSink {
         // move session; tapping empty space deselects.
         if activeTool == .select || activeTool == .move {
             guard let ray = ray(through: point) else { return }
+            // Tube control-point grab: beats re-picking while editing.
+            if let editIndex = tubeEditIndex,
+               let path = engine.tubePath(at: editIndex) {
+                for (i, p) in path.enumerated() {
+                    guard let sp = screenPoint(for: SIMD3(p.x, p.y, p.z)),
+                          hypot(sp.x - point.x, sp.y - point.y) < 30 else { continue }
+                    tubePointDrag = i
+                    tubeDragMoved = false
+                    engine.beginTubeEdit(index: editIndex)
+                    strokePlane = (SIMD3(p.x, p.y, p.z), camera.basis.forward)
+                    return
+                }
+            }
             if let picked = engine.pick(origin: ray.origin, direction: ray.direction) {
                 if selectedIndex != picked.index {
                     selectedIndex = picked.index
                     showToast("Selected shape \(picked.index)")
                 }
+                tubeEditIndex = engine.tubePath(at: picked.index) != nil
+                    ? picked.index : nil
+                if tubeEditIndex == nil { tubeSelectedPoint = nil }
                 if engine.beginTransform(index: picked.index) {
                     dragStartItemPosition = engine.items[picked.index].position
                     dragStartHit = picked.position
@@ -951,6 +997,8 @@ extension ViewportState: PencilToolSink {
                 }
             } else if selectedIndex != nil {
                 selectedIndex = nil
+                tubeEditIndex = nil
+                tubeSelectedPoint = nil
                 showToast("Deselected")
             }
             return
@@ -1062,6 +1110,17 @@ extension ViewportState: PencilToolSink {
         }
         if activeTool == .freeze, gizmoDrag == nil {
             freezePaint(at: point, pressure: max(pressure, 0.1))
+            return
+        }
+        if let pointIndex = tubePointDrag, let editIndex = tubeEditIndex,
+           gizmoDrag == nil {
+            guard let ray = ray(through: point), let plane = strokePlane,
+                  let p = intersect(ray: ray, plane: plane),
+                  var path = engine.tubePath(at: editIndex),
+                  path.indices.contains(pointIndex) else { return }
+            tubeDragMoved = true
+            path[pointIndex] = SIMD4(p.x, p.y, p.z, path[pointIndex].w)
+            _ = engine.updateTubeEdit(index: editIndex, points: path)
             return
         }
         if activeTool == .sculpt, let drag = moveDrag, gizmoDrag == nil {
@@ -1339,6 +1398,11 @@ extension ViewportState: PencilToolSink {
         tubePoints = []
         strokeSuspended = false
         strokeParams = nil
+        if let pointIndex = tubePointDrag, let editIndex = tubeEditIndex {
+            _ = pointIndex
+            engine.cancelTubeEdit(index: editIndex)
+        }
+        tubePointDrag = nil
         lastStrokePoint = nil
         dragStartItemPosition = nil
         dragStartHit = nil
@@ -1379,6 +1443,20 @@ extension ViewportState: PencilToolSink {
         }
         if activeTool == .trim, gizmoDrag == nil, trimStart != nil {
             applyTrim(endingAt: point)
+            return
+        }
+        if let pointIndex = tubePointDrag, let editIndex = tubeEditIndex {
+            tubePointDrag = nil
+            strokePlane = nil
+            engine.endTubeEdit(index: editIndex)
+            if tubeDragMoved {
+                emitHaptic(.completed, at: point)
+            } else {
+                tubeSelectedPoint = tubeSelectedPoint == pointIndex ? nil : pointIndex
+                if tubeSelectedPoint != nil {
+                    showToast("Point \(pointIndex + 1) — Size dial sets its radius")
+                }
+            }
             return
         }
         if let drag = moveDrag, sculptBrush == .moveTopo {

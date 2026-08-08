@@ -274,6 +274,43 @@ final class ClayEngineTests: XCTestCase {
         XCTAssertEqual(topAt(SIMD3(1.5, 0, 0)), primaryBefore, accuracy: 0.02)
     }
 
+    func testTubePathIsEditableAfterPlacement() {
+        let engine = ClayEngine()
+        var path: [SIMD4<Float>] = []
+        for i in 0...6 { path.append(SIMD4(-0.9 + Float(i) * 0.3, 2.2, 0, 0.15)) }
+        XCTAssertTrue(engine.addTube(points: path, color: ClayEngine.clayColor))
+        let index = engine.items.count - 1
+        XCTAssertEqual(engine.tubePath(at: index)?.count, path.count,
+                       "the path stays editable after placement")
+        let mid = { engine.raycast(origin: SIMD3(0, 4, 0),
+                                   direction: SIMD3(0, -1, 0))?.position.y ?? -9 }
+        let before = mid()
+
+        // Bend the middle up 0.5 through an edit session (one undo step).
+        engine.beginTubeEdit(index: index)
+        var bent = path
+        bent[3].y += 0.5
+        XCTAssertTrue(engine.updateTubeEdit(index: index, points: bent))
+        engine.endTubeEdit(index: index)
+        XCTAssertEqual(mid(), before + 0.5, accuracy: 0.05,
+                       "the curve followed the moved control point")
+
+        // Radius retune: fatten the same point.
+        engine.beginTubeEdit(index: index)
+        bent[3].w = 0.3
+        XCTAssertTrue(engine.updateTubeEdit(index: index, points: bent))
+        engine.endTubeEdit(index: index)
+        XCTAssertEqual(mid(), before + 0.5 + 0.15, accuracy: 0.06,
+                       "the taper followed the point radius")
+
+        // Each session is ONE undo step; two rewind to the original.
+        XCTAssertTrue(engine.undo())
+        XCTAssertTrue(engine.undo())
+        XCTAssertEqual(mid(), before, accuracy: 0.05)
+        XCTAssertTrue(engine.redo())
+        XCTAssertEqual(mid(), before + 0.5, accuracy: 0.05)
+    }
+
     func testMaskFreezesSculptStrokesAndWarps() {
         // The ABI contract: SDF edits consume the mask when a stroke
         // becomes items. A frozen crown must shrug off every brush family.

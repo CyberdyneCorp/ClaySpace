@@ -969,6 +969,42 @@ final class CameraAndInputTests: XCTestCase {
         state.brushStrength = 0.5
     }
 
+    func testSelectingATubeShowsDraggableHandles() {
+        let state = ViewportState()
+        state.viewportSize = CGSize(width: 800, height: 600)
+        state.activate(.sculpt, announce: false)
+        state.sculptBrush = .tube
+        state.pencilBegan(at: CGPoint(x: 320, y: 300), pressure: 0.5)
+        for x in stride(from: 330, through: 500, by: 12) {
+            state.pencilMoved(to: CGPoint(x: CGFloat(x), y: 300), pressure: 0.5)
+        }
+        state.pencilEnded(at: CGPoint(x: 500, y: 300))
+        let tubeIndex = state.engine.items.count - 1
+        XCTAssertNotNil(state.engine.tubePath(at: tubeIndex))
+
+        // Select it with the Move tool: handles appear.
+        state.activate(.move, announce: false)
+        state.pencilBegan(at: CGPoint(x: 400, y: 300), pressure: 0.5)
+        state.pencilEnded(at: CGPoint(x: 400, y: 300))
+        XCTAssertEqual(state.tubeEditIndex, tubeIndex, "tap selects the tube")
+        guard let handles = state.tubeHandles, let handle = handles.first
+        else { return XCTFail("control points visible") }
+        XCTAssertEqual(handles.count, state.engine.tubePath(at: tubeIndex)?.count)
+
+        // Drag the first handle: the path point follows.
+        let pointBefore = state.engine.tubePath(at: tubeIndex)![handle.index]
+        state.pencilBegan(at: handle.point, pressure: 0.5)
+        state.pencilMoved(to: CGPoint(x: handle.point.x, y: handle.point.y - 60),
+                          pressure: 0.5)
+        state.pencilEnded(at: CGPoint(x: handle.point.x, y: handle.point.y - 60))
+        let pointAfter = state.engine.tubePath(at: tubeIndex)![handle.index]
+        XCTAssertGreaterThan(pointAfter.y, pointBefore.y + 0.05,
+                             "screen-up drag lifted the control point")
+        state.requestUndo() // the whole drag is one step
+        XCTAssertEqual(state.engine.tubePath(at: tubeIndex)![handle.index].y,
+                       pointBefore.y, accuracy: 0.02)
+    }
+
     // MARK: Top-bar brush dials (size / strength)
 
     func testBrushSizeDialScalesEveryStroke() {

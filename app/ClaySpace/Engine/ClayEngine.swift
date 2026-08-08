@@ -231,6 +231,7 @@ final class ClayEngine {
         case reparam(index: Int, before: SIMD4<Float>, after: SIMD4<Float>,
                      primBefore: Int32, primAfter: Int32)
         case warp
+        case tubeEdit(index: Int, before: [SIMD4<Float>], after: [SIMD4<Float>])
         case addBatch(count: Int) // spray stroke: N stamps, one clay step
         case removeBatch(rows: [LayerRow])
     }
@@ -252,6 +253,7 @@ final class ClayEngine {
         case reparam(index: Int, before: SIMD4<Float>, after: SIMD4<Float>,
                      primBefore: Int32, primAfter: Int32)
         case warp
+        case tubeEdit(index: Int, before: [SIMD4<Float>], after: [SIMD4<Float>])
         case addBatch(rows: [LayerRow])
         case removeBatch(rows: [LayerRow])
     }
@@ -1233,12 +1235,101 @@ final class ClayEngine {
         localBounds.append(bound)
         itemLayers.append(Int32(activeLayerSlot))
         itemBatches.append(0)
+        tubePaths[node] = points
         undoLog.append(.add)
         redoOps.removeAll()
         commit()
         scheduleBake()
         scheduleAutosave()
         return true
+    }
+
+    /// Placed tubes stay editable: their paths (world xyz + per-point
+    /// radius) are kept per node so clay_layer_set_stroke_points can
+    /// replace the whole list undoably. In-session only — the ABI has no
+    /// curve-point getter, so paths from a reloaded document are not
+    /// editable (yet).
+    @ObservationIgnored private(set) var tubePaths: [clay_node_id: [SIMD4<Float>]] = [:]
+    @ObservationIgnored private var tubeEditSnapshot: [SIMD4<Float>]?
+
+    func tubePath(at index: Int) -> [SIMD4<Float>]? {
+        guard nodeIDs.indices.contains(index) else { return nil }
+        return tubePaths[nodeIDs[index]]
+    }
+
+    private func applyTubeBounds(index: Int, points: [SIMD4<Float>]) {
+        var mn = SIMD3<Float>(repeating: .greatestFiniteMagnitude)
+        var mx = -mn
+        var maxR: Float = 0
+        for p in points {
+            mn = simd_min(mn, SIMD3(p.x, p.y, p.z))
+            mx = simd_max(mx, SIMD3(p.x, p.y, p.z))
+            maxR = max(maxR, p.w)
+        }
+        let pad = maxR * 1.5 + 0.05
+        var aabb = (min: mn - SIMD3(repeating: pad), max: mx + SIMD3(repeating: pad))
+        let center = (aabb.min + aabb.max) * 0.5
+        var bound = (center, simd_distance(aabb.min, aabb.max) * 0.5 + 0.02)
+        if items[index].radialCount >= 2 {
+            bound = Self.ringBound(center: bound.0, radius: bound.1)
+            aabb = Self.ringAABB(aabb)
+        }
+        items[index].boundCenter = bound.0
+        items[index].boundRadius = bound.1
+        itemAABBs[index] = aabb
+        localBounds[index] = bound
+        refreshWorldBound(index)
+    }
+
+    /// One drag = one undo step: group the whole edit.
+    func beginTubeEdit(index: Int) {
+        guard let doc, tubeEditSnapshot == nil, activeStroke == nil,
+              let path = tubePath(at: index) else { return }
+        tubeEditSnapshot = path
+        _ = check(clay_document_begin_undo_group(doc))
+    }
+
+    @discardableResult
+    func updateTubeEdit(index: Int, points: [SIMD4<Float>]) -> Bool {
+        guard let doc, tubeEditSnapshot != nil, items.indices.contains(index),
+              points.count >= 2 else { return false }
+        let node = nodeIDs[index]
+        var flat: [Float] = []
+        flat.reserveCapacity(points.count * 4)
+        for p in points { flat.append(contentsOf: [p.x, p.y, p.z, p.w]) }
+        let types = [Int32](repeating: Int32(CLAY_POINT_SPLINE.rawValue),
+                            count: points.count)
+        let oldAABB = itemAABBs[index]
+        guard check(clay_layer_set_stroke_points(doc, layer, node, flat, points.count,
+                                                 types, nil, nil, 0, 0.004)) else {
+            return false
+        }
+        tubePaths[node] = points
+        applyTubeBounds(index: index, points: points)
+        commit()
+        let newAABB = itemAABBs[index]
+        scheduleBakeDirty((min: simd_min(oldAABB.min, newAABB.min),
+                           max: simd_max(oldAABB.max, newAABB.max)),
+                          debounceMilliseconds: 20)
+        return true
+    }
+
+    func endTubeEdit(index: Int) {
+        guard let doc, let before = tubeEditSnapshot else { return }
+        tubeEditSnapshot = nil
+        _ = check(clay_document_end_undo_group(doc))
+        let after = tubePath(at: index) ?? before
+        guard !before.elementsEqual(after) else { return }
+        undoLog.append(.tubeEdit(index: index, before: before, after: after))
+        redoOps.removeAll()
+        scheduleAutosave()
+    }
+
+    /// A cancelled gesture reverts to the snapshot and leaves no edit.
+    func cancelTubeEdit(index: Int) {
+        guard let snapshot = tubeEditSnapshot else { return }
+        _ = updateTubeEdit(index: index, points: snapshot)
+        endTubeEdit(index: index)
     }
 
     /// Regional volume swap — the interactive path to ClayCore's
@@ -1539,6 +1630,14 @@ final class ClayEngine {
             fieldCache = nil // the warp's reach is not itemized; rebake all
             scheduleBake()
             redoOps.append(.warp)
+        case .tubeEdit(let index, let before, let after):
+            if nodeIDs.indices.contains(index) {
+                tubePaths[nodeIDs[index]] = before
+                applyTubeBounds(index: index, points: before)
+            }
+            fieldCache = nil
+            scheduleBake()
+            redoOps.append(.tubeEdit(index: index, before: before, after: after))
         case .reparam(let index, let before, let after, let primBefore, let primAfter):
             if items.indices.contains(index) { items[index].prim = primBefore }
             replayParamsMirror(before, at: index)
@@ -1663,6 +1762,14 @@ final class ClayEngine {
             fieldCache = nil
             scheduleBake()
             undoLog.append(.warp)
+        case .tubeEdit(let index, let before, let after):
+            if nodeIDs.indices.contains(index) {
+                tubePaths[nodeIDs[index]] = after
+                applyTubeBounds(index: index, points: after)
+            }
+            fieldCache = nil
+            scheduleBake()
+            undoLog.append(.tubeEdit(index: index, before: before, after: after))
         case .reparam(let index, let before, let after, let primBefore, let primAfter):
             if items.indices.contains(index) { items[index].prim = primAfter }
             replayParamsMirror(after, at: index)

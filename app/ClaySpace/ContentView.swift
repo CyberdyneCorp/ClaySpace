@@ -33,6 +33,7 @@ struct ContentView: View {
                     .ignoresSafeArea()
                 hoverGhostOverlay
                 trimOverlay
+                tubeOverlay
                 gizmoOverlay
                 gizmoModePicker
                 topBar
@@ -476,6 +477,28 @@ struct ContentView: View {
                     }
                     .stroke(Color.orange,
                             style: StrokeStyle(lineWidth: 1.5, dash: [6, 4]))
+                }
+            }
+            .allowsHitTesting(false)
+        }
+    }
+
+    /// Control points of the tube being edited (Move tool): drag to
+    /// reshape, tap to select for the Size dial.
+    @ViewBuilder
+    private var tubeOverlay: some View {
+        if let handles = state.tubeHandles {
+            ZStack(alignment: .topLeading) {
+                Color.clear
+                ForEach(handles, id: \.index) { handle in
+                    Circle()
+                        .strokeBorder(Color.orange, lineWidth: 2)
+                        .background(
+                            Circle().fill(state.tubeSelectedPoint == handle.index
+                                          ? Color.orange
+                                          : Color.white.opacity(0.65)))
+                        .frame(width: 16, height: 16)
+                        .position(handle.point)
                 }
             }
             .allowsHitTesting(false)
