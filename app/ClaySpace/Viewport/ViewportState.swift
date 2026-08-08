@@ -360,17 +360,11 @@ final class ViewportState {
     @ObservationIgnored fileprivate var strokeSuspended = false
 
     /// The brush FOOTPRINT (radius + relief rounding) must clear the
-    /// mask, not just the chain center — an anchor at the boundary still
-    /// overhangs frozen clay by radius + falloff.
-    fileprivate func maskFootprintGate(at p: SIMD3<Float>, along dir: SIMD3<Float>,
+    /// mask in EVERY direction, not just the chain center or the travel
+    /// axis — a big brush overhangs frozen clay sideways too.
+    fileprivate func maskFootprintGate(at p: SIMD3<Float>,
                                        footprint: Float) -> Float {
-        var gate = engine.maskWeight(at: p)
-        if simd_length(dir) > 1e-5 {
-            let d = simd_normalize(dir)
-            gate = min(gate, engine.maskWeight(at: p + d * footprint))
-            gate = min(gate, engine.maskWeight(at: p - d * footprint))
-        }
-        return gate
+        engine.maskWeight(at: p, footprint: footprint)
     }
 
     /// Top-bar brush dials. Size multiplies every brush footprint (0.5 =
@@ -1037,8 +1031,7 @@ extension ViewportState: PencilToolSink {
             }
         }
         strokeTravel = 0
-        let anchorGate = maskFootprintGate(at: start, along: camera.basis.right,
-                                           footprint: r + rounding)
+        let anchorGate = maskFootprintGate(at: start, footprint: r + rounding)
         if anchorGate < 0.35 {
             strokePlane = (start, camera.basis.forward)
             lastStrokePoint = start
@@ -1303,7 +1296,7 @@ extension ViewportState: PencilToolSink {
         // clay, begin a fresh one leaving it. Per-point thinning cannot
         // gate relief/incise, whose footprint is the item's rounding.
         let footprint = r + (strokeParams?.rounding ?? 0)
-        let gate = maskFootprintGate(at: p, along: p - last, footprint: footprint)
+        let gate = maskFootprintGate(at: p, footprint: footprint)
         if gate < 0.35 {
             if engine.isStroking { engine.endStroke() }
             strokeSuspended = true

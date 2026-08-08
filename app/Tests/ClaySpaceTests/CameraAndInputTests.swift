@@ -945,6 +945,28 @@ final class CameraAndInputTests: XCTestCase {
                                             direction: SIMD3(0, 0, -1))?.position.z ?? -9
         XCTAssertEqual(shoulder, sqrt(0.64 - 0.15 * 0.15), accuracy: 0.02,
                        "no groove on the frozen shoulder either")
+
+        // The user's second repro: a BIG Standard brush sweeping past the
+        // band overhung it sideways and rebuilt clay over the mask. The
+        // footprint gate is a sphere, so size must not matter.
+        state.requestUndo()
+        state.requestUndo()
+        state.sculptBrush = .standard
+        state.brushSize = 1.0
+        state.brushStrength = 1.0
+        let crownBefore = state.engine.raycast(origin: SIMD3(0, 0.8, 3),
+                                               direction: SIMD3(0, 0, -1))?.position.z ?? -9
+        state.pencilBegan(at: CGPoint(x: 250, y: 300), pressure: 0.8)
+        for x in stride(from: 260, through: 660, by: 8) {
+            state.pencilMoved(to: CGPoint(x: CGFloat(x), y: 300), pressure: 0.8)
+        }
+        state.pencilEnded(at: CGPoint(x: 660, y: 300))
+        let crownAfter = state.engine.raycast(origin: SIMD3(0, 0.8, 3),
+                                              direction: SIMD3(0, 0, -1))?.position.z ?? -9
+        XCTAssertEqual(crownAfter, crownBefore, accuracy: 0.02,
+                       "a big brush cannot overhang the frozen band")
+        state.brushSize = 0.5
+        state.brushStrength = 0.5
     }
 
     // MARK: Top-bar brush dials (size / strength)

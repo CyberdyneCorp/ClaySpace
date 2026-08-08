@@ -2830,6 +2830,56 @@ final class ClayEngine {
     }
 
     /// A non-empty mask for brush gating, or nil (empty masks gate nothing).
+    /// The mask weight a brush FOOTPRINT sphere is allowed: sampling can
+    /// always straddle a mask thinner than the sample spacing, so the
+    /// gate is geometric — if the sphere touches the painted region's
+    /// world bounds (clay_mask_bounds), the brush is suspended. Freeze
+    /// must HOLD; being conservative near the mask is the right failure.
+    func maskWeight(at p: SIMD3<Float>, footprint: Float) -> Float {
+        let weight = maskWeight(at: p)
+        guard footprint > 0, weight > 0,
+              let handle = gatingMask(voxelContext: false) else { return weight }
+        var cellSize: Float = 0
+        var mn: (Int32, Int32, Int32) = (0, 0, 0)
+        var mx: (Int32, Int32, Int32) = (0, 0, 0)
+        var has: Int32 = 0
+        guard clay_mask_cell_size(handle, &cellSize) == CLAY_OK, cellSize > 0,
+              withUnsafeMutablePointer(to: &mn, { mnp in
+                  withUnsafeMutablePointer(to: &mx, { mxp in
+                      clay_mask_bounds(handle,
+                          UnsafeMutableRawPointer(mnp).assumingMemoryBound(to: Int32.self),
+                          UnsafeMutableRawPointer(mxp).assumingMemoryBound(to: Int32.self),
+                          &has) == CLAY_OK
+                  })
+              }), has != 0 else { return weight }
+        let boxMin = SIMD3(Float(mn.0), Float(mn.1), Float(mn.2)) * cellSize
+        let boxMax = SIMD3(Float(mx.0 + 1), Float(mx.1 + 1), Float(mx.2 + 1)) * cellSize
+        let nearest = simd_clamp(p, boxMin, boxMax)
+        guard simd_distance(nearest, p) < footprint else { return weight }
+        // The footprint reaches active mask cells (erasing releases their
+        // storage, so the box holds only live mask): decisively frozen.
+        return 0
+    }
+
+    /// Test diagnostics: the mask lattice's cell size and painted box.
+    func debugMaskBounds() -> String {
+        guard let handle = gatingMask(voxelContext: false) else { return "no mask" }
+        var cellSize: Float = 0
+        _ = clay_mask_cell_size(handle, &cellSize)
+        var mn: (Int32, Int32, Int32) = (0, 0, 0)
+        var mx: (Int32, Int32, Int32) = (0, 0, 0)
+        var has: Int32 = 0
+        _ = withUnsafeMutablePointer(to: &mn) { mnp in
+            withUnsafeMutablePointer(to: &mx) { mxp in
+                clay_mask_bounds(handle,
+                    UnsafeMutableRawPointer(mnp).assumingMemoryBound(to: Int32.self),
+                    UnsafeMutableRawPointer(mxp).assumingMemoryBound(to: Int32.self),
+                    &has)
+            }
+        }
+        return "cs=\(cellSize) has=\(has) mn=\(mn) mx=\(mx)"
+    }
+
     /// The edit weight the layer mask leaves at a world point: 1 - mask,
     /// so 1 where unmasked and 0 where frozen. SDF edits are declarative
     /// items — the ABI's contract is that they consume the mask when a
