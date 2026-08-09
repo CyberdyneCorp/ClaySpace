@@ -47,13 +47,23 @@ fi
 
 # CLAY_GOLDEN_REBASELINE makes the bundle EMIT references instead of
 # comparing; without it the same run compares and fails on drift.
-xcodebuild test \
+#
+# The run is allowed to FAIL: a brush whose geometric probe is red still
+# renders, and its image is still the reference for what it renders today.
+# Refusing to extract in that case would mean no brush can ever be
+# baselined until every brush passes. The attachments are what matter, so
+# failures are reported and the extraction continues.
+if ! xcodebuild test \
     -project app/ClaySpace.xcodeproj -scheme ClaySpace \
     -destination "$DESTINATION" \
     -only-testing:ClaySpaceTests/BrushMatrixTests \
     -resultBundlePath "$RESULT" \
-    TEST_RUNNER_CLAY_GOLDEN_REBASELINE=1 \
+    CLAY_GOLDEN_REBASELINE=1 \
     "${EXTRA[@]}" >/dev/null
+then
+    echo "note: the capture run had failing tests — their images are still" >&2
+    echo "      extracted below; check them before committing" >&2
+fi
 
 WORK="$(mktemp -d)"
 xcrun xcresulttool export attachments --path "$RESULT" --output-path "$WORK" >/dev/null
