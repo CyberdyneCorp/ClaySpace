@@ -11,7 +11,7 @@ Two ABI facts shape the design:
 
 **Goals**
 - Adding a brush means adding one descriptor row, not editing eight switches.
-- `pencilBegan` cognitive complexity ≤ 15, measured with the cognitive-complexity skill.
+- `pencilBegan`, `pencilMoved`, and `pencilEnded` each at SwiftLint `cyclomatic_complexity` ≤ 15, from 58 / 51 / 31 today.
 - The 23 existing brushes behave identically before and after the refactor, demonstrated by the brush matrix rather than by review.
 - Smooth and Extract land as descriptor rows.
 

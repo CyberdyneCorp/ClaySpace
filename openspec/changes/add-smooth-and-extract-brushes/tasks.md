@@ -3,7 +3,14 @@
 ## 1. Baseline before touching the hot path
 
 - [ ] 1.1 Record a pre-refactor matrix run on the current tree: probe results for all 23 brushes, saved so the post-refactor run can be diffed against it rather than eyeballed
-- [ ] 1.2 Measure `pencilBegan` with the cognitive-complexity skill and record the starting number, so ≤ 15 is a measured claim and not an assertion
+  - Simulator (iPad16,4), ClayCore v0.24.2: 1 failing case — `voxel grab left the mesh untouched` and `voxel fill added nothing`. All goldens match. This is the comparison baseline
+  - Device (iPad Air 13-inch M3, iPad15,5): same two probe failures, plus 20 IMAGE BASELINE MISSING (no device goldens — 6.8), plus **`testSurfaceBrushes` crashed with signal kill**, so standard/crease/carve/snakeHook produced no result. BLOCKING for a device baseline: re-running to establish whether it reproduces. `add-brush-verification` 1.3 recorded 21 baseline-missing and no crash on 0.23.0, and measured a 510–706 MB footprint, so jetsam is the first hypothesis
+- [x] 1.2 Starting numbers recorded with SwiftLint 0.63.3 (`cyclomatic_complexity` / `function_body_length`), since no open-source cognitive-complexity analyzer supports Swift — the cognitive-complexity skill covers Python, Go, TS/JS, C/C++, Solidity and SystemVerilog only, and the "58" figure was always SwiftLint cyclomatic:
+  - `pencilBegan` (:869) — **58**, body 267 lines
+  - `pencilMoved` (:1181) — **51**, body 241 lines
+  - `pencilEnded` (:1502) — **31**, body 157 lines
+  - `applyTrim` (:1706) — 15, body 61 lines; `pencilHovered` (:1908) — body 52 lines
+- [ ] 1.3 Add `.swiftlint.yml` so the bound is enforceable rather than a number in a document, and so these three stop being the only thing holding the line
 
 ## 2. Brush descriptor
 
@@ -19,8 +26,8 @@
 - [ ] 3.2 Extract per-tool touch-down handlers: voxel, shape, trim, freeze, spray, select/move
 - [ ] 3.3 Reduce `pencilBegan` to routing — voxel mode, then gizmo, then tool — preserving the current precedence exactly
 - [ ] 3.4 Dispatch the sculpt path on `descriptor.action` instead of `isWarp` / `isPath` / fallthrough
-- [ ] 3.5 Apply the same treatment to `pencilMoved` and `pencilEnded` where they branch on the same brush families, so the three stay symmetric
-- [ ] 3.6 `pencilBegan` cognitive complexity ≤ 15, measured. Record the before/after numbers in this task
+- [ ] 3.5 Apply the same treatment to `pencilMoved` (51) and `pencilEnded` (31) — they branch on the same brush families, and leaving them behind would keep the descriptor half-used
+- [ ] 3.6 SwiftLint `cyclomatic_complexity` ≤ 15 for all three, with no `function_body_length` violation. Record the after numbers against the 1.2 baseline
 - [ ] 3.7 Matrix run: all 23 brushes still match the 1.1 baseline, and no IMAGE DRIFT — a no-behaviour-change refactor should not move a single golden
 
 ## 4. Smooth brush
