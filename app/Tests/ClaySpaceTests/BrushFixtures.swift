@@ -12,6 +12,12 @@ enum BrushEffect {
     case addsMaterial
     case removesMaterial
     case reshapes
+    /// The brush's claim is a PLANAR FACET, so movement alone is not
+    /// proof. hPolish and Flatten passed as `.reshapes` while rendering
+    /// indistinguishably from an untouched sphere — `.reshapes` accepts
+    /// any probe moving more than `minDelta`, and the default `0.004` is
+    /// a thirtieth of a `0.12` voxel cell. This asserts the shape.
+    case flattens
 }
 
 /// One brush, everything needed to exercise it, and what it must do.
@@ -93,8 +99,14 @@ enum BrushMatrix {
         BrushFixture("move", select: { $0.sculptBrush = .move }, effect: .reshapes),
         BrushFixture("moveTopo", select: { $0.sculptBrush = .moveTopo }, effect: .reshapes),
         BrushFixture("tube", select: { $0.sculptBrush = .tube }, effect: .addsMaterial),
-        BrushFixture("polish", select: { $0.sculptBrush = .polish }, effect: .reshapes),
-        BrushFixture("flatten", select: { $0.sculptBrush = .flatten }, effect: .reshapes),
+        // The flatten family claims a facet, so it is probed for one. Both
+        // ran at the default strength and passed as `.reshapes` while
+        // rendering as an untouched ball; full strength is what the brush
+        // is for, and `minDelta` rises to a cell-scale movement.
+        BrushFixture("polish", select: { $0.sculptBrush = .polish },
+                     effect: .flattens, minDelta: 0.02, strength: 1),
+        BrushFixture("flatten", select: { $0.sculptBrush = .flatten },
+                     effect: .flattens, minDelta: 0.02, strength: 1),
         BrushFixture("magnify", select: { $0.sculptBrush = .magnify }, effect: .reshapes),
         BrushFixture("pinch", select: { $0.sculptBrush = .pinch }, effect: .reshapes),
         // Noise at its default strength moves the surface by ~2e-05 — real,
@@ -230,7 +242,12 @@ enum BrushMatrix {
                 XCTAssertTrue(shrank || moved,
                               "voxel \(fixture.name) removed nothing",
                               file: file, line: line)
-            case .reshapes:
+            case .reshapes, .flattens:
+                // Voxel measurement is a vertex count and a checksum, not
+                // surface distances, so there is no probe line to fit and
+                // planarity cannot be judged here. `.flattens` degrades to
+                // "the mesh changed" for voxel verbs — stated rather than
+                // silently implied.
                 XCTAssertTrue(moved, "voxel \(fixture.name) left the mesh untouched",
                               file: file, line: line)
             }
@@ -250,7 +267,7 @@ enum BrushMatrix {
         // Direction is about BULK movement, so the mean carries it; a
         // reshaping brush only has to move the surface somewhere, so the
         // largest movement carries that.
-        let delta = fixture.effect == .reshapes
+        let delta = fixture.effect == .reshapes || fixture.effect == .flattens
             ? (deltas.max(by: { abs($0) < abs($1) }) ?? 0)
             : deltas.reduce(0, +) / Float(deltas.count)
         switch fixture.effect {
@@ -266,6 +283,56 @@ enum BrushMatrix {
             XCTAssertGreaterThan(abs(delta), fixture.minDelta,
                                  "\(fixture.name) left the surface where it was "
                                  + "(moved \(delta))", file: file, line: line)
+        case .flattens:
+            XCTAssertGreaterThan(abs(delta), fixture.minDelta,
+                                 "\(fixture.name) left the surface where it was "
+                                 + "(moved \(delta))", file: file, line: line)
+            guard let curveBefore = BrushMatrix.planarityResidual(before.surfaceDistances),
+                  let curveAfter = BrushMatrix.planarityResidual(after.surfaceDistances)
+            else {
+                return XCTFail("\(fixture.name): not enough surface under the "
+                               + "probe line to judge planarity",
+                               file: file, line: line)
+            }
+            // A facet is the claim, so the probed span must get STRAIGHTER.
+            // Relative, because the absolute residual depends on how much
+            // of the sphere the probe line spans.
+            XCTAssertLessThan(curveAfter, curveBefore * 0.7,
+                              "\(fixture.name) moved the surface but did not "
+                              + "flatten it: residual \(curveBefore) -> "
+                              + "\(curveAfter). A flatten that leaves the "
+                              + "region as curved as it found it has not done "
+                              + "its job", file: file, line: line)
         }
+    }
+
+    /// How far the probed surface departs from a straight line, as RMS
+    /// residual about a least-squares fit through the camera-to-surface
+    /// distances. A sphere's probe line is curved and scores high; a real
+    /// facet is straight and scores near zero.
+    ///
+    /// This reuses the probe points the matrix already samples — the
+    /// measurement was always available, it just was not being asked for.
+    /// `nil` when fewer than three points found surface, since two points
+    /// define a line and cannot disagree with one.
+    static func planarityResidual(_ distances: [Float?]) -> Float? {
+        let samples = distances.enumerated().compactMap { index, distance -> (Float, Float)? in
+            guard let distance else { return nil }
+            return (Float(index), distance)
+        }
+        guard samples.count >= 3 else { return nil }
+        let n = Float(samples.count)
+        let meanX = samples.reduce(0) { $0 + $1.0 } / n
+        let meanY = samples.reduce(0) { $0 + $1.1 } / n
+        let varianceX = samples.reduce(0) { $0 + ($1.0 - meanX) * ($1.0 - meanX) }
+        guard varianceX > 0 else { return nil }
+        let covariance = samples.reduce(0) { $0 + ($1.0 - meanX) * ($1.1 - meanY) }
+        let slope = covariance / varianceX
+        let intercept = meanY - slope * meanX
+        let squared = samples.reduce(Float(0)) { total, sample in
+            let residual = sample.1 - (slope * sample.0 + intercept)
+            return total + residual * residual
+        }
+        return (squared / n).squareRoot()
     }
 }

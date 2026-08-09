@@ -26,7 +26,7 @@
 
 ## 3. Dispatch refactor
 
-- [ ] 3.1 Extract `gizmoHitTest(at:) -> Bool` from `ViewportState.swift:906–1012` (axis handles, rotation rings, scale/rotate/center handles), returning whether it consumed the touch
+- [x] 3.1 `gizmoHitTest(at:) -> Bool` extracted — 106 lines. `pencilBegan` 58 -> 44; the helper is itself under the threshold and unflagged
 - [ ] 3.2 Extract per-tool touch-down handlers: voxel, shape, trim, freeze, spray, select/move
 - [ ] 3.3 Reduce `pencilBegan` to routing — voxel mode, then gizmo, then tool — preserving the current precedence exactly
 - [ ] 3.4 Dispatch the sculpt path on `descriptor.action` instead of `isWarp` / `isPath` / fallthrough
@@ -59,6 +59,25 @@ Implements `add-brush-verification` tasks 7.1–7.6; that change owns the requir
 - [ ] 5.6 Engine test: a frozen patch produces a new item; source layer and mask unchanged; one undo step (spec: "A frozen patch becomes a new item")
 - [ ] 5.7 Engine test: a mask that never reaches the surface reports an error and adds nothing (spec: "The mask never reaches the surface")
 - [ ] 5.8 Engine test: an empty mask reports and changes nothing (spec: "Nothing is frozen")
+
+## 5b. Flatten family verification
+
+Found while visually inspecting hPolish on device: the rendered result is
+indistinguishable from an untouched sphere, yet the fixture passes. Snake Hook
+and Carve are unmistakable in the same setup. Smooth is the third brush on the
+`replaceRegion` path and would inherit the same convention, so this is fixed
+before it lands rather than after.
+
+- [x] 5b.1 `BrushMatrix.planarityResidual` — RMS residual about a least-squares line through the probe distances; `nil` under three samples, since two points cannot disagree with a line
+- [x] 5b.2 `BrushEffect.flattens` — requires movement AND residual falling below 70% of its former value. Voxel verbs degrade to "the mesh changed", stated in the code rather than implied, since voxel measurement is a checksum with no probe line
+- [x] 5b.3 `polish` and `flatten` moved onto `.flattens` at `strength: 1`, `minDelta: 0.02` (five times the old default)
+- [x] 5b.4 SETTLED: **weak fixture, not weak brush.** At full strength hPolish cuts an unmistakable planar facet — verified by eye on the capture and by the planarity probe. The old fixture ran at default strength and asserted only that some probe moved 0.004 world units, a thirtieth of a cell
+- [x] 5b.5 Goldens re-baselined and eyeballed — hPolish and Flatten both now render an unmistakable planar facet where they previously rendered as an untouched ball
+- [x] 5b.8 **Golden name collision fixed.** `flatten`, `magnify` and `pinch` each exist BOTH as an SDF brush and as a voxel verb, and `GoldenStore.referenceName` was only `brush`-`view`. Each pair therefore shared one reference file, and the voxel one won because the voxel tests run last alphabetically — so three SDF brushes were compared against a voxel verb's picture. Six of 23 brushes had no reference of their own. This is the true explanation for "23 captures, 20 files", which 6.7 had recorded as three brushes sharing a view
+  - It passed because the tolerance cannot see it: SDF flatten against the voxel flatten reference measures mean **0.859** (tolerance 1.5) and **0.97%** outliers (tolerance 2%) — inside both. Two visibly different brushes compare as identical
+  - Voxel references are now qualified `voxel-<name>`; 23 captures produce 23 files
+- [ ] 5b.6 Review `minDelta: 0.004` as a default across the registry — one thirtieth of a voxel cell is "did anything happen", not "did the brush work"
+- [ ] 5b.7 **The golden tolerance does not catch this class of change.** Comparing the committed `polish` golden against the full-strength capture — invisible smudge vs. clear facet — measures mean absolute channel difference **0.254** against a tolerance of 1.5, and outlier fraction **1.06%** against 2%. It passes on both. The mean is taken over the whole 480x360 frame, ~90% of which is unchanged, so a local change cannot move it; `GoldenStore` already carries the outlier count for exactly this reason, but 2% is too loose. Tightening it needs the cross-GPU noise floor measured first — local renders are byte-identical (3.4), and the CI artifact upload now makes the runner's numbers obtainable
 
 ## 6. Matrix coverage
 

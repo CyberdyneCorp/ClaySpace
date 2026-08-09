@@ -52,7 +52,16 @@ final class BrushMatrixTests: XCTestCase {
         // separately-reported check. A driver update shifts every image at
         // once while every brush still works — if that arrives as "brushes
         // broken", the suite trains people to ignore it.
-        switch GoldenStore.verify(after, brush: fixture.name, view: "after", in: self) {
+        // Qualify voxel verbs: `flatten`, `magnify` and `pinch` each exist
+        // BOTH as an SDF brush and as a voxel verb, and the reference name
+        // was only brush+view. Each pair therefore shared one file — the
+        // voxel one won, because the voxel tests run last alphabetically —
+        // so three SDF brushes were being compared against a voxel verb's
+        // picture. It passed: SDF flatten against the voxel flatten
+        // reference measures mean 0.859 and 0.97% outliers, inside both
+        // tolerances. Six of the 23 brushes had no reference of their own.
+        let reference = fixture.isVoxel ? "voxel-\(fixture.name)" : fixture.name
+        switch GoldenStore.verify(after, brush: reference, view: "after", in: self) {
         case .matched, .rebaselined:
             break
         case .missingBaseline(let name):
