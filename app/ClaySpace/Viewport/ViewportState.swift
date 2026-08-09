@@ -429,13 +429,6 @@ final class ViewportState {
 
         var title: String { descriptor.title }
         var symbol: String { descriptor.symbol }
-        var radiusScale: Float { descriptor.radiusScale }
-        var followsSurface: Bool { descriptor.followsSurface }
-        func surfaceOffset(strength: Float) -> Float {
-            descriptor.surfaceOffset(strength: strength)
-        }
-        var isWarp: Bool { descriptor.action.anchorsOnSurface }
-        var isPath: Bool { if case .path = descriptor.action { true } else { false } }
     }
     var sculptBrush: SculptBrush = .standard
     @ObservationIgnored fileprivate var strokeTravel: Float = 0
@@ -1352,7 +1345,8 @@ extension ViewportState: PencilToolSink {
             }
             return true
         }
-        if activeTool == .sculpt, sculptBrush.isPath, !tubePoints.isEmpty,
+        if activeTool == .sculpt, case .path = sculptBrush.descriptor.action,
+           !tubePoints.isEmpty,
            gizmoDrag == nil {
             guard let ray = ray(through: point) else { return true }
             let hit = engine.raycast(origin: ray.origin, direction: ray.direction)
@@ -1540,11 +1534,12 @@ extension ViewportState: PencilToolSink {
               let last = lastStrokePoint,
               let ray = ray(through: point) else { return }
 
+        let descriptor = sculptBrush.descriptor
         var r = radius(for: max(pressure, 0.1), altitude: altitude, at: last)
-        if activeTool == .sculpt { r *= sculptBrush.radiusScale }
+        if activeTool == .sculpt { r *= descriptor.radiusScale }
         var target: SIMD3<Float>?
 
-        if activeTool == .sculpt, sculptBrush.followsSurface {
+        if activeTool == .sculpt, descriptor.followsSurface {
             // Standard/Carve glide ON the clay: an attributed raycast finds
             // the surface, and hits owned by the stroke being drawn fall
             // back to the view plane instead of chasing themselves. The
@@ -1554,7 +1549,8 @@ extension ViewportState: PencilToolSink {
             if let hit = engine.raycast(origin: ray.origin, direction: ray.direction),
                let picked = engine.pick(origin: ray.origin, direction: ray.direction),
                picked.index != activeIndex {
-                target = hit.position + hit.normal * (r * sculptBrush.surfaceOffset(strength: brushStrength))
+                target = hit.position
+                    + hit.normal * (r * descriptor.surfaceOffset(strength: brushStrength))
                 // The fallback plane follows the LAST surface anchor, so a
                 // moment of self-attribution doesn't fling the chain off on
                 // the tangent from the stroke's start.
@@ -1647,26 +1643,49 @@ extension ViewportState: PencilToolSink {
     }
 
     func pencilEnded(at point: CGPoint) {
-        let start = pencilStart
         pencilStart = nil
         if mode == .voxel {
             lastVoxelCell = nil
             engine.endVoxelEdits()
             return
         }
+        // Order is the order these can be open in, and is unchanged.
+        if endToolGesture(at: point) { return }
+        if commitTopologicalMove(at: point) { return }
+        if commitTubePath(at: point) { return }
+        if commitSurfaceMove(at: point) { return }
+        if commitWarp(at: point) { return }
+        if endActiveSession(at: point) { return }
+        // Tap feedback for strokes that could not start.
+        switch activeTool {
+        case .erase where strokePlane == nil:
+            showToast("Nothing to carve there")
+        case .paint where strokePlane == nil:
+            showToast("Paint needs a surface")
+        default:
+            break
+        }
+        strokePlane = nil
+        lastStrokePoint = nil
+    }
+
+    /// Shape placement, spray, trim, and tube control points: gestures that
+    /// were driving a tool rather than the clay.
+    private func endToolGesture(at point: CGPoint) -> Bool {
         if activeTool == .shape, gizmoDrag == nil {
-            _ = start // the preview followed the pencil; place where it shows
+            // The preview followed the pencil, so place where it shows —
+            // the touch-down point is deliberately not used.
             placeShape(at: point)
             shapePreview = nil
-            return
+            return true
         }
         if activeTool == .spray, gizmoDrag == nil, !spraySamples.isEmpty {
             applySpray(at: point)
-            return
+            return true
         }
         if activeTool == .trim, gizmoDrag == nil, trimStart != nil {
             applyTrim(endingAt: point)
-            return
+            return true
         }
         if let pointIndex = tubePointDrag, let editIndex = tubeEditIndex {
             tubePointDrag = nil
@@ -1680,9 +1699,17 @@ extension ViewportState: PencilToolSink {
                     showToast("Point \(pointIndex + 1) — Size dial sets its radius")
                 }
             }
-            return
+            return true
         }
-        if let drag = moveDrag, sculptBrush == .moveTopo {
+        return false
+    }
+
+    /// Move Topological has its own engine verb — the drag is weighted
+    /// along the MATERIAL rather than through space.
+    private func commitTopologicalMove(at point: CGPoint) -> Bool {
+        guard let drag = moveDrag,
+              case .surfaceMove(true) = sculptBrush.descriptor.action
+        else { return false }
             moveDrag = nil
             strokePlane = nil
             let displacement = drag.current - drag.anchor
@@ -1697,8 +1724,11 @@ extension ViewportState: PencilToolSink {
                     showToast("Move Topo needs a surface region")
                 }
             }
-            return
-        }
+        return true
+    }
+
+    /// Tube: the collected path becomes one swept item.
+    private func commitTubePath(at point: CGPoint) -> Bool {
         if !tubePoints.isEmpty {
             let path = tubePoints
             tubePoints = []
@@ -1707,8 +1737,13 @@ extension ViewportState: PencilToolSink {
                 emitHaptic(.completed, at: point)
                 showToast("Tube")
             }
-            return
+            return true
         }
+        return false
+    }
+
+    /// Move: apply the session the drag has been previewing.
+    private func commitSurfaceMove(at point: CGPoint) -> Bool {
         if let drag = moveDrag {
             moveDrag = nil
             strokePlane = nil
@@ -1728,49 +1763,57 @@ extension ViewportState: PencilToolSink {
                     showToast("Move reached nothing")
                 }
             }
-            return
+            return true
         }
-        if let anchor = warpAnchor {
-            warpAnchor = nil
-            switch sculptBrush {
-            case .polish, .flatten:
-                let strength = 0.3 + 0.7 * brushStrength
-                if engine.polishSurface(center: anchor, normal: warpNormal,
-                                        radius: warpRadius * 1.3,
-                                        strength: strength,
-                                        mode: sculptBrush == .polish
-                                            ? CLAY_FLATTEN_CUT_ONLY
-                                            : CLAY_FLATTEN_TWO_SIDED) {
-                    emitHaptic(.completed, at: point)
-                }
-            case .magnify, .pinch:
-                let strength = (0.15 + 0.6 * brushStrength)
-                    * (sculptBrush == .pinch ? -1 : 1)
-                if engine.magnifySurface(center: anchor, radius: warpRadius * 1.4,
-                                         strength: strength) > 0 {
-                    emitHaptic(.completed, at: point)
-                }
-            case .noise:
-                if let ray = ray(through: point),
-                   let picked = engine.pick(origin: ray.origin,
-                                            direction: ray.direction) {
-                    let amplitude = warpRadius * 0.1 * (0.3 + 1.4 * brushStrength)
-                    if engine.noiseSurface(index: picked.index,
-                                           amplitude: amplitude,
-                                           frequency: 3 / max(warpRadius, 0.05),
-                                           at: picked.position) {
-                        emitHaptic(.completed, at: point)
-                    }
-                }
-            default: break
+        return false
+    }
+
+    /// The tap-style warps commit here, on lift. The brush's descriptor
+    /// carries what used to be `sculptBrush == .polish` and
+    /// `sculptBrush == .pinch` comparisons: a flatten knows its own mode,
+    /// and pinch is magnify with a negated sign.
+    private func commitWarp(at point: CGPoint) -> Bool {
+        guard let anchor = warpAnchor else { return false }
+        warpAnchor = nil
+        switch sculptBrush.descriptor.action {
+        case .flatten(let mode):
+            let strength = 0.3 + 0.7 * brushStrength
+            if engine.polishSurface(center: anchor, normal: warpNormal,
+                                    radius: warpRadius * 1.3,
+                                    strength: strength, mode: mode) {
+                emitHaptic(.completed, at: point)
             }
-            return
+        case .deform(let sign):
+            let strength = (0.15 + 0.6 * brushStrength) * sign
+            if engine.magnifySurface(center: anchor, radius: warpRadius * 1.4,
+                                     strength: strength) > 0 {
+                emitHaptic(.completed, at: point)
+            }
+        case .noise:
+            if let ray = ray(through: point),
+               let picked = engine.pick(origin: ray.origin,
+                                        direction: ray.direction) {
+                let amplitude = warpRadius * 0.1 * (0.3 + 1.4 * brushStrength)
+                if engine.noiseSurface(index: picked.index,
+                                       amplitude: amplitude,
+                                       frequency: 3 / max(warpRadius, 0.05),
+                                       at: picked.position) {
+                    emitHaptic(.completed, at: point)
+                }
+            }
+        case .stroke, .surfaceMove, .path, .relax:
+            break // committed elsewhere, or nothing to commit
         }
+        return true
+    }
+
+    /// Close whichever engine session the gesture had open.
+    private func endActiveSession(at point: CGPoint) -> Bool {
         if engine.isEditingParams {
             engine.endParamEdit()
             emitHaptic(.completed, at: point)
             gizmoDrag = nil
-            return
+            return true
         }
         if engine.isTransforming {
             engine.endTransform()
@@ -1778,7 +1821,7 @@ extension ViewportState: PencilToolSink {
             dragStartHit = nil
             strokePlane = nil
             gizmoDrag = nil
-            return
+            return true
         }
         if engine.isStroking {
             engine.endStroke()
@@ -1787,26 +1830,16 @@ extension ViewportState: PencilToolSink {
             lastStrokePoint = nil
             strokeSuspended = false
             strokeParams = nil
-            return
+            return true
         }
         if strokeSuspended {
             strokeSuspended = false
             strokeParams = nil
             strokePlane = nil
             lastStrokePoint = nil
-            return
+            return true
         }
-        // Tap feedback for strokes that could not start.
-        switch activeTool {
-        case .erase where strokePlane == nil:
-            showToast("Nothing to carve there")
-        case .paint where strokePlane == nil:
-            showToast("Paint needs a surface")
-        default:
-            break
-        }
-        strokePlane = nil
-        lastStrokePoint = nil
+        return false
     }
 
     /// Per-axis parameter scaling: which clay_prim params a local axis
