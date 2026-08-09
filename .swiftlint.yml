@@ -1,0 +1,64 @@
+# SwiftLint configuration for ClaySpace.
+#
+# The point of this file is to hold a line, not to declare the codebase
+# clean. Thresholds are set from the current distribution so that today's
+# code passes and tomorrow's regressions do not — "these 14 must not
+# become 30". Tighten as the backlog comes down; do not loosen to make a
+# new violation go away.
+
+included:
+  - app/ClaySpace
+  - app/Tests
+
+excluded:
+  - app/ClaySpace.xcodeproj
+
+disabled_rules:
+  # 348 violations, essentially all of them single-letter math names —
+  # u, w, q, r, d for basis vectors, quaternions, radii, distances. That
+  # is the vocabulary of the domain; renaming them to satisfy a linter
+  # would make the geometry harder to read, not easier.
+  - identifier_name
+
+cyclomatic_complexity:
+  # Current distribution: 58, 51, 31, 27, 26, 17, 16, 15, 15, 14, 14,
+  # 13, 12, 11. The top three are pencilBegan / pencilMoved /
+  # pencilEnded, which add-smooth-and-extract-brushes brings to <= 15.
+  # The error threshold sits above the rest of the backlog so it blocks
+  # NEW monsters without failing on code this change is not touching.
+  warning: 15
+  error: 30
+
+function_body_length:
+  warning: 100
+  error: 280
+
+large_tuple:
+  # (position, normal), (point, normal, index) and friends — a 3-tuple is
+  # a reasonable way to return a hit in this codebase.
+  warning: 3
+  error: 8
+
+# Everything below errors ABOVE today's worst, deliberately: the only
+# errors this file should produce right now are the three pencil
+# functions above, which add-smooth-and-extract-brushes fixes. That way
+# `swiftlint` becomes a CI gate the moment the refactor lands, instead of
+# being a permanently-red signal everyone learns to scroll past. Each
+# number is the current worst plus headroom, and each is a debt worth
+# paying down separately.
+type_body_length:
+  warning: 500
+  error: 3900        # ClayEngine is 3798
+
+file_length:
+  warning: 1000
+  error: 4000        # ClayEngine is 3861
+  ignore_comment_only_lines: true
+
+function_parameter_count:
+  warning: 8
+  error: 14          # Renderer.render takes 13
+
+# One `as!` in MetalViewport's layerClass. Real, worth fixing, not this
+# change's business — kept visible as a warning rather than blocking.
+force_cast: warning

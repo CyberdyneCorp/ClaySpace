@@ -13,8 +13,10 @@ Everything the sculpt path needs to know about a brush — how the gesture acts,
 - **THEN** compilation SHALL fail
 - **AND** the brush SHALL NOT fall back to behaving as a plain additive stroke
 
-### Requirement: Touch-down dispatch stays legible
-The viewport's touch-down entry point SHALL route to per-tool handlers rather than deciding tool and brush behaviour inline. Its cognitive complexity SHALL be at most 15, measured with the project's cognitive-complexity tooling.
+### Requirement: Pencil dispatch stays legible
+The viewport's pencil entry points SHALL route to per-tool handlers rather than deciding tool and brush behaviour inline. Each of `pencilBegan`, `pencilMoved`, and `pencilEnded` SHALL have a SwiftLint `cyclomatic_complexity` of at most 15.
+
+SwiftLint is the metric because no open-source cognitive-complexity analyzer supports Swift; `cyclomatic_complexity` is what the project can actually measure, and is the metric the starting figures were taken with.
 
 Precedence SHALL be preserved: voxel mode outranks all tools, gizmo handles outrank the active tool, and the active tool selects the handler.
 
@@ -23,8 +25,9 @@ Precedence SHALL be preserved: voxel mode outranks all tools, gizmo handles outr
 - **THEN** the gesture SHALL drive the handle and SHALL NOT begin a stroke
 
 #### Scenario: Complexity bound holds
-- **WHEN** the touch-down entry point is measured
-- **THEN** its cognitive complexity SHALL be at most 15
+- **WHEN** SwiftLint is run over the viewport state
+- **THEN** `pencilBegan`, `pencilMoved`, and `pencilEnded` SHALL each report `cyclomatic_complexity` of at most 15
+- **AND** none of them SHALL report a `function_body_length` violation
 
 ### Requirement: Refactoring the dispatch preserves brush behaviour
 A change to how touch-down dispatch is structured SHALL NOT change what any existing brush does. Equivalence SHALL be demonstrated by the brush verification matrix rather than by inspection.
