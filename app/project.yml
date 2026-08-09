@@ -116,6 +116,14 @@ schemes:
     test:
       config: Debug
       gatherCoverageData: true
+      # The golden bundle reads CLAY_GOLDEN_REBASELINE from the HOST app's
+      # environment. `TEST_RUNNER_`-prefixed settings only reach a UI-test
+      # runner, never an app-hosted unit bundle, so the flag is carried
+      # here instead and expanded from the build setting of the same name:
+      # `xcodebuild ... CLAY_GOLDEN_REBASELINE=1` reaches the tests, and an
+      # ordinary run expands to empty and stays in compare mode.
+      environmentVariables:
+        CLAY_GOLDEN_REBASELINE: $(CLAY_GOLDEN_REBASELINE)
       targets:
         - ClaySpaceTests
         - ClaySpaceUITests
