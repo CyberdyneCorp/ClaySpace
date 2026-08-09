@@ -12,6 +12,11 @@ final class SculptUITests: XCTestCase {
         ProcessInfo.processInfo.environment["SIMULATOR_DEVICE_NAME"] != nil
     }
 
+    // @MainActor on the helpers, not just the tests: XCUIApplication and
+    // XCUIElement are main-actor isolated, and a nonisolated helper that
+    // touches them compiles on Xcode 26 but not on the older Xcode CI
+    // runs — which is how this reached main without anyone seeing it.
+    @MainActor
     private func launch() -> XCUIApplication {
         let app = XCUIApplication()
         // Suppress the first-launch gestures sheet via the defaults
@@ -79,6 +84,7 @@ final class SculptUITests: XCTestCase {
         Thread.sleep(forTimeInterval: 2.6) // let autosave persist the grid
     }
 
+    @MainActor
     private func waitForNonZero(_ element: XCUIElement, timeout: TimeInterval) -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
