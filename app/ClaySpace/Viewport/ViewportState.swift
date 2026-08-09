@@ -1076,156 +1076,187 @@ extension ViewportState: PencilToolSink {
         pencilStart = point
         pencilPeakPressure = max(pressure, 0.1)
         hoverGhost = nil // the pencil is down; the preview did its job
+        let pressure = max(pressure, 0.1)
 
-        if mode == .voxel {
-            if activeTool == .select || activeTool == .move
-                || activeTool == .shape || activeTool == .spray
-                || activeTool == .trim {
-                showToast(activeTool == .select || activeTool == .move
-                          ? "Select works in Smooth mode"
-                          : "Shapes work in Smooth mode")
-                return
-            }
-            if activeTool == .freeze {
-                freezePaint(at: point, pressure: max(pressure, 0.1))
-                return
-            }
-            lastVoxelCell = nil
-            engine.beginVoxelEdits() // the whole drag = one undo step
-            if let ray = ray(through: point),
-               let pick = engine.voxelPick(origin: ray.origin,
-                                           direction: ray.direction,
-                                           buildPlane: buildPlane) {
-                voxelStrokeNormal = pick.normal
-                let world = (SIMD3<Float>(pick.hit) + SIMD3(repeating: 0.5))
-                    * ClayEngine.voxelSize
-                voxelDragPlane = (world, camera.basis.forward)
-                lastVoxelDragPoint = nil
-            }
-            voxelEdit(at: point, pressure: max(pressure, 0.1))
-            return
-        }
-
-        // Gizmo handles outrank the active tool.
+        // Precedence is load-bearing and unchanged: voxel mode outranks
+        // every tool, and gizmo handles outrank the active tool.
+        if mode == .voxel { return voxelBegan(at: point, pressure: pressure) }
         if gizmoHitTest(at: point) { return }
 
-        // Shape tool: live preview from touch-down; places on lift.
-        if activeTool == .shape {
-            updateShapePreview(at: point)
+        switch activeTool {
+        case .shape: updateShapePreview(at: point)   // preview now, place on lift
+        case .trim: trimBegan(at: point)
+        case .freeze: freezePaint(at: point, pressure: pressure)
+        case .spray: sprayBegan(at: point, pressure: pressure, altitude: altitude)
+        case .select, .move: selectBegan(at: point)
+        case .sculpt, .erase, .paint:
+            sculptBegan(at: point, pressure: pressure, altitude: altitude)
+        }
+    }
+
+    /// Voxel mode has its own verbs; the SDF-only tools say so rather than
+    /// doing something surprising.
+    private func voxelBegan(at point: CGPoint, pressure: Float) {
+        if activeTool == .select || activeTool == .move
+            || activeTool == .shape || activeTool == .spray
+            || activeTool == .trim {
+            showToast(activeTool == .select || activeTool == .move
+                      ? "Select works in Smooth mode"
+                      : "Shapes work in Smooth mode")
             return
         }
-
-        // Trim tool: marquee from touch-down; the cut resolves on lift.
-        if activeTool == .trim {
-            trimStart = point
-            trimLassoPoints = [point]
-            trimOverlay = (trimShape == .lasso || trimShape == .curve)
-                ? .lasso([point])
-                : trimShape == .circle ? .circle(center: point, radius: 0)
-                : .rect(CGRect(origin: point, size: .zero))
-            return
-        }
-
-        // Freeze tool: paint mask weight at the surface under the pencil.
         if activeTool == .freeze {
-            freezePaint(at: point, pressure: max(pressure, 0.1))
-            return
+            return freezePaint(at: point, pressure: pressure)
         }
-
-        // Spray tool: collect the drag; ghosts show live, stamps commit
-        // on lift.
-        if activeTool == .spray {
-            guard let ray = ray(through: point) else { return }
-            let hit = engine.raycast(origin: ray.origin, direction: ray.direction)
-            guard let start = hit?.position ?? groundPoint(on: ray) else { return }
-            sprayPlane = (start, camera.basis.forward)
-            spraySamples = [(start, max(pressure, 0.1), altitude)]
-            updateSprayGhosts()
-            return
+        lastVoxelCell = nil
+        engine.beginVoxelEdits() // the whole drag = one undo step
+        if let ray = ray(through: point),
+           let pick = engine.voxelPick(origin: ray.origin,
+                                       direction: ray.direction,
+                                       buildPlane: buildPlane) {
+            voxelStrokeNormal = pick.normal
+            let world = (SIMD3<Float>(pick.hit) + SIMD3(repeating: 0.5))
+                * ClayEngine.voxelSize
+            voxelDragPlane = (world, camera.basis.forward)
+            lastVoxelDragPoint = nil
         }
+        voxelEdit(at: point, pressure: pressure)
+    }
 
-        // Select/Move: pick the item under the pencil for a one-undo-step
-        // move session; tapping empty space deselects.
-        if activeTool == .select || activeTool == .move {
-            guard let ray = ray(through: point) else { return }
-            // Tube control-point grab: beats re-picking while editing.
-            if let editIndex = tubeEditIndex,
-               let path = engine.tubePath(at: editIndex) {
-                for (i, p) in path.enumerated() {
-                    guard let sp = screenPoint(for: SIMD3(p.x, p.y, p.z)),
-                          hypot(sp.x - point.x, sp.y - point.y) < 30 else { continue }
-                    tubePointDrag = i
-                    tubeDragMoved = false
-                    engine.beginTubeEdit(index: editIndex)
-                    strokePlane = (SIMD3(p.x, p.y, p.z), camera.basis.forward)
-                    return
-                }
+    /// Trim tool: marquee from touch-down; the cut resolves on lift.
+    private func trimBegan(at point: CGPoint) {
+        trimStart = point
+        trimLassoPoints = [point]
+        trimOverlay = (trimShape == .lasso || trimShape == .curve)
+            ? .lasso([point])
+            : trimShape == .circle ? .circle(center: point, radius: 0)
+            : .rect(CGRect(origin: point, size: .zero))
+    }
+
+    /// Spray tool: collect the drag; ghosts show live, stamps commit on lift.
+    private func sprayBegan(at point: CGPoint, pressure: Float, altitude: Float) {
+        guard let ray = ray(through: point) else { return }
+        let hit = engine.raycast(origin: ray.origin, direction: ray.direction)
+        guard let start = hit?.position ?? groundPoint(on: ray) else { return }
+        sprayPlane = (start, camera.basis.forward)
+        spraySamples = [(start, pressure, altitude)]
+        updateSprayGhosts()
+    }
+
+    /// Select/Move: pick the item under the pencil for a one-undo-step move
+    /// session; tapping empty space deselects.
+    private func selectBegan(at point: CGPoint) {
+        guard let ray = ray(through: point) else { return }
+        if grabTubePoint(at: point) { return }
+        if let picked = engine.pick(origin: ray.origin, direction: ray.direction) {
+            if selectedIndex != picked.index {
+                selectedIndex = picked.index // opens a tube's path
+                showToast("Selected shape \(picked.index)")
             }
-            if let picked = engine.pick(origin: ray.origin, direction: ray.direction) {
-                if selectedIndex != picked.index {
-                    selectedIndex = picked.index // opens a tube's path
-                    showToast("Selected shape \(picked.index)")
-                }
-                if engine.beginTransform(index: picked.index) {
-                    dragStartItemPosition = engine.items[picked.index].position
-                    dragStartHit = picked.position
-                    strokePlane = (picked.position, camera.basis.forward)
-                }
-            } else if selectedIndex != nil {
-                selectedIndex = nil // closes any open tube path
-                showToast("Deselected")
+            if engine.beginTransform(index: picked.index) {
+                dragStartItemPosition = engine.items[picked.index].position
+                dragStartHit = picked.position
+                strokePlane = (picked.position, camera.basis.forward)
             }
-            return
+        } else if selectedIndex != nil {
+            selectedIndex = nil // closes any open tube path
+            showToast("Deselected")
         }
+    }
 
-        // Sculpt/Erase/Paint begin a stroke immediately — a tap is just a
-        // one-point stroke, so the preview responds on touch-down.
-        guard activeTool == .sculpt || activeTool == .erase || activeTool == .paint,
-              let ray = ray(through: point) else { return }
+    /// Tube control-point grab: beats re-picking while editing.
+    private func grabTubePoint(at point: CGPoint) -> Bool {
+        guard let editIndex = tubeEditIndex,
+              let path = engine.tubePath(at: editIndex) else { return false }
+        for (i, p) in path.enumerated() {
+            guard let sp = screenPoint(for: SIMD3(p.x, p.y, p.z)),
+                  hypot(sp.x - point.x, sp.y - point.y) < 30 else { continue }
+            tubePointDrag = i
+            tubeDragMoved = false
+            engine.beginTubeEdit(index: editIndex)
+            strokePlane = (SIMD3(p.x, p.y, p.z), camera.basis.forward)
+            return true
+        }
+        return false
+    }
+
+    /// Sculpt/Erase/Paint begin on touch-down — a tap is just a one-point
+    /// stroke, so the preview responds immediately.
+    ///
+    /// The brush's descriptor decides the SHAPE of the gesture. Erase and
+    /// Paint are tools rather than brushes and always build a chain.
+    private func sculptBegan(at point: CGPoint, pressure: Float, altitude: Float) {
+        guard let ray = ray(through: point) else { return }
         let hit = engine.raycast(origin: ray.origin, direction: ray.direction)
 
-        // Warp brushes (ClayCore 0.22) anchor on the surface and commit on
-        // pencil-up: Move drags the assembled surface, Magnify/Pinch/Noise
-        // add region deformers. No stroke item is created.
-        if activeTool == .sculpt, sculptBrush.isWarp {
-            guard let anchorHit = hit else { return } // warps need a surface
-            let warpR = radius(for: max(pressure, 0.1), altitude: altitude,
-                               at: anchorHit.position)
-                * sculptBrush.radiusScale
-            if sculptBrush == .move || sculptBrush == .moveTopo {
-                moveDrag = (anchorHit.position, anchorHit.position, warpR)
-                strokePlane = (anchorHit.position, camera.basis.forward)
-                if sculptBrush == .move { engine.beginMoveSurfaceSession() }
-            } else {
-                warpAnchor = anchorHit.position
-                warpNormal = anchorHit.normal
-                warpRadius = warpR
+        if activeTool == .sculpt {
+            switch sculptBrush.descriptor.action {
+            case .surfaceMove(let topological):
+                return beginSurfaceMove(hit: hit, pressure: pressure,
+                                        altitude: altitude, topological: topological)
+            case .flatten, .relax, .deform, .noise:
+                return beginWarpAnchor(hit: hit, pressure: pressure, altitude: altitude)
+            case .path:
+                return beginTubePath(hit: hit, ray: ray, pressure: pressure,
+                                     altitude: altitude)
+            case .stroke:
+                break
             }
-            return
         }
-        if activeTool == .sculpt, sculptBrush.isPath {
-            let start = hit?.position ?? groundPoint(on: ray)
-            guard let start else { return }
-            let r = radius(for: max(pressure, 0.1), altitude: altitude, at: start)
-            tubePoints = [SIMD4(start.x, start.y, start.z, r)]
-            strokePlane = (start, camera.basis.forward)
-            return
-        }
+        beginChainStroke(hit: hit, ray: ray, pressure: pressure, altitude: altitude)
+    }
 
-        var start: SIMD3<Float>?
-        switch activeTool {
-        case .sculpt where sculptBrush == .carve:
-            start = hit?.position // carving needs a surface
-        case .sculpt:
-            start = hit?.position ?? groundPoint(on: ray)
-        default: start = hit?.position // carving and painting need a surface
-        }
+    /// Move / Move Topological: drag the assembled surface. No stroke item
+    /// is created; the edit lands on pencil-up.
+    private func beginSurfaceMove(hit: ClayEngine.RayHit?, pressure: Float,
+                                  altitude: Float, topological: Bool) {
+        guard let anchorHit = hit else { return } // warps need a surface
+        let warpR = radius(for: pressure, altitude: altitude, at: anchorHit.position)
+            * sculptBrush.descriptor.radiusScale
+        moveDrag = (anchorHit.position, anchorHit.position, warpR)
+        strokePlane = (anchorHit.position, camera.basis.forward)
+        // Topological measures the drag along the MATERIAL and has its own
+        // engine verb, so only the Euclidean one opens a move session here.
+        if !topological { engine.beginMoveSurfaceSession() }
+    }
 
-        var r = radius(for: max(pressure, 0.1), altitude: altitude, at: hit?.position)
-        if activeTool == .sculpt { r *= sculptBrush.radiusScale }
-        if activeTool == .sculpt, sculptBrush.followsSurface, start != nil {
-            let normal = hit?.normal ?? SIMD3(0, 1, 0) // ground faces up
-            start! += normal * (r * sculptBrush.surfaceOffset(strength: brushStrength))
+    /// hPolish / Flatten / Relax / Magnify / Pinch / Noise: anchor on the
+    /// surface and commit on lift.
+    private func beginWarpAnchor(hit: ClayEngine.RayHit?, pressure: Float,
+                                 altitude: Float) {
+        guard let anchorHit = hit else { return } // warps need a surface
+        warpAnchor = anchorHit.position
+        warpNormal = anchorHit.normal
+        warpRadius = radius(for: pressure, altitude: altitude, at: anchorHit.position)
+            * sculptBrush.descriptor.radiusScale
+    }
+
+    /// Tube: collect a path and resolve it on pencil-up.
+    private func beginTubePath(hit: ClayEngine.RayHit?, ray: (origin: SIMD3<Float>, direction: SIMD3<Float>), pressure: Float,
+                               altitude: Float) {
+        guard let start = hit?.position ?? groundPoint(on: ray) else { return }
+        let r = radius(for: pressure, altitude: altitude, at: start)
+        tubePoints = [SIMD4(start.x, start.y, start.z, r)]
+        strokePlane = (start, camera.basis.forward)
+    }
+
+    /// The chain-stroke family: Standard, Crease, Carve, Snake Hook, and the
+    /// Erase and Paint tools.
+    private func beginChainStroke(hit: ClayEngine.RayHit?, ray: (origin: SIMD3<Float>, direction: SIMD3<Float>), pressure: Float,
+                                  altitude: Float) {
+        let descriptor = sculptBrush.descriptor
+        // A brush that requires a surface cannot start in mid-air; the rest
+        // fall back to the ground plane. Erase and Paint always need one.
+        let needsSurface = activeTool != .sculpt || descriptor.requiresSurface
+        var start = needsSurface ? hit?.position : (hit?.position ?? groundPoint(on: ray))
+
+        var r = radius(for: pressure, altitude: altitude, at: hit?.position)
+        if activeTool == .sculpt {
+            r *= descriptor.radiusScale
+            if descriptor.followsSurface, start != nil {
+                let normal = hit?.normal ?? SIMD3(0, 1, 0) // ground faces up
+                start! += normal * (r * descriptor.surfaceOffset(strength: brushStrength))
+            }
         }
         guard let start else { return }
 
@@ -1236,21 +1267,13 @@ extension ViewportState: PencilToolSink {
         case .erase: op = CLAY_OP_SUBTRACT; blend = r * 0.09
         case .paint: op = CLAY_OP_PAINT; blend = r * 0.25 // support ≈ brush radius
         default:
-            switch sculptBrush {
-            case .carve: op = CLAY_OP_SUBTRACT; blend = r * 0.12
-            case .snakeHook: op = CLAY_OP_ADD; blend = r * 0.12
-            case .standard:
-                // ZBrush Standard proper (CLAY_OP_RELIEF): the chain is a
-                // REGION, blendK the lift amplitude, rounding the falloff.
-                op = CLAY_OP_RELIEF
-                blend = r * (0.12 + 0.55 * brushStrength)
-                rounding = r * 0.9
-            case .crease:
-                op = CLAY_OP_INCISE
-                blend = r * (0.1 + 0.45 * brushStrength)
-                rounding = r * 0.6
-            default: op = CLAY_OP_ADD; blend = r * 0.12 // warps returned above
-            }
+            // Standard is ZBrush Standard proper (CLAY_OP_RELIEF): the chain
+            // is a REGION, blend the lift amplitude, rounding the falloff.
+            guard case .stroke(let strokeOp, let base, let perStrength,
+                               let roundingScale) = descriptor.action else { return }
+            op = strokeOp
+            blend = r * (base + perStrength * brushStrength)
+            rounding = r * roundingScale
         }
         strokeTravel = 0
         let anchorGate = maskFootprintGate(at: start, footprint: r + rounding)
