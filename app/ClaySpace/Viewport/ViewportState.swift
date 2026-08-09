@@ -1301,24 +1301,40 @@ extension ViewportState: PencilToolSink {
 
     func pencilMoved(to point: CGPoint, pressure: Float, altitude: Float = .pi / 2) {
         pencilPeakPressure = max(pencilPeakPressure, pressure)
+        // Same precedence as touch-down: a live tool drag owns the gesture,
+        // then voxel mode, then an open gizmo or move session, then the stroke.
+        if toolDragMoved(to: point, pressure: pressure, altitude: altitude) { return }
+        if mode == .voxel { return voxelEdit(at: point, pressure: max(pressure, 0.1)) }
+        if updateGizmoDrag(at: point) { return }
+        if updateMoveSession(at: point) { return }
+        updateChainStroke(to: point, pressure: pressure, altitude: altitude)
+    }
+
+    /// The tool drags that own the gesture outright once begun — shape
+    /// preview, freeze paint, a tube control point, a surface move, a tube
+    /// path, a tap-style warp, a trim marquee, a spray. Returns whether one
+    /// of them took the move.
+    private func toolDragMoved(to point: CGPoint, pressure: Float,
+                               altitude: Float) -> Bool {
+        pencilPeakPressure = max(pencilPeakPressure, pressure)
         if mode == .sdf, activeTool == .shape, gizmoDrag == nil {
             updateShapePreview(at: point)
-            return
+            return true
         }
         if activeTool == .freeze, gizmoDrag == nil {
             freezePaint(at: point, pressure: max(pressure, 0.1))
-            return
+            return true
         }
         if let pointIndex = tubePointDrag, let editIndex = tubeEditIndex,
            gizmoDrag == nil {
             guard let ray = ray(through: point), let plane = strokePlane,
                   let p = intersect(ray: ray, plane: plane),
                   var path = engine.tubePath(at: editIndex),
-                  path.indices.contains(pointIndex) else { return }
+                  path.indices.contains(pointIndex) else { return true }
             tubeDragMoved = true
             path[pointIndex] = SIMD4(p.x, p.y, p.z, path[pointIndex].w)
             _ = engine.updateTubeEdit(index: editIndex, points: path)
-            return
+            return true
         }
         if activeTool == .sculpt, let drag = moveDrag, gizmoDrag == nil {
             if let ray = ray(through: point), let plane = strokePlane,
@@ -1334,25 +1350,28 @@ extension ViewportState: PencilToolSink {
                                sculptBrush == .moveTopo ? p - drag.anchor : asked,
                                radius, max(Int(engine.radialCount), 1))
             }
-            return
+            return true
         }
         if activeTool == .sculpt, sculptBrush.isPath, !tubePoints.isEmpty,
            gizmoDrag == nil {
-            guard let ray = ray(through: point) else { return }
+            guard let ray = ray(through: point) else { return true }
             let hit = engine.raycast(origin: ray.origin, direction: ray.direction)
             var target = hit?.position
             if target == nil, let plane = strokePlane {
                 target = intersect(ray: ray, plane: plane)
             }
-            guard let target else { return }
+            guard let target else { return true }
             let r = radius(for: max(pressure, 0.1), altitude: altitude, at: target)
             let last = tubePoints[tubePoints.count - 1]
             if simd_distance(SIMD3(last.x, last.y, last.z), target) > r * 0.45 {
                 tubePoints.append(SIMD4(target.x, target.y, target.z, r))
             }
-            return
+            return true
         }
-        if activeTool == .sculpt, warpAnchor != nil { return } // tap-style warps
+        // Tap-style warps: anchored on touch-down, committed on lift, so a
+        // drag between the two changes nothing. Note this one guard does NOT
+        // require `gizmoDrag == nil`, matching the original ordering.
+        if activeTool == .sculpt, warpAnchor != nil { return true }
         if mode == .sdf, activeTool == .trim, gizmoDrag == nil, let start = trimStart {
             switch trimShape {
             case .rect:
@@ -1371,24 +1390,22 @@ extension ViewportState: PencilToolSink {
                     trimOverlay = .lasso(trimLassoPoints)
                 }
             }
-            return
+            return true
         }
         if mode == .sdf, activeTool == .spray, gizmoDrag == nil, !spraySamples.isEmpty {
             guard spraySamples.count < 512, let plane = sprayPlane,
                   let ray = ray(through: point),
-                  let p = intersect(ray: ray, plane: plane) else { return }
+                  let p = intersect(ray: ray, plane: plane) else { return true }
             spraySamples.append((p, max(pressure, 0.1), altitude))
             updateSprayGhosts()
-            return
+            return true
         }
+        return false
+    }
 
-        if mode == .voxel {
-            voxelEdit(at: point, pressure: max(pressure, 0.1))
-            return
-        }
-
-        // Gizmo sessions: scale by ring distance, rotate about the view
-        // axis with 15° snap latches (haptic tick per latch).
+    /// Gizmo sessions: scale by ring distance, rotate about the view axis
+    /// with 15-degree snap latches (haptic tick per latch).
+    private func updateGizmoDrag(at point: CGPoint) -> Bool {
         if let drag = gizmoDrag, let index = selectedIndex,
            engine.items.indices.contains(index) {
             let item = engine.items[index]
@@ -1480,12 +1497,15 @@ extension ViewportState: PencilToolSink {
                                                        combined.imag.z, combined.real),
                                        scale: item.scale)
             }
-            return
+            return true
         }
+        return false
+    }
 
-        // Move session: surface snap when the pencil is over ANOTHER item's
-        // surface (attributed pick tells whose); view-parallel plane drag
-        // otherwise.
+    /// Move session: surface snap when the pencil is over ANOTHER item's
+    /// surface (attributed pick tells whose); view-parallel plane drag
+    /// otherwise.
+    private func updateMoveSession(at point: CGPoint) -> Bool {
         if engine.isTransforming,
            let index = selectedIndex,
            let startPos = dragStartItemPosition,
@@ -1499,16 +1519,22 @@ extension ViewportState: PencilToolSink {
                 engine.updateTransform(position: picked.position,
                                        rotation: item.rotation,
                                        scale: item.scale)
-                return
+                return true
             }
             if let p = intersect(ray: ray, plane: plane) {
                 engine.updateTransform(position: startPos + (p - startHit),
                                        rotation: item.rotation,
                                        scale: item.scale)
             }
-            return
+            return true
         }
+        return false
+    }
 
+    /// Continue a chain stroke: extend it along the surface or the stroke
+    /// plane, gated by the mask.
+    private func updateChainStroke(to point: CGPoint, pressure: Float,
+                                   altitude: Float) {
         guard engine.isStroking || strokeSuspended,
               let plane = strokePlane,
               let last = lastStrokePoint,
