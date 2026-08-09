@@ -50,5 +50,27 @@ jobs:
             -project app/ClaySpace.xcodeproj \
             -scheme ClaySpace \
             -destination 'platform=iOS Simulator,name=iPad Pro 11-inch (M4)' \
+            -resultBundlePath test-results.xcresult \
             CODE_SIGNING_ALLOWED=NO \
             | xcbeautify --renderer github-actions
+
+      # xcbeautify prints a filtered view, so a crash inside the test host
+      # reaches the log as "<external symbol>" and nothing else. Keep the
+      # result bundle and the simulator's crash reports on every run —
+      # a failure nobody can diagnose costs more than the upload.
+      - name: Collect simulator crash reports
+        if: always()
+        run: |
+          mkdir -p crash-reports
+          cp -R ~/Library/Logs/DiagnosticReports/. crash-reports/ 2>/dev/null || true
+          ls -la crash-reports || true
+      - name: Upload test results and crash reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: |
+            test-results.xcresult
+            crash-reports
+          if-no-files-found: warn
+          retention-days: 14
