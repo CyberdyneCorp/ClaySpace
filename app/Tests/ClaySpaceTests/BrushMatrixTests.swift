@@ -8,6 +8,40 @@ import simd
 @MainActor
 final class BrushMatrixTests: XCTestCase {
 
+    // Which brushes each test method runs. Data rather than literals inline
+    // in the methods, so `testEveryBrushIsActuallyRun` can check that the
+    // groups between them cover every fixture. `smooth` was registered and
+    // matched no group — the fixture existed and never ran.
+    static let surfaceGroup = ["standard", "crease", "carve", "snakeHook"]
+    static let displacementGroup = ["move", "moveTopo", "tube"]
+    static let shapingGroup = ["polish", "flatten", "smooth", "magnify", "pinch", "noise"]
+    static let voxelBuildingGroup = ["place", "inflate", "deflate", "scrape",
+                                     "flatten", "smooth"]
+    static let voxelShapingGroup = ["pinch", "magnify", "grab", "smudge", "fill"]
+
+    /// Having a fixture is not the same as being run. Every registered
+    /// fixture must belong to a group some test method actually drives,
+    /// or it sits in the registry proving nothing.
+    func testEveryBrushIsActuallyRun() {
+        let sdfRun = Set(Self.surfaceGroup + Self.displacementGroup + Self.shapingGroup)
+        let sdfRegistered = Set(BrushMatrix.sdfFixtures.map(\.name))
+        XCTAssertTrue(sdfRegistered.subtracting(sdfRun).isEmpty,
+                      "SDF fixtures registered but run by no test: "
+                      + "\(sdfRegistered.subtracting(sdfRun))")
+        XCTAssertTrue(sdfRun.subtracting(sdfRegistered).isEmpty,
+                      "test groups naming brushes with no fixture: "
+                      + "\(sdfRun.subtracting(sdfRegistered))")
+
+        let voxelRun = Set(Self.voxelBuildingGroup + Self.voxelShapingGroup)
+        let voxelRegistered = Set(BrushMatrix.voxelFixtures.map(\.name))
+        XCTAssertTrue(voxelRegistered.subtracting(voxelRun).isEmpty,
+                      "voxel fixtures registered but run by no test: "
+                      + "\(voxelRegistered.subtracting(voxelRun))")
+        XCTAssertTrue(voxelRun.subtracting(voxelRegistered).isEmpty,
+                      "test groups naming verbs with no fixture: "
+                      + "\(voxelRun.subtracting(voxelRegistered))")
+    }
+
     /// A brush cannot ship without a fixture: the matrix is checked against
     /// the enumerations themselves, so adding a case to either one and
     /// forgetting to verify it fails here rather than going unnoticed.
@@ -86,19 +120,19 @@ final class BrushMatrixTests: XCTestCase {
 
     func testSurfaceBrushes() async {
         await verifyAll(BrushMatrix.sdfFixtures.filter {
-            ["standard", "crease", "carve", "snakeHook"].contains($0.name)
+            Self.surfaceGroup.contains($0.name)
         })
     }
 
     func testDisplacementBrushes() async {
         await verifyAll(BrushMatrix.sdfFixtures.filter {
-            ["move", "moveTopo", "tube"].contains($0.name)
+            Self.displacementGroup.contains($0.name)
         })
     }
 
     func testShapingBrushes() async {
         await verifyAll(BrushMatrix.sdfFixtures.filter {
-            ["polish", "flatten", "magnify", "pinch", "noise"].contains($0.name)
+            Self.shapingGroup.contains($0.name)
         })
     }
 
@@ -106,14 +140,13 @@ final class BrushMatrixTests: XCTestCase {
 
     func testVoxelBuildingVerbs() async {
         await verifyAll(BrushMatrix.voxelFixtures.filter {
-            ["place", "smooth", "inflate", "deflate", "flatten", "scrape"]
-                .contains($0.name)
+            Self.voxelBuildingGroup.contains($0.name)
         })
     }
 
     func testVoxelShapingVerbs() async {
         await verifyAll(BrushMatrix.voxelFixtures.filter {
-            ["pinch", "magnify", "grab", "smudge", "fill"].contains($0.name)
+            Self.voxelShapingGroup.contains($0.name)
         })
     }
 }

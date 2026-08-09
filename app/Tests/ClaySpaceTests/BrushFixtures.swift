@@ -12,6 +12,10 @@ enum BrushEffect {
     case addsMaterial
     case removesMaterial
     case reshapes
+    /// The brush's claim is that a PEAK COMES DOWN. Relaxing a smooth
+    /// sphere barely moves it, so "something moved" would say nothing —
+    /// the fixture seeds a bump and this checks that bump subsides.
+    case smooths
     /// The brush's claim is a PLANAR FACET, so movement alone is not
     /// proof. hPolish and Flatten passed as `.reshapes` while rendering
     /// indistinguishably from an untouched sphere — `.reshapes` accepts
@@ -107,6 +111,8 @@ enum BrushMatrix {
                      effect: .flattens, minDelta: 0.02, strength: 1),
         BrushFixture("flatten", select: { $0.sculptBrush = .flatten },
                      effect: .flattens, minDelta: 0.02, strength: 1),
+        BrushFixture("smooth", seed: seedBump, select: { $0.sculptBrush = .smooth },
+                     effect: .smooths, minDelta: 0.004, strength: 1),
         BrushFixture("magnify", select: { $0.sculptBrush = .magnify }, effect: .reshapes),
         BrushFixture("pinch", select: { $0.sculptBrush = .pinch }, effect: .reshapes),
         // Noise at its default strength moves the surface by ~2e-05 — real,
@@ -115,6 +121,18 @@ enum BrushMatrix {
         BrushFixture("noise", select: { $0.sculptBrush = .noise }, effect: .reshapes,
                      strength: 1),
     ]
+
+    /// Relax needs something to relax. A Standard bump is what a user would
+    /// reach for Smooth after, so it is what the fixture builds.
+    private static let seedBump: @MainActor @Sendable (ViewportState) -> Void = { state in
+        state.activeTool = .sculpt
+        state.sculptBrush = .standard
+        state.brushStrength = 1
+        for point in BrushFixture.centerDrag {
+            state.pencilBegan(at: point, pressure: 0.9)
+            state.pencilEnded(at: point)
+        }
+    }
 
     /// Voxel verbs other than `place` need cells to act on, so they seed a
     /// blob first and then switch to the verb under test.
@@ -242,7 +260,7 @@ enum BrushMatrix {
                 XCTAssertTrue(shrank || moved,
                               "voxel \(fixture.name) removed nothing",
                               file: file, line: line)
-            case .reshapes, .flattens:
+            case .reshapes, .flattens, .smooths:
                 // Voxel measurement is a vertex count and a checksum, not
                 // surface distances, so there is no probe line to fit and
                 // planarity cannot be judged here. `.flattens` degrades to
@@ -268,6 +286,7 @@ enum BrushMatrix {
         // reshaping brush only has to move the surface somewhere, so the
         // largest movement carries that.
         let delta = fixture.effect == .reshapes || fixture.effect == .flattens
+            || fixture.effect == .smooths
             ? (deltas.max(by: { abs($0) < abs($1) }) ?? 0)
             : deltas.reduce(0, +) / Float(deltas.count)
         switch fixture.effect {
@@ -283,6 +302,19 @@ enum BrushMatrix {
             XCTAssertGreaterThan(abs(delta), fixture.minDelta,
                                  "\(fixture.name) left the surface where it was "
                                  + "(moved \(delta))", file: file, line: line)
+        case .smooths:
+            // The peak is the probe NEAREST the camera, so a peak coming
+            // down means that nearest distance grows.
+            guard let peakBefore = before.surfaceDistances.compactMap({ $0 }).min(),
+                  let peakAfter = after.surfaceDistances.compactMap({ $0 }).min()
+            else {
+                return XCTFail("\(fixture.name): no surface under the probes",
+                               file: file, line: line)
+            }
+            XCTAssertGreaterThan(peakAfter - peakBefore, fixture.minDelta,
+                                 "\(fixture.name) did not bring the peak down "
+                                 + "(peak moved \(peakAfter - peakBefore))",
+                                 file: file, line: line)
         case .flattens:
             XCTAssertGreaterThan(abs(delta), fixture.minDelta,
                                  "\(fixture.name) left the surface where it was "

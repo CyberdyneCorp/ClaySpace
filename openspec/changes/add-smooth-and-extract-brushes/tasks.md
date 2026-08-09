@@ -46,13 +46,14 @@
 
 Implements `add-brush-verification` tasks 7.1–7.6; that change owns the requirement.
 
-- [ ] 4.1 `relaxSurface(center:radius:strength:)` in `ClayEngine`, through the existing `replaceRegion` (`ClayEngine.swift:1441`) with a `clay_item_volume_relax` transform closure
-- [ ] 4.2 Set `region_radius` non-zero from the brush radius — `0` relaxes everywhere, which the header calls "a filter not a brush"
-- [ ] 4.3 Pass the freeze through `clay_relax_params.mask` and confirm `struct_size` covers the appended field. Do NOT also gate app-side via `engine.maskWeight` — this corrects `add-brush-verification` task 7.3, which predates the parameter
-- [ ] 4.4 Add the `SculptBrush` case as a `.regional` descriptor row with title and symbol; place it in the brush grid (supersedes 7.2's "warp-family routing")
+- [x] 4.1 `relaxSurface(center:radius:strength:)` added, riding `replaceRegion` with a `clay_item_volume_relax` closure
+- [x] 4.2 `region_radius` set from the brush radius, and VERIFIED confining: `testRelaxIsConfinedToItsRegion` shows probes outside a small region do not move
+- [x] 4.3 Freeze passed through `clay_relax_params.mask`, no app-side `maskWeight`, and VERIFIED: `testRelaxHonoursTheMaskParameter` shows a frozen region comes back unchanged. Confirms the correction to `add-brush-verification` 7.3
+- [x] 4.4 `.smooth` added as a one-row `.relax` descriptor and a single `case .relax` arm in `commitWarp` — which is the refactor paying for itself
 - [x] 4.5 DECIDED: repeated strokes accumulate. `iterations` stays 1 per application, no dial; `radius_cells` from brush radius, `strength` from the existing Strength dial. Matches how every other brush builds up
-- [ ] 4.6 Engine test: a bump's peak falls while the surrounding mean holds, one undo step (spec: "A bump is smoothed away")
-- [ ] 4.7 Engine test: a frozen region is unchanged (spec: "Relax respects frozen clay")
+- [ ] 4.6 Engine test written, currently RED, and the fault is the fixture rather than the brush. `warpRadius * 1.3` covers the whole test ball, so the relax acts globally: every probe shifts ~0.065 together and the bump's relief is 0.0088 before, 0.0094 after — unchanged. The seeded bump is also too shallow (0.015 across the probe line). Needs a relax region small against the subject, and a pronounced bump
+  - Ruled out on the way: `replaceRegion` is surface-preserving (`testRegionalSwapIsSurfacePreserving`), and `region_radius` does confine (`testRelaxIsConfinedToItsRegion`)
+- [ ] 4.7 Engine test written, currently RED via the freeze TOOL path, while the same assertion passes when the mask is painted straight through `engine.maskPaint` (4.3). So the mask parameter works and the test's use of the freeze tool is what needs settling — possibly a real finding about that path, not yet established
 - [ ] 4.8 Engine test: mask weight applied exactly once — the boundary falloff is not the square of the mask (spec: "Smoothing at a mask boundary")
 - [ ] 4.9 Register the matrix fixture; state the volume-sampling limitation in the UI
 - [ ] 4.10 Device check: repeated passes over one spot, watching for raymarch artefacts where the exactness argument is weakest
@@ -89,6 +90,7 @@ before it lands rather than after.
 
 ## 6. Matrix coverage
 
+- [x] 6.1b `testEveryBrushIsActuallyRun` added, and it caught a live hole: `smooth` was registered as a fixture and matched no test group, so it existed and never ran. Having a fixture was never the same as being exercised, and nothing checked the difference. Test groups are data now, and the union must equal the registry
 - [ ] 6.1 Teach the matrix to drive a `.command` brush — apply and probe with no pencil movement (spec: "Driving a command brush")
 - [ ] 6.2 Fixtures for Smooth and Mask Extract; the coverage check names any bar brush without one
 - [ ] 6.3 Capture simulator goldens for both new brushes via `scripts/rebaseline-goldens.sh`; device baselines stay with `add-brush-verification` 6.8

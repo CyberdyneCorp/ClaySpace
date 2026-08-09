@@ -1547,6 +1547,51 @@ final class ClayEngine {
         }
     }
 
+    /// Relax / Smooth (clay_item_volume_relax): averages the field under the
+    /// brush, completing the core sculpt set — voxel layers had smoothing,
+    /// SDF layers had none.
+    ///
+    /// Unlike every other SDF brush here, the freeze is NOT applied app-side.
+    /// `clay_relax_params` carries the mask itself and scales each sample's
+    /// weight by `(1 - mask)` at its world position, so calling
+    /// `maskWeight(at:)` as well would apply the freeze twice and the falloff
+    /// at a mask boundary would come out as its square.
+    ///
+    /// One pass per application: repeated strokes accumulate, which is how
+    /// every other brush in the app builds up, so there is no iteration dial.
+    ///
+    /// ClayCore is explicit that relaxing destroys EXACTNESS — the field stops
+    /// reporting true distance to its own surface — but the Lipschitz bound
+    /// survives, because an average cannot vary faster than what it averages,
+    /// so the raymarcher stays correct.
+    @discardableResult
+    func relaxSurface(center: SIMD3<Float>, radius: Float, strength: Float) -> Bool {
+        guard radius > 0, strength > 0 else { return false }
+        let pad = radius * 1.6 + 0.05
+        let box = (min: center - SIMD3(repeating: pad),
+                   max: center + SIMD3(repeating: pad))
+        let cellSize = max(radius / 14, 0.006)
+        // The averaging radius is in CELLS, so it has to track the cell size
+        // the region is sampled at or the brush would smooth a different
+        // amount at different radii.
+        let radiusCells = max(Int32((radius / cellSize / 6).rounded()), 1)
+        let mask = gatingMask(voxelContext: false)
+        return replaceRegion(box: box, cellSize: cellSize) { vitem, _ in
+            var rp = clay_relax_params()
+            rp.struct_size = UInt32(MemoryLayout<clay_relax_params>.size)
+            rp.strength = min(strength, 1)
+            rp.radius_cells = radiusCells
+            rp.iterations = 1
+            rp.centre = (center.x, center.y, center.z)
+            // Never 0: the header calls that "a filter not a brush", because
+            // 0 relaxes the whole sampled region rather than the footprint.
+            rp.region_radius = radius
+            rp.falloff = radius * 0.4
+            rp.mask = mask
+            return clay_item_volume_relax(vitem, &rp) == CLAY_OK
+        }
+    }
+
     /// Move Topological (clay_item_volume_move_topological): the drag's
     /// falloff is measured ALONG the material, so parts close in space but
     /// far along the surface stay put.

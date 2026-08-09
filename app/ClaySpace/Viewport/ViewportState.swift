@@ -345,7 +345,7 @@ final class ViewportState {
 
     enum SculptBrush: String, CaseIterable, Identifiable {
         case standard, crease, carve, snakeHook, move, moveTopo, tube,
-             polish, flatten, magnify, pinch, noise
+             polish, flatten, smooth, magnify, pinch, noise
 
         var id: String { rawValue }
 
@@ -408,6 +408,11 @@ final class ViewportState {
                 BrushDescriptor(
                     action: .flatten(mode: CLAY_FLATTEN_TWO_SIDED),
                     title: "Flatten", symbol: "rectangle.compress.vertical",
+                    requiresSurface: true)
+            case .smooth:
+                BrushDescriptor(
+                    action: .relax,
+                    title: "Smooth", symbol: "drop.circle",
                     requiresSurface: true)
             case .magnify:
                 BrushDescriptor(
@@ -1801,7 +1806,14 @@ extension ViewportState: PencilToolSink {
                     emitHaptic(.completed, at: point)
                 }
             }
-        case .stroke, .surfaceMove, .path, .relax:
+        case .relax:
+            // Strength maps the same way the flatten family does, so the
+            // Strength dial feels consistent across the regional brushes.
+            if engine.relaxSurface(center: anchor, radius: warpRadius * 1.3,
+                                   strength: 0.3 + 0.7 * brushStrength) {
+                emitHaptic(.completed, at: point)
+            }
+        case .stroke, .surfaceMove, .path:
             break // committed elsewhere, or nothing to commit
         }
         return true
