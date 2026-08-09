@@ -2,7 +2,7 @@
 
 ## 1. Baseline before touching the hot path
 
-- [ ] 1.1 Record a pre-refactor matrix run on the current tree: probe results for all 23 brushes, saved so the post-refactor run can be diffed against it rather than eyeballed
+- [x] 1.1 Record a pre-refactor matrix run on the current tree: probe results for all 23 brushes, saved so the post-refactor run can be diffed against it rather than eyeballed
   - Simulator (iPad16,4), ClayCore v0.24.2: 1 failing case — `voxel grab left the mesh untouched` and `voxel fill added nothing`. All goldens match. This is the comparison baseline
   - Device (iPad Air 13-inch M3, iPad15,5), captured per-test — all 23 brushes report IMAGE BASELINE MISSING (no device goldens, 6.8) and exactly two probe failures, `voxel grab` and `voxel fill`. **The device agrees with the simulator on behaviour**, which is what makes the simulator baseline trustworthy as the refactor's comparison
     - surface: carve, crease, snakeHook, standard · displacement: move, moveTopo, tube · shaping: flatten, magnify, noise, pinch, polish · voxel building: deflate, flatten, inflate, place, scrape, smooth · voxel shaping: fill, grab, magnify, pinch, smudge
@@ -14,11 +14,11 @@
   - `pencilMoved` (:1181) — **51**, body 241 lines
   - `pencilEnded` (:1502) — **31**, body 157 lines
   - `applyTrim` (:1706) — 15, body 61 lines; `pencilHovered` (:1908) — body 52 lines
-- [ ] 1.3 Add `.swiftlint.yml` so the bound is enforceable rather than a number in a document, and so these three stop being the only thing holding the line
+- [x] 1.3 `.swiftlint.yml` added. Default rules give 434 violations, 348 of them `identifier_name` on single-letter math names (u, w, q, r) — off, since renaming those hurts the geometry. Every other threshold sits above today's worst so the ONLY errors are the three pencil functions this change fixes, making `swiftlint` gateable the moment the refactor lands
 
 ## 2. Brush descriptor
 
-- [x] 2.1 Define `BrushDescriptor` with the action kind (`.stroke(op:blendFactor:roundingFactor:)`, `.warp`, `.regional`, `.path`, `.command`) plus `radiusScale`, `followsSurface`, `surfaceOffset`, `title`, `symbol`
+- [x] 2.1 `BrushDescriptor` defined. The action kinds landed finer-grained than the design sketched, because the code demanded it: `.stroke(op:blend:blendPerStrength:rounding:)`, `.surfaceMove(topological:)`, `.flatten(mode:)`, `.relax`, `.deform(sign:)`, `.noise`, `.path`. Folding polish/flatten into one `.regional` would have left `sculptBrush == .polish` comparisons in pencilEnded to pick the flatten mode — the associated values are what actually remove them. Plus `radiusScale`, `followsSurface`, `surfaceOffsetBase`/`PerStrength`, `requiresSurface`, `title`, `symbol`
 - [x] 2.2 One descriptor per `SculptBrush` case, folding in the seven existing switches (`surfaceOffset`, `radiusScale`, `title`, `symbol`, `followsSurface`, `isWarp`, `isPath`) and the inline `op`/`blend`/`rounding` switch at `ViewportState.swift:1137–1156`
 - [x] 2.3 Reclassify polish and flatten from `isWarp` to `.regional` — behaviour-preserving, since both already take the `replaceRegion` path inside their handlers
 - [ ] 2.4 Delete the seven superseded switches; the compiler is the check that nothing still reads them
