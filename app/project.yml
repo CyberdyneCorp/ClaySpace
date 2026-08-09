@@ -8,7 +8,9 @@ options:
 # ClayCore (https://github.com/CyberdyneCorp/ClayCore) is consumed as a
 # sibling checkout pinned to a release tag; its Package.swift wraps the
 # prebuilt dist/claycore.xcframework (run tools/build_xcframework.sh in
-# the ClayCore repo after checking out the tag). Pinned: v0.24.1.
+# the ClayCore repo after checking out the tag). The tag itself lives in
+# ClayCore.version at the repo root — the one place CI and this comment
+# used to disagree, so it is no longer restated here.
 packages:
   claycore:
     path: ../../ClayCore
