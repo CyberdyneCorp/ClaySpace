@@ -4,7 +4,11 @@
 
 - [ ] 1.1 Record a pre-refactor matrix run on the current tree: probe results for all 23 brushes, saved so the post-refactor run can be diffed against it rather than eyeballed
   - Simulator (iPad16,4), ClayCore v0.24.2: 1 failing case — `voxel grab left the mesh untouched` and `voxel fill added nothing`. All goldens match. This is the comparison baseline
-  - Device (iPad Air 13-inch M3, iPad15,5): same two probe failures, plus 20 IMAGE BASELINE MISSING (no device goldens — 6.8), plus **`testSurfaceBrushes` crashed with signal kill**, so standard/crease/carve/snakeHook produced no result. BLOCKING for a device baseline: re-running to establish whether it reproduces. `add-brush-verification` 1.3 recorded 21 baseline-missing and no crash on 0.23.0, and measured a 510–706 MB footprint, so jetsam is the first hypothesis
+  - Device (iPad Air 13-inch M3, iPad15,5), captured per-test — all 23 brushes report IMAGE BASELINE MISSING (no device goldens, 6.8) and exactly two probe failures, `voxel grab` and `voxel fill`. **The device agrees with the simulator on behaviour**, which is what makes the simulator baseline trustworthy as the refactor's comparison
+    - surface: carve, crease, snakeHook, standard · displacement: move, moveTopo, tube · shaping: flatten, magnify, noise, pinch, polish · voxel building: deflate, flatten, inflate, place, scrape, smooth · voxel shaping: fill, grab, magnify, pinch, smudge
+- [x] 1.4 Device full-matrix instability characterized (blocked 1.1 until worked around). Running the WHOLE matrix in one session crashes: `signal kill` in `testSurfaceBrushes`, then `signal segv` in `testVoxelShapingVerbs` on a re-run — different test, different signal, same unmodified code. Running each test ALONE: 11 of 12 runs clean, one `kill` in `testDisplacementBrushes`.
+  - Reading: not attributable to any one brush. Consistent with cumulative resource exhaustion across the session — `add-brush-verification` 1.3 measured a 510–706 MB footprint — but a `segv` is not a jetsam signature, so this may be two separate faults. Not settled, and not settleable without the device crash log (`devicectl` cannot fetch it; needs Xcode's Devices window)
+  - Consequence for this change: device verification runs PER TEST, not as a whole matrix. Worth its own change — a suite that cannot run end to end on the only hardware the app ships on is a verification gap, not a curiosity
 - [x] 1.2 Starting numbers recorded with SwiftLint 0.63.3 (`cyclomatic_complexity` / `function_body_length`), since no open-source cognitive-complexity analyzer supports Swift — the cognitive-complexity skill covers Python, Go, TS/JS, C/C++, Solidity and SystemVerilog only, and the "58" figure was always SwiftLint cyclomatic:
   - `pencilBegan` (:869) — **58**, body 267 lines
   - `pencilMoved` (:1181) — **51**, body 241 lines
@@ -14,11 +18,11 @@
 
 ## 2. Brush descriptor
 
-- [ ] 2.1 Define `BrushDescriptor` with the action kind (`.stroke(op:blendFactor:roundingFactor:)`, `.warp`, `.regional`, `.path`, `.command`) plus `radiusScale`, `followsSurface`, `surfaceOffset`, `title`, `symbol`
-- [ ] 2.2 One descriptor per `SculptBrush` case, folding in the seven existing switches (`surfaceOffset`, `radiusScale`, `title`, `symbol`, `followsSurface`, `isWarp`, `isPath`) and the inline `op`/`blend`/`rounding` switch at `ViewportState.swift:1137–1156`
-- [ ] 2.3 Reclassify polish and flatten from `isWarp` to `.regional` — behaviour-preserving, since both already take the `replaceRegion` path inside their handlers
+- [x] 2.1 Define `BrushDescriptor` with the action kind (`.stroke(op:blendFactor:roundingFactor:)`, `.warp`, `.regional`, `.path`, `.command`) plus `radiusScale`, `followsSurface`, `surfaceOffset`, `title`, `symbol`
+- [x] 2.2 One descriptor per `SculptBrush` case, folding in the seven existing switches (`surfaceOffset`, `radiusScale`, `title`, `symbol`, `followsSurface`, `isWarp`, `isPath`) and the inline `op`/`blend`/`rounding` switch at `ViewportState.swift:1137–1156`
+- [x] 2.3 Reclassify polish and flatten from `isWarp` to `.regional` — behaviour-preserving, since both already take the `replaceRegion` path inside their handlers
 - [ ] 2.4 Delete the seven superseded switches; the compiler is the check that nothing still reads them
-- [ ] 2.5 Matrix run: all 23 brushes match the 1.1 baseline. Descriptor work is not done until this passes
+- [x] 2.5 Matrix run after the descriptor landed: 148 cases, 1 failing (grab + fill), every golden matching — identical to the 1.1 simulator baseline
 
 ## 3. Dispatch refactor
 

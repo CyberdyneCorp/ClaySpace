@@ -277,75 +277,165 @@ final class ViewportState {
     /// the clay via an attributed raycast (ignoring the stroke being drawn,
     /// so it never chases its own fresh surface); Snake Hook pulls free
     /// tendrils on the view plane with a tapering radius.
+    /// Everything the sculpt path needs to know about a brush, in ONE
+    /// place. Before this existed the same knowledge was spread over
+    /// seven switches plus an inline op/blend switch in `pencilBegan`, so
+    /// adding a brush meant finding eight sites and a brush that missed
+    /// one of them silently behaved like another — a `default:` arm in
+    /// the op switch turned it into a plain additive stroke.
+    ///
+    /// `action` is an enum rather than a set of `isWarp`/`isPath`
+    /// booleans on purpose: booleans do not force exhaustiveness, so a
+    /// brush answering `false` to all of them still compiles. Here the
+    /// compiler demands a decision, and the per-brush differences that
+    /// used to be `sculptBrush == .pinch` comparisons scattered through
+    /// pencilEnded live in the associated values instead.
+    struct BrushDescriptor {
+        /// What SHAPE the gesture is, and which engine verb commits it.
+        enum Action {
+            /// Builds a chain of stroke items. `blend` and `rounding` are
+            /// multiples of the brush radius; `blendPerStrength` is the
+            /// part the Strength dial scales.
+            case stroke(op: clay_op, blend: Float, blendPerStrength: Float,
+                        rounding: Float)
+            /// Drags the assembled surface. `topological` measures the
+            /// drag along the MATERIAL rather than through space.
+            case surfaceMove(topological: Bool)
+            /// Regional volume swap through a flatten verb — the cut-only
+            /// family (hPolish) and the two-sided one (Flatten).
+            case flatten(mode: clay_flatten_mode)
+            /// Regional volume swap through `clay_item_volume_relax`.
+            case relax
+            /// Region deformer. `sign` is +1 to magnify, -1 to pinch —
+            /// the two brushes differ by nothing else.
+            case deform(sign: Float)
+            /// Region deformer with a noise field.
+            case noise
+            /// Collects a path and resolves it on pencil-up.
+            case path
+
+            /// Warps and regional swaps anchor on the surface at
+            /// touch-down and commit on lift; they never build a stroke.
+            var anchorsOnSurface: Bool {
+                switch self {
+                case .stroke, .path: false
+                case .surfaceMove, .flatten, .relax, .deform, .noise: true
+                }
+            }
+        }
+
+        let action: Action
+        let title: String
+        let symbol: String
+        /// Standard sweeps wider than it is tall; Crease stays tight.
+        var radiusScale: Float = 1
+        var followsSurface: Bool = true
+        /// How far the chain center sits from the surface, in radii,
+        /// as `base + perStrength * strength`. Only Carve floats above,
+        /// so its subtract takes a shallow bite rather than a gouge.
+        var surfaceOffsetBase: Float = 0
+        var surfaceOffsetPerStrength: Float = 0
+        /// Brushes that cannot start in mid-air — no surface, no stroke.
+        var requiresSurface: Bool = false
+
+        func surfaceOffset(strength: Float) -> Float {
+            surfaceOffsetBase + surfaceOffsetPerStrength * strength
+        }
+    }
+
     enum SculptBrush: String, CaseIterable, Identifiable {
         case standard, crease, carve, snakeHook, move, moveTopo, tube,
              polish, flatten, magnify, pinch, noise
 
-        /// How far the chain center sits from the surface, in radii.
+        var id: String { rawValue }
+
+        /// The one place a brush is described. Adding a brush is adding a
+        /// row here; the switch is exhaustive, so the compiler will not
+        /// let a new case ship undescribed.
+        ///
         /// Standard/Crease are surface-relief REGIONS (CLAY_OP_RELIEF /
         /// INCISE): the chain rides ON the surface and the op displaces
-        /// the accumulated field along its own normal. Carve floats above
-        /// so the subtract takes a shallow bite, not a gouge.
-        func surfaceOffset(strength: Float) -> Float {
+        /// the accumulated field along its own normal.
+        var descriptor: BrushDescriptor {
             switch self {
-            case .carve: 1 - (0.15 + 0.5 * strength)
-            default: 0
-            }
-        }
-        /// Standard sweeps wider than it is tall; Crease stays tight.
-        var radiusScale: Float {
-            switch self {
-            case .standard: 1.35
-            case .crease: 0.8
-            default: 1.0
+            case .standard:
+                BrushDescriptor(
+                    action: .stroke(op: CLAY_OP_RELIEF, blend: 0.12,
+                                    blendPerStrength: 0.55, rounding: 0.9),
+                    title: "Standard", symbol: "circle.tophalf.filled",
+                    radiusScale: 1.35)
+            case .crease:
+                BrushDescriptor(
+                    action: .stroke(op: CLAY_OP_INCISE, blend: 0.1,
+                                    blendPerStrength: 0.45, rounding: 0.6),
+                    title: "Crease", symbol: "chevron.compact.down",
+                    radiusScale: 0.8)
+            case .carve:
+                BrushDescriptor(
+                    action: .stroke(op: CLAY_OP_SUBTRACT, blend: 0.12,
+                                    blendPerStrength: 0, rounding: 0),
+                    title: "Carve", symbol: "minus.circle",
+                    // 1 - (0.15 + 0.5 * strength), floated above the
+                    // surface so the subtract bites shallow.
+                    surfaceOffsetBase: 0.85, surfaceOffsetPerStrength: -0.5,
+                    requiresSurface: true)
+            case .snakeHook:
+                BrushDescriptor(
+                    action: .stroke(op: CLAY_OP_ADD, blend: 0.12,
+                                    blendPerStrength: 0, rounding: 0),
+                    title: "Snake Hook",
+                    symbol: "point.topleft.down.to.point.bottomright.curvepath",
+                    // Pulls free tendrils on the view plane; re-anchoring
+                    // on the clay would defeat the brush.
+                    followsSurface: false)
+            case .move:
+                BrushDescriptor(
+                    action: .surfaceMove(topological: false),
+                    title: "Move", symbol: "hand.draw", requiresSurface: true)
+            case .moveTopo:
+                BrushDescriptor(
+                    action: .surfaceMove(topological: true),
+                    title: "Move Topo", symbol: "hand.tap", requiresSurface: true)
+            case .tube:
+                BrushDescriptor(action: .path, title: "Tube",
+                                symbol: "scribble.variable")
+            case .polish:
+                BrushDescriptor(
+                    action: .flatten(mode: CLAY_FLATTEN_CUT_ONLY),
+                    title: "hPolish", symbol: "triangle.bottomhalf.filled",
+                    requiresSurface: true)
+            case .flatten:
+                BrushDescriptor(
+                    action: .flatten(mode: CLAY_FLATTEN_TWO_SIDED),
+                    title: "Flatten", symbol: "rectangle.compress.vertical",
+                    requiresSurface: true)
+            case .magnify:
+                BrushDescriptor(
+                    action: .deform(sign: 1),
+                    title: "Magnify",
+                    symbol: "arrow.up.left.and.arrow.down.right.circle",
+                    requiresSurface: true)
+            case .pinch:
+                BrushDescriptor(
+                    action: .deform(sign: -1),
+                    title: "Pinch",
+                    symbol: "arrow.right.and.line.vertical.and.arrow.left",
+                    requiresSurface: true)
+            case .noise:
+                BrushDescriptor(action: .noise, title: "Noise",
+                                symbol: "water.waves", requiresSurface: true)
             }
         }
 
-        var id: String { rawValue }
-        var title: String {
-            switch self {
-            case .standard: "Standard"
-            case .crease: "Crease"
-            case .carve: "Carve"
-            case .snakeHook: "Snake Hook"
-            case .move: "Move"
-            case .moveTopo: "Move Topo"
-            case .tube: "Tube"
-            case .polish: "hPolish"
-            case .flatten: "Flatten"
-            case .magnify: "Magnify"
-            case .pinch: "Pinch"
-            case .noise: "Noise"
-            }
+        var title: String { descriptor.title }
+        var symbol: String { descriptor.symbol }
+        var radiusScale: Float { descriptor.radiusScale }
+        var followsSurface: Bool { descriptor.followsSurface }
+        func surfaceOffset(strength: Float) -> Float {
+            descriptor.surfaceOffset(strength: strength)
         }
-        var symbol: String {
-            switch self {
-            case .standard: "circle.tophalf.filled"
-            case .crease: "chevron.compact.down"
-            case .carve: "minus.circle"
-            case .snakeHook: "point.topleft.down.to.point.bottomright.curvepath"
-            case .move: "hand.draw"
-            case .moveTopo: "hand.tap"
-            case .tube: "scribble.variable"
-            case .polish: "triangle.bottomhalf.filled"
-            case .flatten: "rectangle.compress.vertical"
-            case .magnify: "arrow.up.left.and.arrow.down.right.circle"
-            case .pinch: "arrow.right.and.line.vertical.and.arrow.left"
-            case .noise: "water.waves"
-            }
-        }
-        var followsSurface: Bool { self != .snakeHook }
-        /// Engine-side warps (ClayCore 0.22): they act on the assembled
-        /// surface via clay_layer_move_surface / add_deformer, not strokes.
-        var isWarp: Bool {
-            switch self {
-            case .move, .moveTopo, .polish, .flatten, .magnify, .pinch, .noise:
-                true
-            default: false
-            }
-        }
-        /// Tube collects a PATH and resolves it on pencil-up.
-        var isPath: Bool { self == .tube }
+        var isWarp: Bool { descriptor.action.anchorsOnSurface }
+        var isPath: Bool { if case .path = descriptor.action { true } else { false } }
     }
     var sculptBrush: SculptBrush = .standard
     @ObservationIgnored fileprivate var strokeTravel: Float = 0
