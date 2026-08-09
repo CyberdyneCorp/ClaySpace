@@ -8,6 +8,49 @@ import claycore
 @MainActor
 final class ClayEngineTests: XCTestCase {
 
+    override class func setUp() {
+        super.setUp()
+        MemoryProbe.register() // TEMPORARY: see MemoryProbe.swift
+    }
+
+
+    func testQuiesceSettlesTheBakePipelineWithoutDrivingIt() async {
+        let engine = ClayEngine()
+
+        // Idle: settles, and settling again does no work — a verification
+        // hook that bakes on its own would measure its own side effects.
+        let settledIdle = await engine.quiesce()
+        XCTAssertTrue(settledIdle, "an idle engine is already settled")
+        let idleVersion = engine.fieldCacheVersion
+        let settledAgain = await engine.quiesce()
+        XCTAssertTrue(settledAgain)
+        XCTAssertEqual(engine.fieldCacheVersion, idleVersion,
+                       "quiesce schedules no bake of its own when nothing is pending")
+
+        // Dirty: the edit schedules a DEBOUNCED bake, so the cache is stale
+        // the moment addShape returns. Quiesce must not come back until it
+        // has caught up with the edit list.
+        XCTAssertTrue(engine.addShape(CLAY_PRIM_SPHERE, params: [0.5],
+                                      at: SIMD3(0, 0.8, 0), op: CLAY_OP_ADD,
+                                      blendK: 0, color: ClayEngine.clayColor))
+        let settledAfterEdit = await engine.quiesce()
+        XCTAssertTrue(settledAfterEdit, "the debounced bake drained")
+        XCTAssertEqual(engine.fieldCache?.bakedItemCount, engine.items.count,
+                       "the cache matches the edit list once quiesce returns")
+        XCTAssertGreaterThan(engine.fieldCacheVersion, idleVersion,
+                             "and the bake it waited for actually ran")
+
+        // Mid-gesture there is nothing to wait for: performBake refuses to
+        // run during a stroke, so quiesce must return rather than hang out
+        // to its deadline.
+        XCTAssertTrue(engine.beginStroke(at: SIMD3(0, 0.8, 0.5), radius: 0.2,
+                                         op: CLAY_OP_RELIEF, blendK: 0.08,
+                                         color: ClayEngine.clayColor))
+        let settledMidStroke = await engine.quiesce(timeout: .seconds(2))
+        XCTAssertTrue(settledMidStroke,
+                      "quiesce returns during a stroke instead of waiting out the clock")
+        engine.endStroke()
+    }
 
     func testReliefStrokeLiftsTheSurfaceInsideItsRegion() {
         let engine = ClayEngine()

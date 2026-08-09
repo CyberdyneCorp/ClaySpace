@@ -2578,6 +2578,50 @@ final class ClayEngine {
         await performBake(editVersion: version)
     }
 
+    /// Returns once the bake pipeline has SETTLED: no debounced task still
+    /// waiting out its delay, nothing in flight, no dirty region left to
+    /// consume, and a cache that matches the edit list.
+    ///
+    /// Verification needs this because edits schedule DEBOUNCED bakes and
+    /// return immediately — rendering or probing right after a stroke
+    /// photographs a half-built field, and sleeping a guessed interval
+    /// trades a wrong answer for a slow flaky one.
+    ///
+    /// It observes the pipeline rather than driving it: it schedules no
+    /// bake of its own beyond draining what is already pending, and it
+    /// changes no ordering. Returns false if it gives up at the deadline,
+    /// so a caller fails loudly instead of asserting against whatever
+    /// happened to be there.
+    @discardableResult
+    func quiesce(timeout: Duration = .seconds(20)) async -> Bool {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: timeout)
+        while clock.now < deadline {
+            // Mid-gesture there is nothing to wait for: performBake refuses
+            // to run during a stroke or transform by design.
+            if isStroking || isTransforming { return true }
+            if let task = bakeTask, !task.isCancelled {
+                await task.value // includes the debounce sleep
+            }
+            if bakeInFlight {
+                await Task.yield()
+                continue
+            }
+            // A bake that lost the single-flight race re-scheduled itself;
+            // drain that too rather than reporting settled.
+            if pendingBakeAll || pendingBakeRegion != nil {
+                await bakeNow()
+                continue
+            }
+            if let cache = fieldCache, cache.bakedItemCount != items.count {
+                await bakeNow()
+                continue
+            }
+            return true
+        }
+        return false
+    }
+
     @ObservationIgnored private var bakeInFlight = false
 
     private func performBake(editVersion: Int) async {

@@ -318,6 +318,7 @@ final class Renderer {
         return depthTexture
     }
 
+    /// On-screen path: render into the drawable's texture and present it.
     func draw(to drawable: CAMetalDrawable, time: Float, camera: OrbitCamera,
               engine: ClayEngine, selectedIndex: Int,
               lightDir: SIMD3<Float> = simd_normalize(SIMD3(0.5, 0.8, 0.3)),
@@ -328,6 +329,42 @@ final class Renderer {
               polyframe: Bool = false,
               movePreview: (center: SIMD3<Float>, displacement: SIMD3<Float>,
                             radius: Float, sectors: Int)? = nil) {
+        render(into: drawable.texture, presenting: drawable, time: time,
+               camera: camera, engine: engine, selectedIndex: selectedIndex,
+               lightDir: lightDir, fullQuality: fullQuality, preview: preview,
+               inputScale: inputScale, darkMode: darkMode, polyframe: polyframe,
+               movePreview: movePreview)
+    }
+
+    /// Offscreen path: same shaders, same camera, same field — into a
+    /// texture, with no drawable and nothing presented. Verification uses
+    /// this to photograph what a brush did; it deliberately shares
+    /// `render(into:)` with the on-screen path so it can never become a
+    /// renderer nobody ships.
+    ///
+    /// Upscaling is left off (`inputScale` 1): reconstruction is a moving
+    /// target across OS versions and would land in every captured image.
+    func draw(into texture: MTLTexture, time: Float, camera: OrbitCamera,
+              engine: ClayEngine, selectedIndex: Int = -1,
+              lightDir: SIMD3<Float> = simd_normalize(SIMD3(0.5, 0.8, 0.3)),
+              darkMode: Bool = false) {
+        render(into: texture, presenting: nil, time: time, camera: camera,
+               engine: engine, selectedIndex: selectedIndex, lightDir: lightDir,
+               fullQuality: true, preview: [], inputScale: 1,
+               darkMode: darkMode, polyframe: false, movePreview: nil)
+    }
+
+    private func render(into output: MTLTexture, presenting drawable: CAMetalDrawable?,
+                        time: Float, camera: OrbitCamera,
+                        engine: ClayEngine, selectedIndex: Int,
+                        lightDir: SIMD3<Float>,
+                        fullQuality: Bool,
+                        preview: [SceneItem],
+                        inputScale: CGFloat,
+                        darkMode: Bool,
+                        polyframe: Bool,
+                        movePreview: (center: SIMD3<Float>, displacement: SIMD3<Float>,
+                                      radius: Float, sectors: Int)?) {
         let items = engine.items
         let strokePoints = engine.strokePoints
         if engine.version != uploadedVersion {
@@ -441,8 +478,8 @@ final class Renderer {
 
         // Upscaled path: scene renders into an offscreen input-sized target;
         // the spatial scaler reconstructs into the native drawable.
-        let outW = drawable.texture.width
-        let outH = drawable.texture.height
+        let outW = output.width
+        let outH = output.height
         let wantsUpscale = inputScale < 0.999
         let inW = max(Int(CGFloat(outW) * inputScale), 64)
         let inH = max(Int(CGFloat(outH) * inputScale), 64)
@@ -450,7 +487,7 @@ final class Renderer {
             inW: inW, inH: inH, outW: outW, outH: outH)
         let upscaling = useTemporal || (wantsUpscale && ensureUpscaler(
             inW: inW, inH: inH, outW: outW, outH: outH))
-        let target = upscaling ? offscreenColor! : drawable.texture
+        let target = upscaling ? offscreenColor! : output
 
         let pass = MTLRenderPassDescriptor()
         pass.colorAttachments[0].texture = target
@@ -588,7 +625,7 @@ final class Renderer {
             scaler.colorTexture = target
             scaler.depthTexture = depth
             scaler.motionTexture = motionTex
-            scaler.outputTexture = drawable.texture
+            scaler.outputTexture = output
             scaler.jitterOffsetX = jitterPx.x
             scaler.jitterOffsetY = jitterPx.y
             scaler.reset = pendingHistoryReset
@@ -596,7 +633,7 @@ final class Renderer {
             scaler.encode(commandBuffer: commands)
         } else if upscaling, let scaler = spatialScaler {
             scaler.colorTexture = target
-            scaler.outputTexture = drawable.texture
+            scaler.outputTexture = output
             scaler.encode(commandBuffer: commands)
         }
         #endif
@@ -606,7 +643,14 @@ final class Renderer {
             nonisolated(unsafe) let completed = buffer
             gpuFrameTime.withLock { $0 = completed.gpuEndTime - completed.gpuStartTime }
         }
-        commands.present(drawable)
-        commands.commit()
+        if let drawable {
+            commands.present(drawable)
+            commands.commit()
+        } else {
+            // An offscreen render IS a capture: the caller wants pixels, so
+            // finishing here saves every caller from re-deriving the wait.
+            commands.commit()
+            commands.waitUntilCompleted()
+        }
     }
 }
