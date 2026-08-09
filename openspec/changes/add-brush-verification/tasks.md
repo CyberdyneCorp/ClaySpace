@@ -36,14 +36,14 @@
 
 ## 6. Visual capture and goldens
 
-- [ ] 6.1 Capture canonical views per fixture and attach before/after images labelled with the brush name (spec: "Images available after a device run")
-- [ ] 6.2 Resolve the open question on view count (single three-quarter vs front/side pair) and fix it in the harness
-- [ ] 6.3 Image comparison: mean-absolute-difference threshold plus outlier-pixel count, reporting brush, view, and magnitude, attaching reference/actual/difference
-- [ ] 6.4 Report image failures as a distinct failure kind from behavioural failures (spec: "Environment drift is distinguishable")
-- [ ] 6.5 Fixture directory keyed by hardware model identifier; a run with no matching baseline reports the missing baseline instead of comparing (spec: "Mismatched baseline environment")
-- [ ] 6.6 Re-baseline mode: explicit opt-in, emits new images as attachments, never writes in a default run (spec: "Golden re-baselining is explicit")
-- [ ] 6.7 Extraction script pulling re-baselined images from the `.xcresult` into the fixture directory as a reviewable diff
-- [ ] 6.8 Generate the first baseline set on the iPad Air 13-inch (M3) and commit it
+- [x] 6.1 After-image captured and attached per brush, verified end to end: 23 PNGs land in the result bundle and extract with `xcrun xcresulttool export attachments`. BEFORE images still to add
+- [ ] 6.2 Still open — currently one view (`after`). The name already carries a view component so a second view is additive
+- [x] 6.3 `GoldenStore.verify` compares on both numbers and attaches reference, actual, and an 8x-amplified difference image — un-amplified diffs read as a near-black rectangle nobody can judge
+- [x] 6.4 Image failures are prefixed IMAGE DRIFT and state that the brush still passed its geometric probes; a missing baseline is a third, separate kind
+- [x] 6.5 Keyed by `uname` model on device and `SIMULATOR_MODEL_IDENTIFIER` on simulator — `uname` there reports the Mac's architecture and would collapse every simulator onto one baseline. Verified: with no references present, four brushes reported IMAGE BASELINE MISSING rather than comparing
+- [ ] 6.6 BLOCKED on plumbing, not design. The bundle reads `CLAY_GOLDEN_REBASELINE` and emits instead of comparing, but there is no working way yet to SET it: `xcodebuild TEST_RUNNER_CLAY_GOLDEN_REBASELINE=1` does not reach a unit bundle hosted in an app (verified — the run still reported four missing baselines). The `TEST_RUNNER_` prefix targets UI-test runners. Next: carry it through the generated scheme's test-action environment in project.yml
+- [ ] 6.7 `scripts/rebaseline-goldens.sh` written and its extraction half works (parses the manifest, maps attachment names back to reference filenames, copies into `app/Tests/ClaySpaceTests/Goldens`). Cannot produce anything until 6.6 lands, since the run it drives still compares instead of emitting
+- [ ] 6.8 Blocked by 6.6
 
 ## 7. Relax (Smooth) brush
 

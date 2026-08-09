@@ -43,9 +43,29 @@ final class BrushMatrixTests: XCTestCase {
                       "\(fixture.name): the bake never settled, so the probe "
                       + "would have measured a half-built field")
         BrushMatrix.assertEffect(fixture, before: result.before, after: result.after)
-        if let image = BrushCapture.render(engine: result.state.engine,
-                                           camera: result.state.camera) {
-            BrushCapture.attach(image, named: "brush-\(fixture.name)", to: self)
+        guard let after = BrushCapture.render(engine: result.state.engine,
+                                              camera: result.state.camera)
+        else { return }
+        BrushCapture.attach(after, named: "brush-\(fixture.name)", to: self)
+
+        // Behaviour is judged above by the probes; the image is a SECOND,
+        // separately-reported check. A driver update shifts every image at
+        // once while every brush still works — if that arrives as "brushes
+        // broken", the suite trains people to ignore it.
+        switch GoldenStore.verify(after, brush: fixture.name, view: "after", in: self) {
+        case .matched, .rebaselined:
+            break
+        case .missingBaseline(let name):
+            XCTFail("IMAGE BASELINE MISSING for \(fixture.name): no reference "
+                    + "'\(name)' for this device class. Capture one with "
+                    + "CLAY_GOLDEN_REBASELINE=1 rather than comparing against "
+                    + "another device's images")
+        case .drifted(let name, let difference):
+            XCTFail("IMAGE DRIFT (not a behaviour failure) for \(fixture.name): "
+                    + "\(name) differs by mean \(difference.meanAbsolute) and "
+                    + "\(difference.outlierPixels) outlier pixels "
+                    + "(\(difference.outlierFraction * 100)%). The brush still "
+                    + "passed its geometric probes")
         }
     }
 

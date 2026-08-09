@@ -111,6 +111,23 @@ enum BrushCapture {
                           outlierPixels: outliers, totalPixels: pixelCount)
     }
 
+    /// Per-pixel difference, amplified so a small drift is visible to the
+    /// eye rather than a near-black rectangle nobody can read.
+    static func differenceImage(_ a: Image, _ b: Image, gain: Int = 8) -> Image? {
+        guard a.width == b.width, a.height == b.height,
+              a.pixels.count == b.pixels.count else { return nil }
+        var out = [UInt8](repeating: 255, count: a.pixels.count)
+        for pixel in 0..<(a.width * a.height) {
+            let base = pixel * 4
+            for channel in 0..<3 {
+                let delta = abs(Int(a.pixels[base + channel]) - Int(b.pixels[base + channel]))
+                out[base + channel] = UInt8(min(255, delta * gain))
+            }
+            out[base + 3] = 255
+        }
+        return Image(width: a.width, height: a.height, pixels: out)
+    }
+
     /// Attaches an image to the test results so every brush's outcome can
     /// be inspected after a device run.
     static func attach(_ image: Image, named name: String, to testCase: XCTestCase) {
