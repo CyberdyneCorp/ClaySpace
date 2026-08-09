@@ -638,7 +638,14 @@ final class Renderer {
         }
         #endif
 
-        commands.addCompletedHandler { [gpuFrameTime] buffer in
+        // @Sendable is load-bearing: Renderer is @MainActor, so without it
+        // this closure INHERITS main-actor isolation, and Metal calls
+        // completion handlers on its own queue — the runtime isolation
+        // check then traps (EXC_BREAKPOINT in _swift_task_checkIsolatedSwift).
+        // Whether that happens depends on whether the SDK declares the
+        // parameter @Sendable, so it crashes on some Xcode versions and not
+        // others. The body is already safe to run anywhere.
+        commands.addCompletedHandler { @Sendable [gpuFrameTime] buffer in
             // MTLCommandBuffer isn't Sendable; only two doubles cross.
             nonisolated(unsafe) let completed = buffer
             gpuFrameTime.withLock { $0 = completed.gpuEndTime - completed.gpuStartTime }
