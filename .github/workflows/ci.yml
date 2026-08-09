@@ -22,11 +22,14 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
+      - name: Read the pinned ClayCore tag
+        id: claycore
+        run: echo "ref=$(tr -d '[:space:]' < ClayCore.version)" >> "$GITHUB_OUTPUT"
       - name: Checkout ClayCore (pinned tag)
         uses: actions/checkout@v4
         with:
           repository: CyberdyneCorp/ClayCore
-          ref: v0.9.0
+          ref: ${{ steps.claycore.outputs.ref }}
           path: ClayCore
       - name: Place ClayCore as sibling checkout
         run: mv ClayCore ../ClayCore
@@ -37,10 +40,15 @@ jobs:
       - name: Generate Xcode project
         run: xcodegen generate --spec app/project.yml --project app
       - name: Run tests on iOS Simulator
-        run: >
-          xcodebuild test
-          -project app/ClaySpace.xcodeproj
-          -scheme ClaySpace
-          -destination 'platform=iOS Simulator,name=iPad Pro 11-inch (M4)'
-          CODE_SIGNING_ALLOWED=NO
-          | xcbeautify --renderer github-actions || exit ${PIPESTATUS[0]}
+        # pipefail, not `|| exit ${PIPESTATUS[0]}`: the `||` reads the
+        # PIPELINE's status, which is xcbeautify's, and xcbeautify exits 0
+        # even when xcodebuild failed — so the exit never fired and this
+        # job reported success through a build that did not compile.
+        run: |
+          set -o pipefail
+          xcodebuild test \
+            -project app/ClaySpace.xcodeproj \
+            -scheme ClaySpace \
+            -destination 'platform=iOS Simulator,name=iPad Pro 11-inch (M4)' \
+            CODE_SIGNING_ALLOWED=NO \
+            | xcbeautify --renderer github-actions

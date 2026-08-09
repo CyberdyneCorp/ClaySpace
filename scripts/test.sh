@@ -15,6 +15,20 @@ cd "$(dirname "$0")/.."
 
 SIM_NAME="${CLAY_SIM_NAME:-iPad Pro 11-inch (M4)}"
 
+# The sibling checkout is whatever you last left it at, but CI builds the
+# tag in ClayCore.version. Say so when they differ — a green local run
+# against an unreleased core proves nothing about the pin, and this is the
+# drift that shipped a v0.9.0 CI pin against a v0.24.1 app.
+check_claycore_pin() {
+    local pinned actual
+    pinned=$(tr -d '[:space:]' < ClayCore.version)
+    actual=$(git -C ../ClayCore describe --tags 2>/dev/null) || return 0
+    if [ "$actual" != "$pinned" ]; then
+        echo "note: ../ClayCore is at $actual, pin is $pinned (ClayCore.version)" >&2
+    fi
+}
+check_claycore_pin
+
 xcodegen generate --spec app/project.yml --project app >/dev/null
 
 run_simulator() {
