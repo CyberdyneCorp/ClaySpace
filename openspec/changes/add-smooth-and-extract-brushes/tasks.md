@@ -21,7 +21,7 @@
 - [x] 2.1 `BrushDescriptor` defined. The action kinds landed finer-grained than the design sketched, because the code demanded it: `.stroke(op:blend:blendPerStrength:rounding:)`, `.surfaceMove(topological:)`, `.flatten(mode:)`, `.relax`, `.deform(sign:)`, `.noise`, `.path`. Folding polish/flatten into one `.regional` would have left `sculptBrush == .polish` comparisons in pencilEnded to pick the flatten mode — the associated values are what actually remove them. Plus `radiusScale`, `followsSurface`, `surfaceOffsetBase`/`PerStrength`, `requiresSurface`, `title`, `symbol`
 - [x] 2.2 One descriptor per `SculptBrush` case, folding in the seven existing switches (`surfaceOffset`, `radiusScale`, `title`, `symbol`, `followsSurface`, `isWarp`, `isPath`) and the inline `op`/`blend`/`rounding` switch at `ViewportState.swift:1137–1156`
 - [x] 2.3 Reclassify polish and flatten from `isWarp` to `.regional` — behaviour-preserving, since both already take the `replaceRegion` path inside their handlers
-- [ ] 2.4 Delete the seven superseded switches; the compiler is the check that nothing still reads them
+- [x] 2.4 Superseded switches gone. `isWarp`, `isPath`, `radiusScale`, `followsSurface` and `surfaceOffset` had no readers left and were deleted; `title` and `symbol` stay as one-line delegates because the brush bar reads them and a UI façade is not duplication
 - [x] 2.5 Matrix run after the descriptor landed: 148 cases, 1 failing (grab + fill), every golden matching — identical to the 1.1 simulator baseline
 
 ## 3. Dispatch refactor
@@ -30,8 +30,16 @@
 - [x] 3.2 Extracted `voxelBegan`, `trimBegan`, `sprayBegan`, `selectBegan`, `grabTubePoint`, plus `beginSurfaceMove` / `beginWarpAnchor` / `beginTubePath` / `beginChainStroke` for the sculpt families
 - [x] 3.3 `pencilBegan` is now voxel-mode guard, gizmo guard, then an exhaustive `switch activeTool`. Precedence preserved exactly
 - [x] 3.4 Sculpt dispatches on `descriptor.action`. Removed the `sculptBrush == .carve` surface test (now `requiresSurface`), the `== .move || == .moveTopo` split (now `.surfaceMove(topological:)`), and the inline op/blend/rounding switch (now the `.stroke` associated values)
-- [ ] 3.5 Apply the same treatment to `pencilMoved` (51) and `pencilEnded` (31) — they branch on the same brush families, and leaving them behind would keep the descriptor half-used
-- [ ] 3.6 SwiftLint `cyclomatic_complexity` ≤ 15 for all three, with no `function_body_length` violation. Record the after numbers against the 1.2 baseline
+- [x] 3.5 `pencilMoved` -> `toolDragMoved` / `updateGizmoDrag` / `updateMoveSession` / `updateChainStroke`; `pencilEnded` -> `endToolGesture` / `commitTopologicalMove` / `commitTubePath` / `commitSurfaceMove` / `commitWarp` / `endActiveSession`. `commitWarp` is where the last `sculptBrush == .polish` and `== .pinch` comparisons died
+- [x] 3.6 Met, and the project reports **zero SwiftLint errors** — the config is now gateable in CI:
+
+  | function | before | after |
+  |---|---|---|
+  | `pencilBegan` | 58 | **8** |
+  | `pencilMoved` | 51 | **4** |
+  | `pencilEnded` | 31 | **10** |
+
+  No `function_body_length` violations remain. Two helpers sit above the warning line and under the error bar: `toolDragMoved` (19) and `updateGizmoDrag` (16). Both are flat chains of independent guards rather than nested logic, so splitting them further would scatter one decision across several functions to satisfy a number — flagged rather than mangled. `gizmoHitTest` is exactly 15, with no headroom
 - [ ] 3.7 Matrix run: all 23 brushes still match the 1.1 baseline, and no IMAGE DRIFT — a no-behaviour-change refactor should not move a single golden
 
 ## 4. Smooth brush
