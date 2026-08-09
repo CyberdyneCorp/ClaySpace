@@ -27,9 +27,9 @@
 ## 3. Dispatch refactor
 
 - [x] 3.1 `gizmoHitTest(at:) -> Bool` extracted — 106 lines. `pencilBegan` 58 -> 44; the helper is itself under the threshold and unflagged
-- [ ] 3.2 Extract per-tool touch-down handlers: voxel, shape, trim, freeze, spray, select/move
-- [ ] 3.3 Reduce `pencilBegan` to routing — voxel mode, then gizmo, then tool — preserving the current precedence exactly
-- [ ] 3.4 Dispatch the sculpt path on `descriptor.action` instead of `isWarp` / `isPath` / fallthrough
+- [x] 3.2 Extracted `voxelBegan`, `trimBegan`, `sprayBegan`, `selectBegan`, `grabTubePoint`, plus `beginSurfaceMove` / `beginWarpAnchor` / `beginTubePath` / `beginChainStroke` for the sculpt families
+- [x] 3.3 `pencilBegan` is now voxel-mode guard, gizmo guard, then an exhaustive `switch activeTool`. Precedence preserved exactly
+- [x] 3.4 Sculpt dispatches on `descriptor.action`. Removed the `sculptBrush == .carve` surface test (now `requiresSurface`), the `== .move || == .moveTopo` split (now `.surfaceMove(topological:)`), and the inline op/blend/rounding switch (now the `.stroke` associated values)
 - [ ] 3.5 Apply the same treatment to `pencilMoved` (51) and `pencilEnded` (31) — they branch on the same brush families, and leaving them behind would keep the descriptor half-used
 - [ ] 3.6 SwiftLint `cyclomatic_complexity` ≤ 15 for all three, with no `function_body_length` violation. Record the after numbers against the 1.2 baseline
 - [ ] 3.7 Matrix run: all 23 brushes still match the 1.1 baseline, and no IMAGE DRIFT — a no-behaviour-change refactor should not move a single golden
