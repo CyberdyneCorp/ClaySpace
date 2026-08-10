@@ -159,4 +159,30 @@ extension SmoothBrushTests {
                           "frozen clay was relaxed anyway — the mask is not "
                           + "reaching clay_relax_params: \(before) -> \(after)")
     }
+
+    /// What does relax actually DO to a bump, as a function of strength?
+    /// If the surface shift scales with strength it is the verb acting; if it
+    /// is constant it is something about the swap.
+    func testRelaxDirectionByStrength() async {
+        for strength in [Float(0.05), 0.25, 0.5, 1.0] {
+            let state = BrushMatrix.makeState(voxel: false)
+            BrushMatrix.seedBump(state)
+            _ = await state.engine.quiesce()
+            guard let ray = state.ray(through: BrushFixture.centerTap[0]),
+                  let hit = state.engine.raycast(origin: ray.origin,
+                                                 direction: ray.direction) else {
+                XCTFail("no bump to relax"); return
+            }
+            let before = profile(state)
+            let applied = state.engine.relaxSurface(center: hit.position,
+                                                    radius: 0.12, strength: strength)
+            _ = await state.engine.quiesce()
+            let after = profile(state)
+            let peakB = before.min() ?? 0, peakA = after.min() ?? 0
+            let fmt = { (xs: [Float]) in xs.map { String(format: "%.3f", $0) }.joined(separator: " ") }
+            print(String(format: "RELAX strength %.2f applied=%@ peak %+.4f  before %@  after %@",
+                         strength, applied ? "yes" : "NO ", peakA - peakB,
+                         fmt(before), fmt(after)))
+        }
+    }
 }
