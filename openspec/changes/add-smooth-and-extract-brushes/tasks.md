@@ -51,7 +51,22 @@ Implements `add-brush-verification` tasks 7.1–7.6; that change owns the requir
 - [x] 4.3 Freeze passed through `clay_relax_params.mask`, no app-side `maskWeight`, and VERIFIED: `testRelaxHonoursTheMaskParameter` shows a frozen region comes back unchanged. Confirms the correction to `add-brush-verification` 7.3
 - [x] 4.4 `.smooth` added as a one-row `.relax` descriptor and a single `case .relax` arm in `commitWarp` — which is the refactor paying for itself
 - [x] 4.5 DECIDED: repeated strokes accumulate. `iterations` stays 1 per application, no dial; `radius_cells` from brush radius, `strength` from the existing Strength dial. Matches how every other brush builds up
-- [ ] 4.6 Engine test written, currently RED, and the fault is the fixture rather than the brush. `warpRadius * 1.3` covers the whole test ball, so the relax acts globally: every probe shifts ~0.065 together and the bump's relief is 0.0088 before, 0.0094 after — unchanged. The seeded bump is also too shallow (0.015 across the probe line). Needs a relax region small against the subject, and a pronounced bump
+- [ ] 4.6 Engine test written, currently RED — and after recalibrating the fixture the cause turned out NOT to be calibration. See 4.11
+- [ ] 4.11 **BLOCKING: the regional volume swap tears the surface when relax rides it.** With a pronounced bump seeded and a relax region small against it, the probe line goes
+
+    ```
+    before [1.2970, 1.2920, 1.2903, 1.2920, 1.2970]   symmetric bump
+    after  [1.1687, 1.1691, 1.1722, 1.8359, 1.8357]   half inflated, half gone
+    ```
+
+    and the capture shows a BOX-SHAPED crater with hard straight edges and a hole through it — the literal shape of `replaceRegion`'s subtract box, left because the re-added relaxed volume does not restore the region.
+
+  - Not the fixture: recalibrating made it worse and more obvious, not better
+  - Not `replaceRegion` on its own: `testRegionalSwapIsSurfacePreserving` passes with a near-identity verb
+  - Not `region_radius`: `testRelaxIsConfinedToItsRegion` passes at a small radius on a plain ball
+  - Leading hypothesis: `replaceRegion` sets `vp.band` to the whole box diagonal, and relax AVERAGES, so cells near the box faces pull in boundary values that flatten and hPolish never touch because they clamp against a plane instead of averaging. Margin between the relax region plus falloff (1.4x radius) and the box half-extent (1.6x radius + 0.05) is thin
+  - Consequence beyond Smooth: if that is right, the same tearing is reachable by hPolish, Flatten and Move Topological over detailed geometry. Their fixtures only ever act on a plain ball, which is why nothing has caught it. That makes this a defect in a shipped path, not a new-brush problem
+  - Not fixable by tuning the brush: needs either a padded sample region that keeps averaging away from the boundary, or a ClayCore change. Its own investigation `warpRadius * 1.3` covers the whole test ball, so the relax acts globally: every probe shifts ~0.065 together and the bump's relief is 0.0088 before, 0.0094 after — unchanged. The seeded bump is also too shallow (0.015 across the probe line). Needs a relax region small against the subject, and a pronounced bump
   - Ruled out on the way: `replaceRegion` is surface-preserving (`testRegionalSwapIsSurfacePreserving`), and `region_radius` does confine (`testRelaxIsConfinedToItsRegion`)
 - [ ] 4.7 Engine test written, currently RED via the freeze TOOL path, while the same assertion passes when the mask is painted straight through `engine.maskPaint` (4.3). So the mask parameter works and the test's use of the freeze tool is what needs settling — possibly a real finding about that path, not yet established
 - [ ] 4.8 Engine test: mask weight applied exactly once — the boundary falloff is not the square of the mask (spec: "Smoothing at a mask boundary")

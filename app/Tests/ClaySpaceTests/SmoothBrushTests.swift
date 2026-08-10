@@ -10,17 +10,14 @@ final class SmoothBrushTests: XCTestCase {
     /// Builds a Standard bump along the probe line — what a user would
     /// reach for Smooth after.
     private func seedBump(_ state: ViewportState) {
-        state.activeTool = .sculpt
-        state.sculptBrush = .standard
-        state.brushStrength = 1
-        for point in BrushFixture.centerDrag {
-            state.pencilBegan(at: point, pressure: 0.9)
-            state.pencilEnded(at: point)
-        }
+        BrushMatrix.seedBump(state)
     }
 
+    /// Smooth anchors on touch-down and commits on lift, so the tap IS the
+    /// gesture; the region has to be small against the bump it is taking down.
     private func stroke(_ state: ViewportState) {
-        BrushMatrix.drive(state, along: BrushFixture.centerDrag)
+        state.brushSize = 0.1
+        BrushMatrix.drive(state, along: BrushFixture.centerTap)
     }
 
     /// Distances at the probe line, nil-free, so the numbers can be reported.

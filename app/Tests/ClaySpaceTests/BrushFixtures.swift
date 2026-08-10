@@ -111,7 +111,11 @@ enum BrushMatrix {
                      effect: .flattens, minDelta: 0.02, strength: 1),
         BrushFixture("flatten", select: { $0.sculptBrush = .flatten },
                      effect: .flattens, minDelta: 0.02, strength: 1),
-        BrushFixture("smooth", seed: seedBump, select: { $0.sculptBrush = .smooth },
+        // The relax region must be SMALL against the bump, or it lifts the
+        // whole object uniformly instead of taking the peak down.
+        BrushFixture("smooth", seed: seedBump,
+                     select: { $0.sculptBrush = .smooth; $0.brushSize = 0.1 },
+                     stroke: BrushFixture.centerTap,
                      effect: .smooths, minDelta: 0.004, strength: 1),
         BrushFixture("magnify", select: { $0.sculptBrush = .magnify }, effect: .reshapes),
         BrushFixture("pinch", select: { $0.sculptBrush = .pinch }, effect: .reshapes),
@@ -122,15 +126,19 @@ enum BrushMatrix {
                      strength: 1),
     ]
 
-    /// Relax needs something to relax. A Standard bump is what a user would
-    /// reach for Smooth after, so it is what the fixture builds.
-    private static let seedBump: @MainActor @Sendable (ViewportState) -> Void = { state in
+    /// Relax needs something to relax, and it has to be a PRONOUNCED and
+    /// LOCAL bump. A ridge drawn across the whole probe line gave only 0.015
+    /// of relief, and the brush's default radius then covered the entire
+    /// ball — every probe moved together by 0.065 and the relief did not
+    /// change at all, which says nothing about smoothing.
+    static let seedBump: @MainActor @Sendable (ViewportState) -> Void = { state in
         state.activeTool = .sculpt
         state.sculptBrush = .standard
         state.brushStrength = 1
-        for point in BrushFixture.centerDrag {
-            state.pencilBegan(at: point, pressure: 0.9)
-            state.pencilEnded(at: point)
+        state.brushSize = 0.8
+        for _ in 0..<3 { // build it up; one tap is a dimple, not a bump
+            state.pencilBegan(at: BrushFixture.centerTap[0], pressure: 1)
+            state.pencilEnded(at: BrushFixture.centerTap[0])
         }
     }
 
