@@ -77,7 +77,15 @@ final class BrushMatrixTests: XCTestCase {
         XCTAssertTrue(result.settled,
                       "\(fixture.name): the bake never settled, so the probe "
                       + "would have measured a half-built field")
-        BrushMatrix.assertEffect(fixture, before: result.before, after: result.after)
+        if fixture.assertsEffect {
+            BrushMatrix.assertEffect(fixture, before: result.before,
+                                     after: result.after)
+        }
+        if fixture.guardsRegionalSwap {
+            BrushMatrix.assertNoTear(fixture, before: result.before,
+                                     after: result.after)
+            BrushMatrix.assertBakeIsFaithful(fixture, result.state)
+        }
         guard let after = BrushCapture.render(engine: result.state.engine,
                                               camera: result.state.camera)
         else { return }
@@ -95,7 +103,8 @@ final class BrushMatrixTests: XCTestCase {
         // picture. It passed: SDF flatten against the voxel flatten
         // reference measures mean 0.859 and 0.97% outliers, inside both
         // tolerances. Six of the 23 brushes had no reference of their own.
-        let reference = fixture.isVoxel ? "voxel-\(fixture.name)" : fixture.name
+        var reference = fixture.isVoxel ? "voxel-\(fixture.name)" : fixture.name
+        if let variant = fixture.variant { reference += "-\(variant)" }
         switch GoldenStore.verify(after, brush: reference, view: "after", in: self) {
         case .matched, .rebaselined:
             break

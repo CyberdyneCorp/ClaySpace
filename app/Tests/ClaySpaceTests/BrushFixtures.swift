@@ -27,6 +27,11 @@ enum BrushEffect {
 /// One brush, everything needed to exercise it, and what it must do.
 struct BrushFixture {
     let name: String
+    /// Distinguishes a second fixture for the same brush. The NAME stays the
+    /// brush's own, so the completeness tests keep matching fixtures against
+    /// real brushes; the variant qualifies the golden reference so two
+    /// fixtures for one brush do not share a picture.
+    let variant: String?
     let isVoxel: Bool
     /// Optional material to act on — a warp brush needs a surface, and a
     /// voxel verb that is not `place` needs cells to work with.
@@ -40,14 +45,37 @@ struct BrushFixture {
     let minDelta: Float
     /// Strength dial, where the brush's default is too subtle to probe.
     let strength: Float?
+    /// Guard the regional volume swap: assert the surface was not TORN, and
+    /// that the BAKE the renderer samples still matches the document.
+    ///
+    /// Both are needed and neither implies the other. The effect claims cannot
+    /// express tearing — `.reshapes` passes on any large movement, and a tear
+    /// is nothing but a large movement. And the tear check alone cannot see a
+    /// bad bake, because it probes the document, which every edit rebuilds
+    /// correctly; the artist sees the bake.
+    let guardsRegionalSwap: Bool
+    /// Whether this fixture asserts the brush's effect claim at all.
+    ///
+    /// A tear guard does not: the plain-ball fixture already carries the
+    /// brush's claim, and making the detail fixture re-assert it couples a
+    /// tearing probe to defects that have nothing to do with tearing. Smooth
+    /// is the live example — it is inert (`add-smooth-and-extract-brushes`
+    /// 4.12b), so a detail fixture asserting `.reshapes` would sit red for a
+    /// reason it was never built to report, and a permanently red guard
+    /// guards nothing.
+    let assertsEffect: Bool
 
-    init(_ name: String, isVoxel: Bool = false,
+    init(_ name: String, variant: String? = nil, isVoxel: Bool = false,
          seed: (@MainActor @Sendable (ViewportState) -> Void)? = nil,
          select: @escaping @MainActor @Sendable (ViewportState) -> Void,
          stroke: [CGPoint] = BrushFixture.centerDrag,
          effect: BrushEffect, minDelta: Float = 0.004,
-         strength: Float? = nil) {
+         strength: Float? = nil, guardsRegionalSwap: Bool = false,
+         assertsEffect: Bool = true) {
         self.name = name
+        self.variant = variant
+        self.guardsRegionalSwap = guardsRegionalSwap
+        self.assertsEffect = assertsEffect
         self.isVoxel = isVoxel
         self.seed = seed
         self.select = select
@@ -130,6 +158,34 @@ enum BrushMatrix {
         // what a user reaches for anyway.
         BrushFixture("noise", select: { $0.sculptBrush = .noise }, effect: .reshapes,
                      strength: 1),
+
+        // The regional-swap riders, over DETAIL (fix-regional-swap-tearing
+        // 4.1). Every fixture above acts on a plain ball, which is the one
+        // case where the sampled region has a single smooth surface to
+        // reproduce — and therefore the case least able to catch a swap that
+        // loses it. That blind spot is why the tearing in hPolish, Flatten
+        // and Move Topological shipped: it took a new brush to expose a
+        // defect three shipped verbs already had.
+        //
+        // `.reshapes` here only asserts the brush is not a no-op; the real
+        // assertion is `refusesToTear`.
+        BrushFixture("polish", variant: "detail", seed: seedDetailedRidge,
+                     select: { $0.sculptBrush = .polish },
+                     effect: .reshapes, strength: 1, guardsRegionalSwap: true,
+                     assertsEffect: false),
+        BrushFixture("flatten", variant: "detail", seed: seedDetailedRidge,
+                     select: { $0.sculptBrush = .flatten },
+                     effect: .reshapes, strength: 1, guardsRegionalSwap: true,
+                     assertsEffect: false),
+        BrushFixture("moveTopo", variant: "detail", seed: seedDetailedRidge,
+                     select: { $0.sculptBrush = .moveTopo },
+                     effect: .reshapes, guardsRegionalSwap: true,
+                     assertsEffect: false),
+        BrushFixture("smooth", variant: "detail", seed: seedDetailedRidge,
+                     select: { $0.sculptBrush = .smooth; $0.brushSize = 0.1 },
+                     stroke: BrushFixture.centerTap,
+                     effect: .reshapes, strength: 1, guardsRegionalSwap: true,
+                     assertsEffect: false),
     ]
 
     /// Relax needs something to relax, and it has to be a PRONOUNCED and
@@ -145,6 +201,27 @@ enum BrushMatrix {
         for _ in 0..<3 { // build it up; one tap is a dimple, not a bump
             state.pencilBegan(at: BrushFixture.centerTap[0], pressure: 1)
             state.pencilEnded(at: BrushFixture.centerTap[0])
+        }
+    }
+
+    /// Clay that carries DETAIL across the whole probe line, which is what a
+    /// regional brush's sampled region actually has to reproduce.
+    ///
+    /// `seedBump` piles three taps on ONE spot, so four of the five probes
+    /// still sit on plain ball — the sampled region is mostly smooth and the
+    /// seam stays benign. This lays a ridge of separate bumps along the probe
+    /// line instead, so every probe has detail under it and a swap that loses
+    /// the region has nowhere to hide.
+    static let seedDetailedRidge: @MainActor @Sendable (ViewportState) -> Void = { state in
+        state.activeTool = .sculpt
+        state.sculptBrush = .standard
+        state.brushStrength = 1
+        state.brushSize = 0.35
+        for point in BrushFixture.probePoints {
+            for _ in 0..<2 { // one tap is a dimple, not a feature
+                state.pencilBegan(at: point, pressure: 1)
+                state.pencilEnded(at: point)
+            }
         }
     }
 
@@ -265,6 +342,118 @@ enum BrushMatrix {
         drive(state, along: fixture.stroke)
         let settled = await state.engine.quiesce()
         return (state, before, measure(state), settled)
+    }
+
+    /// The worst disagreement between the BAKED field and the document, over
+    /// the cells the bake covers, or nil when there is no cache to check.
+    ///
+    /// Every other probe in this file reads the DOCUMENT — `engine.raycast` is
+    /// `clay_raycast(doc,…)` and `evalDistance` is `clay_eval_points(doc,…)`.
+    /// The document is rebuilt correctly by every edit, so those probes are
+    /// blind to a bake that is stale or scoped too small. The artist does not
+    /// look at the document: the renderer samples this cache. A regional verb
+    /// that leaves part of its footprint un-rebaked shows up here and nowhere
+    /// else in the suite.
+    static func worstBakeError(_ state: ViewportState) -> (error: Float,
+                                                           at: SIMD3<Float>)? {
+        guard let cache = state.engine.fieldCache else { return nil }
+        let dims = cache.dims
+        var worst: Float = 0
+        var worstAt = SIMD3<Float>.zero
+        // Stride rather than every cell: a stale region is a contiguous block
+        // of cells, never a single one, so sampling catches it and a full
+        // 192³ sweep through the C ABI would dominate the suite's runtime.
+        let step = 4
+        for z in stride(from: 0, to: Int(dims.z), by: step) {
+            for y in stride(from: 0, to: Int(dims.y), by: step) {
+                for x in stride(from: 0, to: Int(dims.x), by: step) {
+                    let cell = SIMD3<Float>(Float(x) / Float(max(dims.x - 1, 1)),
+                                            Float(y) / Float(max(dims.y - 1, 1)),
+                                            Float(z) / Float(max(dims.z - 1, 1)))
+                    let world = cache.origin + cell * cache.extent
+                    let baked = Float(cache.distances[(z * Int(dims.y) + y)
+                                                      * Int(dims.x) + x])
+                    let document = state.engine.evalDistance(at: world)
+                    guard document.isFinite else { continue }
+                    // Only where either side is near the surface: the narrow
+                    // band is what the bake stores and what the renderer
+                    // marches; far cells are clamped and disagree by design.
+                    guard min(abs(baked), abs(document)) < 0.25 else { continue }
+                    let error = abs(baked - document)
+                    if error > worst { worst = error; worstAt = world }
+                }
+            }
+        }
+        return (worst, worstAt)
+    }
+
+    /// How far the baked field may depart from the document before the bake
+    /// is considered stale rather than merely quantized.
+    ///
+    /// Calibrated, not guessed. With a healthy bake the four regional verbs
+    /// report 0.0332–0.0378 — fp16 storage plus grid quantization. With the
+    /// bake deliberately scoped to a quarter of its region they report
+    /// 0.8404–0.9248. This sits an order of magnitude clear of the noise and
+    /// well under the defect.
+    static let bakeErrorThreshold: Float = 0.15
+
+    /// Asserts the field the RENDERER samples still matches the document.
+    static func assertBakeIsFaithful(_ fixture: BrushFixture,
+                                     _ state: ViewportState,
+                                     file: StaticString = #filePath,
+                                     line: UInt = #line) {
+        guard let worst = worstBakeError(state) else {
+            return XCTFail("\(fixture.name): no field cache to check — the "
+                           + "bake guard cannot pass by finding nothing",
+                           file: file, line: line)
+        }
+        XCTAssertLessThan(
+            worst.error, bakeErrorThreshold,
+            "\(fixture.name): the BAKE disagrees with the document by "
+            + "\(worst.error) at \(worst.at). The document is correct and the "
+            + "render is not, which is what the artist sees as a crater. "
+            + "Healthy is ~0.035; a quarter-scoped bake gives ~0.9",
+            file: file, line: line)
+    }
+
+    /// How far a probe may move before the surface is considered TORN rather
+    /// than sculpted. Matches `RegionalSwapTests`: these brushes act with a
+    /// small region, and the observed tearing moved probes by more than half
+    /// a world unit.
+    static let tearThreshold: Float = 0.3
+
+    /// Asserts the brush did not tear the surface: no probe jumped further
+    /// than a brush plausibly moves it, and no probe that had surface under
+    /// it lost that surface entirely.
+    ///
+    /// Separate from `assertEffect` because the effect claims cannot express
+    /// this — `.reshapes` is satisfied by any large movement, and a tear IS a
+    /// large movement.
+    static func assertNoTear(_ fixture: BrushFixture,
+                             before: BrushMeasurement, after: BrushMeasurement,
+                             file: StaticString = #filePath, line: UInt = #line) {
+        for (index, pair) in zip(before.surfaceDistances,
+                                 after.surfaceDistances).enumerated() {
+            switch pair {
+            case (.some(let start), .some(let end)):
+                XCTAssertLessThan(
+                    abs(start - end), tearThreshold,
+                    "\(fixture.name) tore the surface at probe \(index): "
+                    + "\(start) -> \(end). This is the regional swap losing "
+                    + "the region it sampled, not the brush sculpting. "
+                    + "before \(before.surfaceDistances) "
+                    + "after \(after.surfaceDistances)",
+                    file: file, line: line)
+            case (.some, .none):
+                XCTFail("\(fixture.name) removed the surface entirely at probe "
+                        + "\(index) — a hole through the object. "
+                        + "before \(before.surfaceDistances) "
+                        + "after \(after.surfaceDistances)",
+                        file: file, line: line)
+            default:
+                break // no surface there to begin with
+            }
+        }
     }
 
     /// Asserts the brush did what it claims. Failures name the brush, so a
