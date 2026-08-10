@@ -23,7 +23,7 @@ Relax             [1.0488, 1.3348, 1.8358, 1.3277, 1.8357]
 
 ## What Changes
 
-- **Establish the root cause.** Two candidates are already eliminated: the swap IS surface-preserving with a near-identity verb on a plain ball, and `region_radius` DOES confine the verb. The leading hypothesis is the sampled volume's fidelity — `replaceRegion` sets `vp.band` to the whole box diagonal, and the margin between the acting region plus falloff (`1.4 × radius`) and the box half-extent (`1.6 × radius + 0.05`) is thin.
+- **Root cause, found:** `clay_item_volume_from_document` does not reproduce `CLAY_OP_RELIEF` geometry. Seeding the same lump with four different ops and counting holes isolates it exactly — RELIEF opens two, while INCISE, ADD and SUBTRACT open none. Sampling resolution and the box margin were both eliminated first: refining the cell size fourfold and widening the pad 2.5× each tear identically.
 - **Fix it where it belongs.** If the sampling parameters are wrong, that is an app fix. If `clay_item_volume_from_document` cannot reproduce multi-item detail at these settings, that is a ClayCore issue and gets filed with this reproduction.
 - **Keep the reproduction.** `RegionalSwapTests` drives each verb over detailed geometry and fails on a tear. It stays as the regression test.
 - **Close the fixture blind spot.** At least one fixture per regional brush must act on detail rather than a plain ball, or the next defect of this shape is equally invisible.
@@ -40,4 +40,4 @@ Not in scope: the Relax brush itself, which is blocked on this and tracked in `a
 
 **Code**: `ClayEngine.replaceRegion` and its callers `polishSurface`, `moveTopologicalSurface`, `relaxSurface`. Possibly ClayCore's `clay_item_volume_from_document`.
 
-**Severity**: high. This is silent data loss in a sculpting app — the user's work is destroyed by a brush whose whole purpose is a controlled local edit, and undo is the only recovery. It is reachable today by anyone using hPolish or Flatten on clay that already has detail on it, which is the normal way those brushes are used.
+**Severity**: high, and higher than it first looked. **Standard is the default sculpt brush**, and it is the op that fails — so "clay shaped with Standard, then smoothed with hPolish" is not an edge case, it is the ordinary way the app is used. This is silent data loss in a sculpting app — the user's work is destroyed by a brush whose whole purpose is a controlled local edit, and undo is the only recovery. It is reachable today by anyone using hPolish or Flatten on clay that already has detail on it, which is the normal way those brushes are used.

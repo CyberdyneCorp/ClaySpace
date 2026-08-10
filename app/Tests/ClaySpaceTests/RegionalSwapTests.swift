@@ -122,4 +122,53 @@ final class RegionalSwapTests: XCTestCase {
         capture(state, named: "relax")
         assertNoTear("Relax", before: before, after: profile(state))
     }
+
+    /// Separates WHICH detail tears it. The seed uses Standard, which is
+    /// CLAY_OP_RELIEF — a region op, not a plain solid. Snake Hook builds the
+    /// same kind of lump with CLAY_OP_ADD. If relief tears and add does not,
+    /// the fault is in sampling relief rather than in detail as such.
+    func testWhichKindOfDetailTears() async {
+        for (label, brush) in [("RELIEF   (Standard)", ViewportState.SculptBrush.standard),
+                               ("INCISE   (Crease)", ViewportState.SculptBrush.crease),
+                               ("ADD      (Snake Hook)", ViewportState.SculptBrush.snakeHook),
+                               ("SUBTRACT (Carve)", ViewportState.SculptBrush.carve)] {
+            let state = BrushMatrix.makeState(voxel: false)
+            state.activeTool = .sculpt
+            state.sculptBrush = brush
+            state.brushStrength = 1
+            state.brushSize = 0.8
+            for _ in 0..<3 {
+                state.pencilBegan(at: BrushFixture.centerTap[0], pressure: 1)
+                state.pencilEnded(at: BrushFixture.centerTap[0])
+            }
+            _ = await state.engine.quiesce()
+            guard let anchor = bumpAnchor(state) else {
+                XCTFail("\(label): no surface"); continue
+            }
+            let before = profile(state)
+            state.engine.polishSurface(center: anchor.point, normal: anchor.normal,
+                                       radius: 0.16, strength: 1,
+                                       mode: CLAY_FLATTEN_CUT_ONLY)
+            _ = await state.engine.quiesce()
+            let after = profile(state)
+            let worst = zip(before, after).compactMap { pair -> Float? in
+                guard let a = pair.0, let b = pair.1 else { return nil }
+                return abs(a - b)
+            }.max() ?? 0
+            // A HOLE is the signature, not mere movement: carve legitimately
+            // moves the surface a long way. A probe that recedes past the
+            // object is the ray passing clean through it.
+            let holes = zip(before, after).filter { pair in
+                guard let a = pair.0, let b = pair.1 else { return false }
+                return b - a > 0.4
+            }.count
+            let fmt = { (xs: [Float?]) in xs.map { $0.map { String(format: "%.3f", $0) } ?? "nil" }.joined(separator: " ") }
+            print("TEAR-PROBE \(label): holes \(holes)  worst \(String(format: "%.3f", worst))")
+            print("           before \(fmt(before))")
+            print("           after  \(fmt(after))")
+            XCTAssertEqual(holes, 0,
+                           "\(label) opened \(holes) hole(s): before \(before) "
+                           + "after \(after)")
+        }
+    }
 }
