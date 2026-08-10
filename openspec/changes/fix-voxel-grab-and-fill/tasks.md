@@ -9,9 +9,9 @@
 
 ## 2. Fill
 
-- [ ] 2.1 Determine whether an enclosed pocket (an empty cell with 4+ of 6 face neighbours occupied) can be built with the app's voxel tools at all — camera rotation plus placement around a gap
-- [ ] 2.2 If it can: add the fixture that builds one and assert fill closes it; document the gesture
-- [ ] 2.3 If it cannot: withdraw the verb from the voxel bar, record why in the task and the spec so it is not re-added blindly, and drop its fixture from the matrix
+- [x] 2.1 **Answered upstream (ClayCore issue #18, shipped in v0.25.0).** It can, and by the most ordinary gesture there is — not by the deliberate 1-cell pit every test built. Occupancy is binary, so any strength or falloff below 1 is DITHERED against a hash of the cell coordinate: a soft stamp lays a pepper of single-cell holes *through* the material it deposits, and each qualifies under the four-neighbour rule. A dragged soft stroke is a cavity factory. The artist never sees them because greedy meshing renders six faces around each. Measured upstream on a twelve-stamp stroke: 414 cells, 73 qualifying, fill-cavities adds 135 and the greedy mesh falls 2422 → 1780 triangles. Reference gesture: `examples/15_voxel_verbs_and_repair.py`. Note also that those holes are OPEN — `enclosed_voids` stays 0 — so fill-voids is NOT a substitute; narrow is not sealed
+- [ ] 2.2 It can — add the fixture: drag a soft stroke (strength ≈ 0.65, smooth falloff) with the app's own voxel brush, assert `clay_voxel_change_count` moves and the triangle count FALLS, and document the gesture
+- [x] 2.3 Withdrawal is off the table: the verb is reachable from the ordinary soft-stroke gesture, so it stays in the voxel bar
 - [ ] 2.4 Either way, keep the negative case covered: fill leaves solid blobs, through-holes, and shallow dents alone
 
 ## 3. Close out

@@ -1443,22 +1443,6 @@ final class ClayEngine {
                                transform: (OpaquePointer, SIMD3<Float>) -> Bool) -> Bool {
         guard let doc, activeStroke == nil, items.count + 1 < Renderer.maxItems
         else { return false }
-        // clay_item_volume_from_document silently omits CLAY_PRIM_STROKE items
-        // — their points live in an out-of-line payload the sampler does not
-        // reach (ClayCore #35, reproduction in
-        // openspec/changes/fix-regional-swap-tearing/stroke-prim-sampling.c).
-        //
-        // Sampling anyway returns a volume that is missing the stroke, and the
-        // hard box-subtract then removes material nothing puts back: the user
-        // gets a box-shaped crater cut out of their model. Refusing is a poor
-        // brush; destroying someone's work is worse, and undo is the only way
-        // back from it.
-        if let blocked = strokeItemIn(box) {
-            lastError = "\(blocked) can't be smoothed yet — this brush drops "
-                + "stroke geometry (ClayCore #35). Move the stroke or use it "
-                + "on clay built from shapes."
-            return false
-        }
         var vp = clay_volume_params()
         vp.struct_size = UInt32(MemoryLayout<clay_volume_params>.size)
         vp.cell_size = cellSize
@@ -2701,18 +2685,6 @@ final class ClayEngine {
         } else {
             pendingBakeRegion = region
         }
-    }
-
-    /// Names a stroke item overlapping `box`, if any. The regional swap cannot
-    /// survive one until ClayCore #35 is fixed, so callers refuse instead.
-    private func strokeItemIn(_ box: (min: SIMD3<Float>, max: SIMD3<Float>))
-        -> String? {
-        for (index, aabb) in itemAABBs.enumerated() where index < items.count {
-            guard items[index].prim == Self.strokePrim else { continue }
-            guard all(aabb.0 .<= box.max), all(aabb.1 .>= box.min) else { continue }
-            return "A stroke is in the way"
-        }
-        return nil
     }
 
     /// The region a change inside `box` can affect, which is NOT the box.
