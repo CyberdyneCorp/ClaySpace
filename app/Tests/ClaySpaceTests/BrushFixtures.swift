@@ -116,6 +116,20 @@ enum BrushMatrix {
                      strength: 1),
     ]
 
+    /// A ball with a pronounced Standard bump on it. Standard is
+    /// CLAY_OP_RELIEF, and relief is exactly what the regional brushes were
+    /// tearing over — a plain ball never demanded it.
+    static let seedBump: @MainActor @Sendable (ViewportState) -> Void = { state in
+        state.activeTool = .sculpt
+        state.sculptBrush = .standard
+        state.brushStrength = 1
+        state.brushSize = 0.8
+        for _ in 0..<3 { // one tap is a dimple, not a bump
+            state.pencilBegan(at: BrushFixture.centerTap[0], pressure: 1)
+            state.pencilEnded(at: BrushFixture.centerTap[0])
+        }
+    }
+
     /// Voxel verbs other than `place` need cells to act on, so they seed a
     /// blob first and then switch to the verb under test.
     private static let seedVoxels: @MainActor @Sendable (ViewportState) -> Void = { state in
