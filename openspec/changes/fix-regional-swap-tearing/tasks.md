@@ -33,6 +33,27 @@ Isolated by seeding the same lump with four different ops and counting holes —
 - [ ] 2b.3 Check the other paths that trace the baked field: raycast picking, surface snapping, and the brushes that re-anchor on the surface each move all read the same stale data
 - [ ] 2b.4 No ClayCore issue. The engine reproduces every op correctly; filing one would have been wrong
 
+## 2c. The real root cause — ClayCore #35
+
+**`clay_item_volume_from_document` silently drops `CLAY_PRIM_STROKE` items.** Their points live in an out-of-line payload the sampler does not reach, so the returned volume contains the rest of the region and omits the stroke, with `CLAY_OK` and no diagnostic.
+
+Reported from device: hPolish and Smooth on a document whose edit list read `Stroke · 16 pts` cut two box craters. Reproduced in `stroke-prim-sampling.c`:
+
+```
+CLAY_OP_ADD        worst |before - after| = 0.2433
+CLAY_OP_SUBTRACT   0.0980
+CLAY_OP_INCISE     0.1469
+CLAY_OP_RELIEF     0.1869
+```
+
+SUBTRACT, INCISE and RELIEF produce IDENTICAL after-rows. Three ops cannot agree to four decimals unless the item carrying them contributed nothing — what is left is the bare ball.
+
+- [x] 2c.1 Ruled out first, same harness: a single relief sphere round-trips to 0.0001, a chain of 13 spheres to 0.0008, all four ops on ordinary prims to 0.0014. The sampler handles ops, blends, rounding and overlap; it does not handle the primitive whose geometry is out of line
+- [x] 2c.2 Filed as ClayCore #35 with the standalone reproduction
+- [x] 2c.3 App guard: `replaceRegion` refuses when a stroke overlaps its box, with a message naming the cause. A poor brush beats a destroyed model, and undo was the only way back
+- [ ] 2c.4 Remove the guard when #35 ships, and let `RegionalSwapTests` prove it rather than assuming
+- [ ] 2c.5 The header says the two lifts also carry an out-of-line payload. Check them for the same gap before trusting any other primitive through this path
+
 ## 3. Fix
 
 - [x] 3.1 All six `RegionalSwapTests` pass — hPolish, Flatten, Move Topological, Relax, the op comparison, and the document-vs-bake probe

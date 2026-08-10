@@ -207,4 +207,36 @@ final class RegionalSwapTests: XCTestCase {
                   + "   raycast \(rc.map { String(format: "%.3f", $0) } ?? "none")")
         }
     }
+
+    /// The case a user actually produces, and the one the other fixtures
+    /// miss: a real DRAG, which is one chain stroke of many points, rather
+    /// than a handful of separate taps. Reported from device with two visible
+    /// box craters after hPolish and Smooth, on a document whose edit list
+    /// read "Stroke - 16 pts".
+    func testAChainStrokeSurvivesARegionalBrush() async {
+        let state = BrushMatrix.makeState(voxel: false)
+        state.activeTool = .sculpt
+        state.sculptBrush = .standard
+        state.brushStrength = 1
+        state.brushSize = 0.6
+        BrushMatrix.drive(state, along: BrushFixture.centerDrag) // ONE chain
+        _ = await state.engine.quiesce()
+
+        let strokePoints = state.engine.items.count
+        guard let anchor = bumpAnchor(state) else { return XCTFail("no surface") }
+        let before = profile(state)
+
+        state.engine.polishSurface(center: anchor.point, normal: anchor.normal,
+                                   radius: 0.16, strength: 1,
+                                   mode: CLAY_FLATTEN_CUT_ONLY)
+        _ = await state.engine.quiesce()
+        let after = profile(state)
+        capture(state, named: "chain-polish")
+
+        let fmt = { (xs: [Float?]) in xs.map { $0.map { String(format: "%.3f", $0) } ?? "nil" }.joined(separator: " ") }
+        print("CHAIN items=\(strokePoints)")
+        print("CHAIN before \(fmt(before))")
+        print("CHAIN after  \(fmt(after))")
+        assertNoTear("hPolish over a chain stroke", before: before, after: after)
+    }
 }
