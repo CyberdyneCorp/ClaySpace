@@ -171,4 +171,40 @@ final class RegionalSwapTests: XCTestCase {
                            + "after \(after)")
         }
     }
+
+    /// Where does the tear actually live — in the DOCUMENT, or only in the
+    /// baked field the raycaster traces?
+    ///
+    /// `engine.raycast` traces the bake. `engine.evalDistance` asks the
+    /// document. If the document still has material where the raycast reports
+    /// a hole, the geometry is fine and the bake is what is broken.
+    func testIsTheTearInTheDocumentOrTheBake() async {
+        let state = BrushMatrix.makeState(voxel: false)
+        BrushMatrix.seedBump(state)
+        _ = await state.engine.quiesce()
+        guard let anchor = bumpAnchor(state) else { return XCTFail("no bump") }
+
+        state.engine.polishSurface(center: anchor.point, normal: anchor.normal,
+                                   radius: 0.16, strength: 1,
+                                   mode: CLAY_FLATTEN_CUT_ONLY)
+        _ = await state.engine.quiesce()
+
+        // March each probe ray through the DOCUMENT and find the first
+        // crossing, then compare with what the raycaster reports.
+        for (index, screen) in BrushFixture.probePoints.enumerated() {
+            guard let ray = state.ray(through: screen) else { continue }
+            var documentHit: Float?
+            var t: Float = 0.1
+            while t < 6 {
+                let p = ray.origin + ray.direction * t
+                if state.engine.evalDistance(at: p) <= 0 { documentHit = t; break }
+                t += 0.004
+            }
+            let raycastHit = state.engine.raycast(origin: ray.origin,
+                                                  direction: ray.direction)
+            let rc = raycastHit.map { simd_length($0.position - ray.origin) }
+            print("PROBE \(index): document \(documentHit.map { String(format: "%.3f", $0) } ?? "none")"
+                  + "   raycast \(rc.map { String(format: "%.3f", $0) } ?? "none")")
+        }
+    }
 }

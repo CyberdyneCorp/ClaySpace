@@ -22,13 +22,16 @@ Isolated by seeding the same lump with four different ops and counting holes —
 - [x] 2.1 Sampling resolution ELIMINATED — refining `cellSize` from `radius/14` to `radius/60` tears identically (and takes 88s)
 - [x] 2.2 Margin ELIMINATED — widening the pad from `1.6 × radius + 0.05` to `4 × radius + 0.2` tears identically
 - [x] 2.3 Item count ELIMINATED, and the real variable found: it is the OP, not the number of items or the curvature. Three items of `ADD` are fine; the same three of `RELIEF` tear
-- [x] 2.4 The fix belongs in ClayCore: a documented op that `clay_item_volume_from_document` cannot sample is an engine defect, not a caller mistake. `CLAY_OP_INCISE` — the other region op — samples correctly, so this is specific to relief rather than to region ops generally
+- [x] 2.4 **RETRACTED and corrected. The fix belongs in the APP, not ClayCore.** A standalone C reproduction against 0.24.2 shows `clay_item_volume_from_document` reproduces ADD, SUBTRACT, INCISE and RELIEF to within 0.0014, and that the full box-subtract-plus-volume-add swap is faithful to the same tolerance. The engine is sound; the ClayCore issue was NOT filed
+- [x] 2.5 **Where the tear lives: the BAKE.** `engine.evalDistance` (document) finds the surface at 1.356 and 1.360 where `engine.raycast` (baked field) reports 1.836 — a hole in the render over intact geometry
+- [x] 2.6 Why relief: `replaceRegion` marks only its own box dirty. A union op's influence ends at its bounds so that suffices; a region op that displaces the accumulated field changes the surface OUTSIDE the box, and that area keeps a stale bake
 
-## 2b. Consequence
+## 2b. Fix direction
 
-- [ ] 2b.1 Report to ClayCore with this reproduction. Note that INCISE works and RELIEF does not, which should narrow it quickly
-- [ ] 2b.2 Decide the app's position while it is unfixed. **Standard is the default brush**, so "clay made with Standard, then hPolished" is not an edge case — it is the ordinary path, and it currently destroys work
-- [ ] 2b.3 Consider whether the app can detect relief in the sampled region and refuse rather than tear. Refusing with a message is bad; silently holing the user's model is worse
+- [ ] 2b.1 Widen the bake's dirty region so it covers the INFLUENCE of the edit rather than its box. Region ops reach past their own bounds, which is exactly what the current `scheduleBakeDirty(box)` misses
+- [ ] 2b.2 Establish how far that influence actually reaches, rather than padding by a guess — a region op's rounding and blend both extend it
+- [ ] 2b.3 Check the other paths that trace the baked field: raycast picking, surface snapping, and the brushes that re-anchor on the surface each move all read the same stale data
+- [ ] 2b.4 No ClayCore issue. The engine reproduces every op correctly; filing one would have been wrong
 
 ## 3. Fix
 
