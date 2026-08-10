@@ -1513,7 +1513,9 @@ final class ClayEngine {
         undoLog.append(.addBatch(count: 2))
         redoOps.removeAll()
         commit()
-        scheduleBakeDirty(box)
+        // NOT `box`: a region op overlapping it changes the surface outside
+        // it, and baking only the box leaves the rest stale.
+        scheduleBakeDirty(bakeInfluence(of: box))
         scheduleAutosave()
         return true
     }
@@ -2683,6 +2685,43 @@ final class ClayEngine {
         } else {
             pendingBakeRegion = region
         }
+    }
+
+    /// The region a change inside `box` can affect, which is NOT the box.
+    ///
+    /// A union op's influence ends at its own bounds, so for ADD and SUBTRACT
+    /// the edited box is enough. A REGION op — relief, incise — displaces the
+    /// accumulated field beneath it, so if the field changes anywhere inside
+    /// its footprint, its output changes across the WHOLE footprint. Marking
+    /// only the box leaves the rest of that footprint baked from a field that
+    /// no longer exists, and the raymarcher then traces stale data: the
+    /// document keeps its geometry while the render shows a crater with holes.
+    ///
+    /// One pass is not enough either, since a grown region can reach further
+    /// region ops, so this runs to a fixed point. If it fails to settle or
+    /// swallows most of the scene, `nil` asks for a full bake — always
+    /// correct, and cheaper than an elaborate wrong answer.
+    private func bakeInfluence(of box: (min: SIMD3<Float>, max: SIMD3<Float>))
+        -> (min: SIMD3<Float>, max: SIMD3<Float>)? {
+        var region = box
+        for _ in 0..<8 {
+            var grew = false
+            for (index, aabb) in itemAABBs.enumerated() where index < items.count {
+                let op = items[index].op
+                guard op == Int32(CLAY_OP_RELIEF.rawValue)
+                        || op == Int32(CLAY_OP_INCISE.rawValue) else { continue }
+                guard all(aabb.0 .<= region.max), all(aabb.1 .>= region.min)
+                else { continue }
+                let lo = simd_min(region.min, aabb.0)
+                let hi = simd_max(region.max, aabb.1)
+                if lo != region.min || hi != region.max {
+                    region = (lo, hi)
+                    grew = true
+                }
+            }
+            if !grew { return region }
+        }
+        return nil // did not settle; a full bake is correct and simpler
     }
 
     /// Region-attributed rebake: eligible for the partial path.

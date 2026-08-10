@@ -28,15 +28,15 @@ Isolated by seeding the same lump with four different ops and counting holes —
 
 ## 2b. Fix direction
 
-- [ ] 2b.1 Widen the bake's dirty region so it covers the INFLUENCE of the edit rather than its box. Region ops reach past their own bounds, which is exactly what the current `scheduleBakeDirty(box)` misses
-- [ ] 2b.2 Establish how far that influence actually reaches, rather than padding by a guess — a region op's rounding and blend both extend it
+- [x] 2b.1 `bakeInfluence(of:)` — grows the dirty region to a fixed point over the RELIEF and INCISE items overlapping it, since a region op's output changes across its whole footprint when the field beneath it moves. Returns nil (full bake) if it fails to settle in 8 passes
+- [x] 2b.2 Answered structurally rather than by a padding guess: the reach IS the item's own AABB, which the engine already tracks. Confirmed first by forcing a full bake, which eliminated the tearing for all four verbs — bounding the problem before choosing the cheaper fix
 - [ ] 2b.3 Check the other paths that trace the baked field: raycast picking, surface snapping, and the brushes that re-anchor on the surface each move all read the same stale data
 - [ ] 2b.4 No ClayCore issue. The engine reproduces every op correctly; filing one would have been wrong
 
 ## 3. Fix
 
-- [ ] 3.1 Apply the fix and confirm `RegionalSwapTests` goes green for all four verbs
-- [ ] 3.2 Confirm the existing plain-ball behaviour is unchanged — the matrix must still match its baseline, with no IMAGE DRIFT
+- [x] 3.1 All six `RegionalSwapTests` pass — hPolish, Flatten, Move Topological, Relax, the op comparison, and the document-vs-bake probe
+- [x] 3.2 No IMAGE DRIFT anywhere: every existing brush renders exactly as before, so the invalidation change did not perturb the ordinary path
 - [ ] 3.3 Device check: the tear was found on simulator; confirm both the defect and the fix on hardware
 
 ## 4. Close the blind spot
