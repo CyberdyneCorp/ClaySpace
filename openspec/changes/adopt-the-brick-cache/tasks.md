@@ -1,3 +1,22 @@
+## 0. Measured decomposition — two cheaper levers come first
+
+Prompted by the question "is it the brick tree, or is it that we bake to disk?". Neither. Measured against v0.25.0, a 25-item document (ball plus 24 relief strokes), 64³ grid, Release `-O2`:
+
+```
+save                       0.9 ms
+load                       0.1 ms     <- the whole disk hypothesis
+eval_points (app today)   68.1 ms
+eval_grid  (no cull)      55.0 ms
+eval_grid  (culled)       53.4 ms
+```
+
+Disk is **1.0 ms of a 570–880 ms bake**. It is not the problem and neither is the tape being reloaded. The cost is raw CPU field evaluation — roughly 260 ns per sample against a 25-item tape — over a grid the app rebuilds at 83–86% per stroke.
+
+- [ ] 0.1 **The Metal backend is not compiled in.** `CLAY_BACKEND_METAL` is a CMake option defaulting OFF and `tools/build_xcframework.sh` never passes it, so the xcframework ClaySpace links is CPU-only. Every `clay_eval_points` call passes `nil` (= "cpu") because there is nothing else to pass. Rebuild the framework with the backend on, link Metal.framework, and measure. This attacks the actual bottleneck and is a build-script change, not an architecture migration — do it before anything below
+- [ ] 0.2 **`clay_eval_grid` instead of `clay_eval_points`**: 55.0 vs 68.1 ms, about 20%, no renderer change. A lattice is the shape every backend already implements (`eval::GridQuery`); the app hand-builds point arrays for one. Applies to both bake passes
+- [ ] 0.3 **Correction to this change's own premise.** Culling bought almost nothing here — 53.4 against 55.0. The ABI says tape culling is "where the brick cache's measured win lives", and on a model whose items pile into one region there is nothing to cull. For scenes like this the brick cache's win must come from NOT RE-EVALUATING untouched bricks, which is a different mechanism from the one the header advertises. Both are real; only the second applies to us
+- [ ] 0.4 The scene above concentrates its items. Re-measure with items spread across a model, where culling should tell, before concluding either way
+
 ## 1. The measurement gate — nothing below starts until this passes
 
 - [ ] 1.1 Standalone C harness against the pinned v0.25.0 xcframework: build a document resembling a real session (a ball, a dozen strokes, several regional verbs), drive the full `mark_dirty → take_dirty → eval_requests → submit` path, and report bricks tracked, bricks surface, bricks re-evaluated per edit, and wall time
