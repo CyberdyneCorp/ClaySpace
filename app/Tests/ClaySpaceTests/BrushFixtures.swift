@@ -117,6 +117,12 @@ enum BrushMatrix {
                      select: { $0.sculptBrush = .smooth; $0.brushSize = 0.1 },
                      stroke: BrushFixture.centerTap,
                      effect: .smooths, minDelta: 0.004, strength: 1),
+        // A command brush: it acts once on touch-down against the existing
+        // freeze, so the "stroke" is a single tap and there is no drag.
+        BrushFixture("extract", seed: seedFrozenPatch,
+                     select: { $0.sculptBrush = .extract },
+                     stroke: BrushFixture.centerTap,
+                     effect: .addsMaterial, minDelta: 0.01),
         BrushFixture("magnify", select: { $0.sculptBrush = .magnify }, effect: .reshapes),
         BrushFixture("pinch", select: { $0.sculptBrush = .pinch }, effect: .reshapes),
         // Noise at its default strength moves the surface by ~2e-05 — real,
@@ -140,6 +146,18 @@ enum BrushMatrix {
             state.pencilBegan(at: BrushFixture.centerTap[0], pressure: 1)
             state.pencilEnded(at: BrushFixture.centerTap[0])
         }
+    }
+
+    /// Extract consumes a freeze that already exists, so the fixture paints
+    /// one. Straight through the engine rather than the freeze TOOL, because
+    /// the tool path has an open question of its own (add-smooth-and-extract
+    /// task 4.7) and this fixture is about Extract.
+    static let seedFrozenPatch: @MainActor @Sendable (ViewportState) -> Void = { state in
+        guard let ray = state.ray(through: BrushFixture.centerTap[0]),
+              let hit = state.engine.raycast(origin: ray.origin,
+                                             direction: ray.direction) else { return }
+        state.engine.maskPaint(at: hit.position, radius: 0.18, erase: false,
+                               voxelContext: false)
     }
 
     /// Voxel verbs other than `place` need cells to act on, so they seed a

@@ -77,14 +77,14 @@ Implements `add-brush-verification` tasks 7.1–7.6; that change owns the requir
 
 ## 5. Mask Extract
 
-- [ ] 5.1 `extractMask(layer:thickness:)` in `ClayEngine` over `clay_document_mask_extrude`, adding the returned item to the active layer as one undo step
-- [ ] 5.2 Surface the engine's typed errors as toasts — empty mask, non-positive thickness, wall thinner than a cell, and the mask never reaching the surface. The last is the one the header warns an empty item would disguise
-- [ ] 5.3 Add the `SculptBrush` case as a `.command` descriptor row: acts once on touch-down, no drag, no stroke
-- [ ] 5.4 Border preview via `clay_mask_to_field`, so preview and commit agree by construction
+- [x] 5.1 `extractMask(thickness:borderRound:)` over `clay_document_mask_extrude`, added to the active layer inside one undo group. Verified: one item appears, the mask is untouched, and it undoes in ONE step
+- [x] 5.2 Every refusal reported. The engine folds three causes into one message ("the mask is empty, does not reach the surface, or the wall is thinner than a cell"), so the app pre-checks the one it can distinguish and names the actual number: the mask cell is `ClayEngine.voxelSize` = 0.12, so a thinner wall now says "Extract needs a wall of at least 0.12" instead of a three-way guess
+- [x] 5.3 `.extract` added as a `.command` descriptor row. Adding the case made the compiler demand a decision in `commitWarp` — the exhaustiveness the enum was chosen for, working as intended
+- [ ] 5.4 Border preview via `clay_mask_to_field` — still to do; Extract commits correctly without it, but the user gets no sight of the patch before committing
 - [x] 5.5 DECIDED: thickness gets its own control. Extract has no drag and no pressure to derive a scale from, and the ABI refuses a wall thinner than a cell — a constraint the user must be able to see and satisfy directly
-- [ ] 5.6 Engine test: a frozen patch produces a new item; source layer and mask unchanged; one undo step (spec: "A frozen patch becomes a new item")
-- [ ] 5.7 Engine test: a mask that never reaches the surface reports an error and adds nothing (spec: "The mask never reaches the surface")
-- [ ] 5.8 Engine test: an empty mask reports and changes nothing (spec: "Nothing is frozen")
+- [x] 5.6 `testAFrozenPatchBecomesANewItem` passes
+- [x] 5.7 `testAMaskThatNeverReachesTheSurface` passes
+- [x] 5.8 `testNothingIsFrozen` passes, plus `testAThicknessOfZeroIsRefused`
 
 ## 5b. Flatten family verification
 
@@ -108,7 +108,9 @@ before it lands rather than after.
 ## 6. Matrix coverage
 
 - [x] 6.1b `testEveryBrushIsActuallyRun` added, and it caught a live hole: `smooth` was registered as a fixture and matched no test group, so it existed and never ran. Having a fixture was never the same as being exercised, and nothing checked the difference. Test groups are data now, and the union must equal the registry
-- [ ] 6.1 Teach the matrix to drive a `.command` brush — apply and probe with no pencil movement (spec: "Driving a command brush")
+- [x] 6.1 The matrix drives a `.command` brush with a single-tap stroke and no drag; Extract's probe passes through the app's own Pencil path
+- [ ] 6.5 Extract's plate is visibly BLOCKY. `cell_size` is passed as 0, which takes the mask's own resolution — `ClayEngine.voxelSize`, 0.12. The ABI accepts an override, so a finer sampling would smooth the result at some cost. Worth a decision rather than leaving it at the default by accident
+- [ ] 6.6 Extract renders ice-blue because the patch it came from is still frozen. Correct as far as it goes, but a user extracting and then looking for the new item may read the tint as a mode rather than a freeze
 - [ ] 6.2 Fixtures for Smooth and Mask Extract; the coverage check names any bar brush without one
 - [ ] 6.3 Capture simulator goldens for both new brushes via `scripts/rebaseline-goldens.sh`; device baselines stay with `add-brush-verification` 6.8
 - [ ] 6.4 Full suite green apart from the known `fix-voxel-grab-and-fill` failures; state which failures remain and why

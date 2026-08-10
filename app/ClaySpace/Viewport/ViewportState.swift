@@ -313,12 +313,15 @@ final class ViewportState {
             case noise
             /// Collects a path and resolves it on pencil-up.
             case path
+            /// Acts ONCE on touch-down against state that already exists —
+            /// no drag, no stroke, nothing to commit on lift.
+            case command
 
             /// Warps and regional swaps anchor on the surface at
             /// touch-down and commit on lift; they never build a stroke.
             var anchorsOnSurface: Bool {
                 switch self {
-                case .stroke, .path: false
+                case .stroke, .path, .command: false
                 case .surfaceMove, .flatten, .relax, .deform, .noise: true
                 }
             }
@@ -345,7 +348,7 @@ final class ViewportState {
 
     enum SculptBrush: String, CaseIterable, Identifiable {
         case standard, crease, carve, snakeHook, move, moveTopo, tube,
-             polish, flatten, smooth, magnify, pinch, noise
+             polish, flatten, smooth, extract, magnify, pinch, noise
 
         var id: String { rawValue }
 
@@ -414,6 +417,10 @@ final class ViewportState {
                     action: .relax,
                     title: "Smooth", symbol: "drop.circle",
                     requiresSurface: true)
+            case .extract:
+                BrushDescriptor(
+                    action: .command,
+                    title: "Extract", symbol: "square.on.square.dashed")
             case .magnify:
                 BrushDescriptor(
                     action: .deform(sign: 1),
@@ -560,6 +567,15 @@ final class ViewportState {
     /// the pre-dial behavior; pressure still breathes inside it); strength
     /// maps per family — relief amplitude for Standard/Carve, the engine's
     /// coverage strength for voxel brushes and spray stamps.
+    /// Extract's wall thickness, in world units. Its OWN control rather than
+    /// derived from brush radius: Extract has no drag and no pressure to take
+    /// a scale from, and the engine refuses a wall thinner than a cell, which
+    /// is a constraint the user has to be able to see and satisfy.
+    /// Default above the mask cell size (`ClayEngine.voxelSize`, 0.12): the
+    /// engine refuses anything thinner, so a smaller default would ship a
+    /// brush whose first use fails.
+    var extractThickness: Float = 0.15
+
     var brushSize: Float = 0.5 {
         didSet {
             guard let editIndex = tubeEditIndex, let pointIndex = tubeSelectedPoint,
@@ -1197,11 +1213,29 @@ extension ViewportState: PencilToolSink {
             case .path:
                 return beginTubePath(hit: hit, ray: ray, pressure: pressure,
                                      altitude: altitude)
+            case .command:
+                return performBrushCommand(at: point)
             case .stroke:
                 break
             }
         }
         beginChainStroke(hit: hit, ray: ray, pressure: pressure, altitude: altitude)
+    }
+
+    /// A command brush acts once, here, on the mask that already exists.
+    ///
+    /// Every refusal is reported. The engine distinguishes an empty mask, a
+    /// non-positive thickness, a wall thinner than a cell, and a mask that
+    /// never reaches the surface — that last is the mistake a user actually
+    /// makes, and the one an empty result would disguise.
+    private func performBrushCommand(at point: CGPoint) {
+        guard sculptBrush == .extract else { return }
+        if engine.extractMask(thickness: extractThickness) {
+            emitHaptic(.completed, at: point)
+            showToast("Extracted the frozen patch")
+        } else {
+            showToast(engine.lastError ?? "Extract did nothing")
+        }
     }
 
     /// Move / Move Topological: drag the assembled surface. No stroke item
@@ -1813,7 +1847,7 @@ extension ViewportState: PencilToolSink {
                                    strength: 0.3 + 0.7 * brushStrength) {
                 emitHaptic(.completed, at: point)
             }
-        case .stroke, .surfaceMove, .path:
+        case .stroke, .surfaceMove, .path, .command:
             break // committed elsewhere, or nothing to commit
         }
         return true

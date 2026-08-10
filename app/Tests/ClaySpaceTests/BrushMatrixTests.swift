@@ -14,7 +14,8 @@ final class BrushMatrixTests: XCTestCase {
     // matched no group — the fixture existed and never ran.
     static let surfaceGroup = ["standard", "crease", "carve", "snakeHook"]
     static let displacementGroup = ["move", "moveTopo", "tube"]
-    static let shapingGroup = ["polish", "flatten", "smooth", "magnify", "pinch", "noise"]
+    static let shapingGroup = ["polish", "flatten", "smooth", "extract", "magnify",
+                               "pinch", "noise"]
     static let voxelBuildingGroup = ["place", "inflate", "deflate", "scrape",
                                      "flatten", "smooth"]
     static let voxelShapingGroup = ["pinch", "magnify", "grab", "smudge", "fill"]

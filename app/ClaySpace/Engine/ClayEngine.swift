@@ -1547,6 +1547,99 @@ final class ClayEngine {
         }
     }
 
+    /// Mask Extract (clay_document_mask_extrude), ZBrush's Extract: the frozen
+    /// patch of the active layer's surface becomes a new item with a wall.
+    ///
+    /// Not a regional swap — nothing is subtracted and nothing is sampled back
+    /// over the source. The mask and the source layer are both left alone, and
+    /// what comes back is a snapshot rather than something that tracks them.
+    ///
+    /// The engine refuses with a TYPED error rather than an empty item when the
+    /// mask is empty, the thickness is not positive, the wall is thinner than a
+    /// cell, or the masked region never reaches the surface. That last one is
+    /// the mistake a user actually makes — freezing clay that is not on the
+    /// surface being extracted — and an empty item would disguise it, so every
+    /// one of them is surfaced rather than swallowed.
+    @discardableResult
+    func extractMask(thickness: Float, borderRound: Float = 0) -> Bool {
+        guard let doc, activeStroke == nil, items.count + 1 < Renderer.maxItems
+        else { return false }
+        guard thickness > 0 else {
+            lastError = "Extract needs a thickness greater than zero"
+            return false
+        }
+        guard let mask = gatingMask(voxelContext: false) else {
+            lastError = "Nothing is frozen — freeze the patch you want to extract"
+            return false
+        }
+        // The engine refuses a wall thinner than a mask cell, and its message
+        // folds that in with two other causes. The app knows the cell size, so
+        // it can say WHICH one this is and what would work.
+        var maskCell: Float = 0
+        if clay_mask_cell_size(mask, &maskCell) == CLAY_OK, maskCell > 0,
+           thickness < maskCell {
+            lastError = "Extract needs a wall of at least "
+                + String(format: "%.2f", maskCell)
+                + " — thinner than one mask cell cannot be built"
+            return false
+        }
+
+        var ep = clay_mask_extrude_params()
+        ep.struct_size = UInt32(MemoryLayout<clay_mask_extrude_params>.size)
+        ep.thickness = thickness
+        // OUTWARD: the plate sits ON the surface, which is what Extract means.
+        ep.side = Int32(CLAY_EXTRUDE_OUTWARD.rawValue)
+        ep.threshold = 0        // <= 0 takes the default 0.5
+        ep.border_round = borderRound
+        ep.border_smooth = 0    // smooths a COPY; the user's mask is preserved
+        ep.cell_size = 0        // <= 0 takes the mask's own
+        ep.band = 0             // <= 0 means three cells
+
+        var extracted: OpaquePointer?
+        guard check(clay_document_mask_extrude(doc, layer, mask, &ep, &extracted)),
+              let extracted else { return false }
+
+        _ = check(clay_document_begin_undo_group(doc))
+        var node: clay_node_id = 0
+        let added = check(clay_layer_add_item(doc, layer, extracted, &node))
+        clay_item_destroy(extracted)
+        _ = check(clay_document_end_undo_group(doc))
+        guard added else { return false }
+
+        // Bake-only, like the regional swap's rows: the item carries a volume,
+        // so there is no analytic primitive the raymarcher could draw for it.
+        var mn: (Int32, Int32, Int32) = (0, 0, 0)
+        var mx: (Int32, Int32, Int32) = (0, 0, 0)
+        var cell: Float = 0
+        var has: Int32 = 0
+        _ = clay_mask_bounds(mask, &mn.0, &mx.0, &has)
+        _ = clay_mask_cell_size(mask, &cell)
+        let lo = SIMD3(Float(mn.0), Float(mn.1), Float(mn.2)) * cell
+        let hi = SIMD3(Float(mx.0), Float(mx.1), Float(mx.2)) * cell
+        let centre = (lo + hi) * 0.5
+        let span = simd_length(hi - lo) + thickness * 2
+        items.append(SceneItem(
+            position: .zero, scale: 1, rotation: SIMD4(0, 0, 0, 1),
+            params: SIMD4(repeating: 0), color: ClayEngine.clayColor, blendK: 0,
+            prim: Int32(CLAY_PRIM_VOLUME.rawValue),
+            op: Int32(CLAY_OP_ADD.rawValue), blend: 0, rounding: 0,
+            boundCenter: centre, boundRadius: span * 0.5 + 0.02,
+            mirrorFlag: 0, radialCount: 0, layerSlot: Float(activeLayerSlot)))
+        itemAABBs.append((lo - SIMD3(repeating: thickness + 0.02),
+                          hi + SIMD3(repeating: thickness + 0.02)))
+        nodeIDs.append(node)
+        localBounds.append((centre, span * 0.5 + 0.02))
+        itemLayers.append(Int32(activeLayerSlot))
+        itemBatches.append(0)
+        undoLog.append(.add)
+        redoOps.removeAll()
+        commit()
+        scheduleBakeDirty((min: lo - SIMD3(repeating: thickness + 0.02),
+                           max: hi + SIMD3(repeating: thickness + 0.02)))
+        scheduleAutosave()
+        return true
+    }
+
     /// Relax / Smooth (clay_item_volume_relax): averages the field under the
     /// brush, completing the core sculpt set — voxel layers had smoothing,
     /// SDF layers had none.
