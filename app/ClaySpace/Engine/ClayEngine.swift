@@ -1710,18 +1710,29 @@ final class ClayEngine {
         let pad = radius * 1.6 + 0.05
         let box = (min: center - SIMD3(repeating: pad),
                    max: center + SIMD3(repeating: pad))
-        let cellSize = max(radius / 14, 0.006)
-        // The averaging radius is in CELLS, so it has to track the cell size
-        // the region is sampled at or the brush would smooth a different
-        // amount at different radii.
-        let radiusCells = max(Int32((radius / cellSize / 6).rounded()), 1)
+        // A COARSER volume than the other verbs sample, deliberately: what
+        // moves a bump is the averaging width in WORLD units, measured — a
+        // width under half the brush radius barely moves the peak (passes
+        // saturate once repeated averaging converges to the window mean, so
+        // iterations cannot make up for a narrow window), and a wide window
+        // over a fine volume costs (2r+1)^3 per cell. Doubling the cell
+        // keeps the world-space window that visibly smooths while cutting
+        // the work ~8x; smoothing destroys sub-cell detail by definition,
+        // so the coarser sampling gives up nothing the verb was keeping.
+        //
+        // Before any of this the brush shipped averaging ONE fine cell for
+        // ONE pass — a mathematical no-op (~1e-5 on a bump smooth at cell
+        // scale) that survived every eyeball because "smooth" leaving
+        // things smooth looks like success.
+        let cellSize = max(radius / 7, 0.008)
+        let radiusCells = min(max(Int32((radius / cellSize).rounded()), 4), 8)
         let mask = gatingMask(voxelContext: false)
         return replaceRegion(box: box, cellSize: cellSize) { vitem, _ in
             var rp = clay_relax_params()
             rp.struct_size = UInt32(MemoryLayout<clay_relax_params>.size)
             rp.strength = min(strength, 1)
             rp.radius_cells = radiusCells
-            rp.iterations = 1
+            rp.iterations = max(1, Int32((min(strength, 1) * 6).rounded()))
             rp.centre = (center.x, center.y, center.z)
             // Never 0: the header calls that "a filter not a brush", because
             // 0 relaxes the whole sampled region rather than the footprint.

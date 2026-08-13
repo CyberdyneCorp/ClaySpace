@@ -247,16 +247,36 @@ enum BrushMatrix {
         }
     }
 
-    /// A ring of stamps with an unfilled middle — a cavity for the verb
-    /// whose whole job is closing one.
+    /// A solid blob with a one-cell-wide, two-deep pocket carved into the
+    /// face the camera sees — a cavity for the verb whose whole job is
+    /// closing one.
+    ///
+    /// This used to seed a RING and tap its open middle, which tested the
+    /// shape the verb REFUSES by contract: fill_cavities leaves a
+    /// through-hole wider than one cell alone (a donut hole is geometry,
+    /// not damage), so the fixture failed forever against a verb doing
+    /// exactly what its header promises. A pocket one cell wide is the
+    /// pinhole class the verb exists for, and two cells deep is what its
+    /// `passes: 2` reaches.
     private static let seedRingWithCavity: @MainActor @Sendable (ViewportState) -> Void = { state in
         state.voxelVerb = .place
-        for step in 0..<12 {
-            let angle = Double(step) / 12 * 2 * .pi
-            let point = CGPoint(x: 400 + 34 * cos(angle), y: 300 + 34 * sin(angle))
-            state.pencilBegan(at: point, pressure: 0.8)
+        for point in BrushFixture.centerDrag {
+            state.pencilBegan(at: point, pressure: 0.9)
             state.pencilEnded(at: point)
         }
+        // Carve the pocket where the verify tap will look: straight down
+        // the center ray, one cell wide, two deep.
+        guard let ray = state.ray(through: BrushFixture.centerTap[0]),
+              let pick = state.engine.voxelPick(origin: ray.origin,
+                                                direction: ray.direction,
+                                                buildPlane: state.buildPlane)
+        else { return }
+        let inward = SIMD3<Int32>(-pick.normal,
+                                  rounding: .toNearestOrAwayFromZero)
+        state.engine.voxelStamp(.erase, at: pick.hit, brushSize: 1,
+                                color: .zero)
+        state.engine.voxelStamp(.erase, at: pick.hit &+ inward, brushSize: 1,
+                                color: .zero)
     }
 
     static let voxelFixtures: [BrushFixture] = [

@@ -98,6 +98,15 @@ final class Renderer {
     private var motionTexture: MTLTexture?
     private var frameIndex = 0
     private var pendingHistoryReset = true
+    /// On-screen frames in flight, capped at two. Nothing else bounds them:
+    /// draws are on-demand and each frame's command buffer carries the
+    /// MetalFX scaler's work, so behind a GPU-saturating bake the queue
+    /// grows without limit until MetalFX's internal MPSGraph queue overflows
+    /// and iOS kills the process (observed on an iPad Air M3: "Async Request
+    /// could not be queued", 127 in flight, then the ANE timeout). A frame
+    /// that would be third in line is DROPPED instead of queued — on-demand
+    /// drawing schedules another the next time anything commits.
+    private let framesInFlight = DispatchSemaphore(value: 2)
     private var prevCamera: (position: SIMD3<Float>, right: SIMD3<Float>,
                              up: SIMD3<Float>, forward: SIMD3<Float>,
                              lens: Float, ortho: Float)?
@@ -509,9 +518,18 @@ final class Renderer {
             pass.depthAttachment.clearDepth = 1.0
         }
 
+        // Gate only the presented path: the offscreen path already blocks on
+        // waitUntilCompleted, so it can never pile up.
+        let gated = drawable != nil
+        if gated {
+            guard framesInFlight.wait(timeout: .now()) == .success else { return }
+        }
         guard let commands = queue.makeCommandBuffer(),
               let encoder = commands.makeRenderCommandEncoder(descriptor: pass)
-        else { return }
+        else {
+            if gated { framesInFlight.signal() }
+            return
+        }
 
         let width = Float(target.width)
         let height = Float(max(target.height, 1))
@@ -645,10 +663,11 @@ final class Renderer {
         // Whether that happens depends on whether the SDK declares the
         // parameter @Sendable, so it crashes on some Xcode versions and not
         // others. The body is already safe to run anywhere.
-        commands.addCompletedHandler { @Sendable [gpuFrameTime] buffer in
+        commands.addCompletedHandler { @Sendable [gpuFrameTime, framesInFlight] buffer in
             // MTLCommandBuffer isn't Sendable; only two doubles cross.
             nonisolated(unsafe) let completed = buffer
             gpuFrameTime.withLock { $0 = completed.gpuEndTime - completed.gpuStartTime }
+            if gated { framesInFlight.signal() }
         }
         if let drawable {
             commands.present(drawable)

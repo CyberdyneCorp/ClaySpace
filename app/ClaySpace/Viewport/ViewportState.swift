@@ -620,6 +620,9 @@ final class ViewportState {
     fileprivate var voxelStrokeNormal = SIMD3<Float>(0, 1, 0)
     fileprivate var voxelDragPlane: (point: SIMD3<Float>, normal: SIMD3<Float>)?
     fileprivate var lastVoxelDragPoint: SIMD3<Float>?
+    /// Where a displacement verb (grab, smudge) is currently holding the
+    /// material: the first contact, advanced with each applied displacement.
+    fileprivate var voxelGrabWorld: SIMD3<Float>?
     fileprivate var spraySamples: [(position: SIMD3<Float>, pressure: Float, tilt: Float)] = []
     fileprivate var sprayPlane: (point: SIMD3<Float>, normal: SIMD3<Float>)?
     @ObservationIgnored fileprivate var lastGhostSampleCount = 0
@@ -927,11 +930,20 @@ extension ViewportState: PencilToolSink {
 
     fileprivate func voxelEdit(at point: CGPoint, pressure: Float) {
         guard activeTool == .sculpt || activeTool == .erase || activeTool == .paint,
-              let ray = ray(through: point),
-              let pick = engine.voxelPick(origin: ray.origin, direction: ray.direction,
-                                          buildPlane: buildPlane) else { return }
+              let ray = ray(through: point) else { return }
+        // Displacement verbs (grab, smudge) act on the material picked at
+        // FIRST CONTACT and follow the drag from there — requiring a fresh
+        // pick under the cursor every event meant the verb died the moment
+        // the drag left the surface, which for a verb that PULLS material
+        // sideways is immediately.
+        let pick = engine.voxelPick(origin: ray.origin, direction: ray.direction,
+                                    buildPlane: buildPlane)
+        if pick == nil,
+           !(activeTool == .sculpt && voxelVerb.needsDisplacement
+             && voxelGrabWorld != nil) { return }
 
         if activeTool == .erase || activeTool == .paint {
+            guard let pick else { return }
             let cell = pick.hit
             if cell == lastVoxelCell { return }
             lastVoxelCell = cell
@@ -943,6 +955,7 @@ extension ViewportState: PencilToolSink {
 
         // Sculpt tool: the picked verb (3DCoat-style).
         if voxelVerb == .place {
+            guard let pick else { return }
             let cell = pick.adjacent
             if cell == lastVoxelCell { return }
             lastVoxelCell = cell
@@ -953,19 +966,33 @@ extension ViewportState: PencilToolSink {
         let brushSize = Int32(max(2, min(9, Int(Float(3 + Int(pressure * 4)) * brushSizeMultiplier))))
         if voxelVerb.needsDisplacement {
             // Grab/smudge follow the pencil's world motion on the view
-            // plane through the first contact.
-            guard let plane = voxelDragPlane,
+            // plane through the first contact, acting on the ANCHOR — the
+            // material grabbed at touch-down, advanced with the drag — so
+            // the verb keeps pulling whether or not the cursor still sits
+            // on a surface.
+            guard let plane = voxelDragPlane, let anchor = voxelGrabWorld,
                   let current = intersect(ray: ray, plane: plane) else { return }
             guard let last = lastVoxelDragPoint else {
                 lastVoxelDragPoint = current
                 return
             }
+            // Accumulate against the last APPLIED point until the drag has
+            // covered a whole cell: the verbs quantise to the grid, so a
+            // sub-cell displacement per event rounds to nothing — and it
+            // does not accumulate engine-side, each call re-rounds. The
+            // Pencil delivers moves far smaller than a 0.12 cell, which is
+            // why grab dragged across a blob used to leave it untouched.
             let displacement = current - last
-            guard simd_length(displacement) > 0.004 else { return }
+            guard simd_length(displacement) >= ClayEngine.voxelSize else { return }
             lastVoxelDragPoint = current
-            engine.voxelSculpt(voxelVerb, at: pick.hit, brushSize: brushSize,
+            let cell = SIMD3<Int32>(anchor / ClayEngine.voxelSize
+                                    - SIMD3(repeating: 0.5),
+                                    rounding: .toNearestOrAwayFromZero)
+            engine.voxelSculpt(voxelVerb, at: cell, brushSize: brushSize,
                                displacement: displacement, color: activeColor)
+            voxelGrabWorld = anchor + displacement
         } else {
+            guard let pick else { return }
             let cell = pick.hit
             if cell == lastVoxelCell { return }
             lastVoxelCell = cell
@@ -1137,6 +1164,9 @@ extension ViewportState: PencilToolSink {
                 * ClayEngine.voxelSize
             voxelDragPlane = (world, camera.basis.forward)
             lastVoxelDragPoint = nil
+            voxelGrabWorld = world // displacement verbs hold what they touched
+        } else {
+            voxelGrabWorld = nil
         }
         voxelEdit(at: point, pressure: pressure)
     }
