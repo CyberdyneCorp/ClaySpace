@@ -1479,14 +1479,17 @@ final class ClayEngine {
         clay_item_set_op(boxItem, Int32(CLAY_OP_SUBTRACT.rawValue))
         clay_item_set_blend(boxItem, Int32(CLAY_BLEND_HARD.rawValue), 0)
 
-        _ = check(clay_document_begin_undo_group(doc))
+        // Inside a warp SESSION the group is the whole gesture's, opened once
+        // at touch-down: a continuous drag applies the verb many times and
+        // must still undo as one step, the way a stroke does.
+        if !warpSessionOpen { _ = check(clay_document_begin_undo_group(doc)) }
         var boxNode: clay_node_id = 0
         var volNode: clay_node_id = 0
         let addedBox = check(clay_layer_add_item(doc, layer, boxItem, &boxNode))
         let addedVol = addedBox && check(clay_layer_add_item(doc, layer, vitem, &volNode))
         clay_item_destroy(boxItem)
         clay_item_destroy(vitem)
-        _ = check(clay_document_end_undo_group(doc))
+        if !warpSessionOpen { _ = check(clay_document_end_undo_group(doc)) }
         guard addedVol else {
             if addedBox { _ = clay_document_undo(doc, nil) }
             return false
@@ -1510,14 +1513,56 @@ final class ClayEngine {
             itemLayers.append(Int32(activeLayerSlot))
             itemBatches.append(0)
         }
-        undoLog.append(.addBatch(count: 2))
+        if warpSessionOpen {
+            warpSessionItems += 2 // one batch for the whole gesture, at lift
+        } else {
+            undoLog.append(.addBatch(count: 2))
+        }
         redoOps.removeAll()
         commit()
         // NOT `box`: a region op overlapping it changes the surface outside
         // it, and baking only the box leaves the rest stale.
-        scheduleBakeDirty(bakeInfluence(of: box))
+        // A region verb is a COMMITTED, one-shot edit the artist is waiting on
+        // — not a stream of stroke samples the debounce exists to coalesce.
+        // At 200 ms it was a fifth of the wait; with the bake on the GPU it is
+        // more than half of what remains, so it stops being a coalescing
+        // window and becomes pure latency.
+        scheduleBakeDirty(bakeInfluence(of: box), debounceMilliseconds: 16)
         scheduleAutosave()
         return true
+    }
+
+    // MARK: Warp sessions
+    //
+    // hPolish and Smooth used to be TAP verbs: the anchor was captured on
+    // touch-down, the drag did nothing, and the verb ran once on lift at the
+    // point where the gesture started — so dragging across a surface polished
+    // one spot and silently discarded the rest of the gesture.
+    //
+    // They are continuous now, applying along the drag. That makes the whole
+    // drag one gesture, so it has to be one undo step and one op-log entry.
+
+    @ObservationIgnored private(set) var warpSessionOpen = false
+    @ObservationIgnored private var warpSessionItems = 0
+
+    func beginWarpSession() {
+        guard let doc, !warpSessionOpen else { return }
+        warpSessionItems = 0
+        _ = check(clay_document_begin_undo_group(doc))
+        warpSessionOpen = true
+    }
+
+    /// Closes the gesture. The op-log gets ONE batch for everything the drag
+    /// applied, so undo walks the gesture rather than each dab inside it.
+    func endWarpSession() {
+        guard let doc, warpSessionOpen else { return }
+        warpSessionOpen = false
+        _ = check(clay_document_end_undo_group(doc))
+        if warpSessionItems > 0 {
+            undoLog.append(.addBatch(count: warpSessionItems))
+            redoOps.removeAll()
+        }
+        warpSessionItems = 0
     }
 
     /// hPolish / Planar / Flatten (clay_item_volume_flatten): the anchor's
@@ -2629,6 +2674,39 @@ final class ClayEngine {
     @ObservationIgnored private(set) var fieldCacheVersion = 0
     private var bakeTask: Task<Void, Never>?
 
+    /// The backend the BAKE evaluates on, discovered rather than assumed.
+    ///
+    /// `clay_eval_points(doc, nil, …)` means "cpu", and until the xcframework
+    /// was built with `CLAY_BACKEND_METAL=ON` there was nothing else to pass —
+    /// so every bake ran on the CPU while the device's GPU sat idle. Measured
+    /// on a 25-item document over a 64³ grid (macOS, Release):
+    ///
+    ///                       cpu      metal
+    ///     eval_points      74.1       31.6
+    ///     eval_grid        52.5        8.0
+    ///     eval_grid culled 51.5        4.4
+    ///
+    /// Discovered per run: a framework built without the backend must keep
+    /// working, and asking for a backend that is not registered fails the
+    /// call rather than falling back.
+    ///
+    /// Batch work only. A single-point probe pays dispatch overhead that
+    /// dwarfs the evaluation, so `evalDistance` stays on the CPU.
+    nonisolated static let evalBackend: [CChar]? = {
+        var size = 256
+        var buffer = [CChar](repeating: 0, count: size)
+        guard clay_list_backends(&buffer, &size) == CLAY_OK else { return nil }
+        let names = String(cString: buffer).split(separator: ",").map(String.init)
+        guard names.contains("metal") else { return nil }
+        return Array("metal".utf8CString)
+    }()
+
+    /// Runs `body` with the bake backend's name, or NULL for the CPU default.
+    nonisolated static func withEvalBackend<T>(_ body: (UnsafePointer<CChar>?) -> T) -> T {
+        guard let name = evalBackend else { return body(nil) }
+        return name.withUnsafeBufferPointer { body($0.baseAddress) }
+    }
+
     /// ClayCore's Lipschitz safety factor for ray stepping (docs/06 §2.3).
     /// The app authors no warps, so this is >= 1 in practice — free extra
     /// step length the marcher was leaving on the table.
@@ -2964,8 +3042,53 @@ final class ClayEngine {
         }
         var distances = [Float](repeating: 0, count: total)
         var colors = [Float](repeating: 0, count: total * 3)
-        guard clay_eval_points(bakeDoc, nil, points, total,
-                               &distances, &colors) == CLAY_OK else { return nil }
+
+        // A lattice is what this is, so say so. `clay_eval_points` compiles a
+        // tape for the WHOLE document and samples it as an unstructured batch;
+        // `clay_eval_grid` carries its own region, so the tape is culled to it
+        // and the backends' native grid path runs. Measured on Metal, 64³:
+        // points 31.6 ms, grid 8.0 ms, grid+cull 4.4 ms. On CPU the cull is
+        // within noise (51.5 vs 52.5) — this only pays once evaluation is on
+        // the GPU, which is why it lands with the backend change.
+        //
+        // The query carries ONE spacing, and this grid is only cubic when
+        // `cells()` divided evenly (the FieldCache comment claims cubes; the
+        // sampling math uses extent/dims per axis, which is not the same
+        // thing). Falling back keeps this an optimisation rather than a
+        // silent change to where samples land.
+        let spacing = cache.extent / SIMD3<Float>(cache.dims)
+        let uniform = max(abs(spacing.x - spacing.y), abs(spacing.x - spacing.z))
+            <= spacing.x * 1e-5
+        if uniform {
+            var q = clay_grid_query()
+            q.struct_size = UInt32(MemoryLayout<clay_grid_query>.size)
+            let first = SIMD3<Float>(Float(cellBox.min.x), Float(cellBox.min.y),
+                                     Float(cellBox.min.z))
+            let origin = cache.origin + (first + 0.5) * spacing
+            q.origin = (origin.x, origin.y, origin.z)
+            q.spacing = spacing.x
+            q.dims = (Int32(counts.x), Int32(counts.y), Int32(counts.z))
+            // Cull to the slab the samples occupy, dilated half a cell so an
+            // item that decides a boundary sample is not dropped.
+            let lo = origin - spacing * 0.5
+            let hi = origin + spacing * (SIMD3<Float>(Float(counts.x),
+                                                      Float(counts.y),
+                                                      Float(counts.z)) - 0.5)
+            let rmin = [lo.x, lo.y, lo.z], rmax = [hi.x, hi.y, hi.z]
+            let ok = withEvalBackend { backend in
+                clay_eval_grid(bakeDoc, backend, &q, rmin, rmax,
+                               &distances, &colors, total) == CLAY_OK
+            }
+            if ok {
+                return (distances.map { Float16(max(-60000, min(60000, $0))) },
+                        colors.map { UInt8(max(0, min(255, $0 * 255))) })
+            }
+            // Fall through: a refused grid must not lose the bake.
+        }
+        guard withEvalBackend({ backend in
+            clay_eval_points(bakeDoc, backend, points, total,
+                             &distances, &colors)
+        }) == CLAY_OK else { return nil }
         return (distances.map { Float16(max(-60000, min(60000, $0))) },
                 colors.map { UInt8(max(0, min(255, $0 * 255))) })
     }
@@ -4692,8 +4815,10 @@ final class ClayEngine {
                 }
             }
         }
-        guard clay_eval_points(bakeDoc, nil, coarsePoints, cnx * cny * cnz,
-                               &coarse, nil) == CLAY_OK else { return nil }
+        guard withEvalBackend({ backend in
+            clay_eval_points(bakeDoc, backend, coarsePoints, cnx * cny * cnz,
+                             &coarse, nil)
+        }) == CLAY_OK else { return nil }
 
         let coarseVoxel = max(extent.x / Float(cnx),
                               max(extent.y / Float(cny), extent.z / Float(cnz)))
@@ -4743,8 +4868,10 @@ final class ClayEngine {
         while offset < surfaceIndices.count {
             let count = min(chunkSize, surfaceIndices.count - offset)
             let ok = surfacePoints.withUnsafeBufferPointer { buf in
-                clay_eval_points(bakeDoc, nil, buf.baseAddress! + offset * 3, count,
-                                 &chunkDistances, &chunkColors) == CLAY_OK
+                withEvalBackend { backend in
+                    clay_eval_points(bakeDoc, backend, buf.baseAddress! + offset * 3,
+                                     count, &chunkDistances, &chunkColors) == CLAY_OK
+                }
             }
             guard ok else { return nil }
             for i in 0..<count {

@@ -456,6 +456,10 @@ final class ViewportState {
     @ObservationIgnored fileprivate var warpAnchor: SIMD3<Float>?
     @ObservationIgnored fileprivate var warpNormal: SIMD3<Float> = SIMD3(0, 1, 0)
     @ObservationIgnored fileprivate var warpRadius: Float = 0
+    /// Where a continuous warp last applied, so the next dab is spaced by
+    /// travel. `nil` means the gesture has not applied yet — which is what
+    /// distinguishes a tap from a drag on lift.
+    @ObservationIgnored fileprivate var warpLastApplied: SIMD3<Float>?
     @ObservationIgnored fileprivate var tubePoints: [SIMD4<Float>] = []
     /// Mask-boundary stroke splitting: relief/incise deposit through their
     /// per-ITEM rounding, so thinning points cannot gate them — the chain
@@ -1261,6 +1265,45 @@ extension ViewportState: PencilToolSink {
         warpNormal = anchorHit.normal
         warpRadius = radius(for: pressure, altitude: altitude, at: anchorHit.position)
             * sculptBrush.descriptor.radiusScale
+        warpLastApplied = nil
+        // The continuous verbs open a session so the whole drag is one undo
+        // step; the one-shot warps (magnify, pinch, noise) keep their own.
+        if isContinuousWarp { engine.beginWarpSession() }
+    }
+
+    /// Whether this brush applies along the drag rather than once on lift.
+    /// hPolish, Flatten and Smooth sweep a surface the way a real tool does;
+    /// magnify, pinch and noise are single displacements at a point.
+    private var isContinuousWarp: Bool {
+        switch sculptBrush.descriptor.action {
+        case .flatten, .relax: true
+        default: false
+        }
+    }
+
+    /// Applies a continuous warp along the drag, spaced by TRAVEL rather than
+    /// by pencil event: the same arc-length discipline the chain strokes use,
+    /// so the coverage is the gesture's shape and not the sample rate's.
+    ///
+    /// Returns whether it owned the move.
+    private func continuousWarpMoved(to point: CGPoint, pressure: Float,
+                                     altitude: Float) -> Bool {
+        guard warpAnchor != nil, isContinuousWarp else { return false }
+        guard let ray = ray(through: point),
+              let hit = engine.raycast(origin: ray.origin, direction: ray.direction)
+        else { return true } // off the surface: hold the gesture, apply nothing
+
+        let spacing = max(warpRadius * 0.5, 0.004)
+        if let last = warpLastApplied,
+           simd_distance(last, hit.position) < spacing { return true }
+
+        warpAnchor = hit.position
+        warpNormal = hit.normal
+        warpRadius = radius(for: pressure, altitude: altitude, at: hit.position)
+            * sculptBrush.descriptor.radiusScale
+        applyWarpAtAnchor()
+        warpLastApplied = hit.position
+        return true
     }
 
     /// Tube: collect a path and resolve it on pencil-up.
@@ -1355,6 +1398,9 @@ extension ViewportState: PencilToolSink {
         }
         if activeTool == .freeze, gizmoDrag == nil {
             freezePaint(at: point, pressure: max(pressure, 0.1))
+            return true
+        }
+        if continuousWarpMoved(to: point, pressure: pressure, altitude: altitude) {
             return true
         }
         if let pointIndex = tubePointDrag, let editIndex = tubeEditIndex,
@@ -1814,14 +1860,21 @@ extension ViewportState: PencilToolSink {
     private func commitWarp(at point: CGPoint) -> Bool {
         guard let anchor = warpAnchor else { return false }
         warpAnchor = nil
-        switch sculptBrush.descriptor.action {
-        case .flatten(let mode):
-            let strength = 0.3 + 0.7 * brushStrength
-            if engine.polishSurface(center: anchor, normal: warpNormal,
-                                    radius: warpRadius * 1.3,
-                                    strength: strength, mode: mode) {
+        // A continuous verb has been applying along the drag. Apply once more
+        // only if the gesture never travelled far enough to fire — that is a
+        // TAP, and a tap must still do something.
+        if isContinuousWarp {
+            if warpLastApplied == nil {
+                warpAnchor = anchor
+                applyWarpAtAnchor()
+                warpAnchor = nil
                 emitHaptic(.completed, at: point)
             }
+            warpLastApplied = nil
+            engine.endWarpSession()
+            return true
+        }
+        switch sculptBrush.descriptor.action {
         case .deform(let sign):
             let strength = (0.15 + 0.6 * brushStrength) * sign
             if engine.magnifySurface(center: anchor, radius: warpRadius * 1.4,
@@ -1840,17 +1893,31 @@ extension ViewportState: PencilToolSink {
                     emitHaptic(.completed, at: point)
                 }
             }
-        case .relax:
-            // Strength maps the same way the flatten family does, so the
-            // Strength dial feels consistent across the regional brushes.
-            if engine.relaxSurface(center: anchor, radius: warpRadius * 1.3,
-                                   strength: 0.3 + 0.7 * brushStrength) {
-                emitHaptic(.completed, at: point)
-            }
-        case .stroke, .surfaceMove, .path, .command:
+        case .stroke, .surfaceMove, .path, .command, .flatten, .relax:
             break // committed elsewhere, or nothing to commit
         }
         return true
+    }
+
+    /// One application of a continuous warp at the current anchor. Shared by
+    /// the drag and by the tap case, so a dab mid-drag and a dab on lift are
+    /// the same edit rather than two code paths that can drift apart.
+    private func applyWarpAtAnchor() {
+        guard let anchor = warpAnchor else { return }
+        let strength = 0.3 + 0.7 * brushStrength
+        switch sculptBrush.descriptor.action {
+        case .flatten(let mode):
+            _ = engine.polishSurface(center: anchor, normal: warpNormal,
+                                     radius: warpRadius * 1.3,
+                                     strength: strength, mode: mode)
+        case .relax:
+            // Strength maps the same way the flatten family does, so the
+            // Strength dial feels consistent across the regional brushes.
+            _ = engine.relaxSurface(center: anchor, radius: warpRadius * 1.3,
+                                    strength: strength)
+        default:
+            break
+        }
     }
 
     /// Close whichever engine session the gesture had open.

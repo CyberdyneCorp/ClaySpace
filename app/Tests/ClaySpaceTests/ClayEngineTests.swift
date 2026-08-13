@@ -882,10 +882,13 @@ final class ClayEngineTests: XCTestCase {
     func testSprayStrokeStampsTemplatesAsOneUndoStep() {
         let engine = ClayEngine()
         let before = engine.items.count
-        // A straight drag well above the seed, clear of everything.
+        // A straight drag well above the seed, clear of everything. Full
+        // pressure: since ClayCore 0.28 an ADD stamp's deposit scales with
+        // strength (pressure included) instead of always depositing the full
+        // stamp, and the crown-position assert below is exact only at 1.
         var samples: [(position: SIMD3<Float>, pressure: Float, tilt: Float)] = []
         for i in 0...20 {
-            samples.append((SIMD3(Float(i) * 0.12 + 3, 2.5, 0), 0.8, .pi / 2))
+            samples.append((SIMD3(Float(i) * 0.12 + 3, 2.5, 0), 1, .pi / 2))
         }
         let stamped = engine.sprayStroke(samples: samples,
                                          prim: CLAY_PRIM_SPHERE,

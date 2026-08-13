@@ -23,6 +23,7 @@ settings:
     DEVELOPMENT_TEAM: 2C69VJZSNR
     # claycore is a C++-implemented static library behind a C ABI: link
     # libc++; the xcframework's simulator slice is arm64-only.
+    #
     OTHER_LDFLAGS: "-lc++"
     "EXCLUDED_ARCHS[sdk=iphonesimulator*]": x86_64
 
@@ -76,6 +77,17 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.cyberdyne.clayspace
         TARGETED_DEVICE_FAMILY: "2"          # iPad only
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        # ClayCore >= 0.26 vends its binaryTarget behind an empty
+        # ClayCoreLink wrapper (it exists to carry -framework
+        # Metal/Foundation). Xcode 26 builds that wrapper as a dynamic
+        # PackageProduct framework, and with no code inside it referencing
+        # the archive the linker pulls no members — every clay_* symbol
+        # comes up undefined at the app link. Force-loading the slice's
+        # archive restores what linking the binaryTarget directly did at
+        # 0.25.0. App target only: the test bundle resolves clay_* through
+        # BUNDLE_LOADER, and a second copy would fork library state.
+        "OTHER_LDFLAGS[sdk=iphonesimulator*]": "-lc++ -Wl,-force_load,$(SRCROOT)/../../ClayCore/dist/claycore.xcframework/ios-arm64-simulator/libclaycore-ios-sim.a"
+        "OTHER_LDFLAGS[sdk=iphoneos*]": "-lc++ -Wl,-force_load,$(SRCROOT)/../../ClayCore/dist/claycore.xcframework/ios-arm64/libclaycore-ios.a"
 
   ClaySpaceTests:
     type: bundle.unit-test
