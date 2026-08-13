@@ -21,17 +21,22 @@ RESULT="$(mktemp -d)/rebaseline.xcresult"
 xcodegen generate --spec app/project.yml --project app >/dev/null
 
 if [ "${1:-}" = "--device" ]; then
-    udid=$(xcrun devicectl list devices --json-output /dev/stdout 2>/dev/null \
-        | python3 -c '
+    # A temp file, not /dev/stdout: devicectl prints its human-readable
+    # table to stdout regardless, so json-output aimed there interleaves
+    # the two and the JSON never parses (test.sh learned this first).
+    devices_json=$(mktemp)
+    xcrun devicectl list devices --json-output "$devices_json" >/dev/null
+    udid=$(python3 -c '
 import json, sys
-data = json.load(sys.stdin)
+data = json.load(open(sys.argv[1]))
 for dev in data.get("result", {}).get("devices", []):
     hw = dev.get("hardwareProperties", {})
     if "iPad" in hw.get("marketingName", "") and hw.get("udid"):
         if dev.get("connectionProperties", {}).get("tunnelState") == "connected":
             print(hw["udid"])
             break
-')
+' "$devices_json")
+    rm -f "$devices_json"
     if [ -z "$udid" ]; then
         echo "error: no connected iPad found" >&2
         exit 1
