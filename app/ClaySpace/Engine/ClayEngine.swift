@@ -2878,13 +2878,22 @@ final class ClayEngine {
     }
 
     @ObservationIgnored private var bakeInFlight = false
+    /// Diagnostics: how many bakes ran to completion (wrote the cache), and
+    /// why the last attempt stopped early if it did. Tests read these to
+    /// tell "the bake produced a wrong field" from "the bake never ran".
+    @ObservationIgnored private(set) var bakesCompleted = 0
+    @ObservationIgnored private(set) var lastBakeExit = "none"
 
     private func performBake(editVersion: Int) async {
-        guard let doc, !isStroking, !isTransforming else { return }
+        guard let doc, !isStroking, !isTransforming else {
+            lastBakeExit = "gesture-guard (stroking=\(isStroking) transforming=\(isTransforming))"
+            return
+        }
         // Single flight: performBake suspends at its awaits, and two
         // interleaved instances (debounced task + bakeNow) would race for
         // the pending flags and overwrite each other's result.
         if bakeInFlight {
+            lastBakeExit = "in-flight, rescheduled"
             scheduleBakeKeepingDirty(debounceMilliseconds: 50)
             return
         }
@@ -2894,11 +2903,15 @@ final class ClayEngine {
         // (bakeNow already consumed the debounced task's work) — skip.
         if !pendingBakeAll, pendingBakeRegion == nil,
            let cache = fieldCache, cache.bakedItemCount == items.count {
+            lastBakeExit = "duplicate-skip"
             return
         }
         let path = FileManager.default.temporaryDirectory
             .appendingPathComponent("clayspace-bake.clayspace").path
-        guard check(clay_document_save(doc, path)) else { return }
+        guard check(clay_document_save(doc, path)) else {
+            lastBakeExit = "save-failed: \(lastError ?? "?")"
+            return
+        }
         let itemCount = items.count
         let bounds = sceneBounds()
 
@@ -2921,11 +2934,13 @@ final class ClayEngine {
                 }
             }.value
             guard version == editVersion else {
+                lastBakeExit = "partial stale (v\(editVersion) -> v\(version))"
                 markBakeDirty(region) // give the consumed region back
                 scheduleBakeKeepingDirty(debounceMilliseconds: 50)
                 return
             }
             guard let slab else {
+                lastBakeExit = "partial eval failed"
                 scheduleBake() // partial failed: fall back hard
                 return
             }
@@ -2949,6 +2964,8 @@ final class ClayEngine {
             fieldCache = cache
             fieldCacheVersion += 1
             lastBakeWasPartial = true
+            bakesCompleted += 1
+            lastBakeExit = "partial ok"
             refreshSafeStepScale()
             commit()
             return
@@ -2961,15 +2978,21 @@ final class ClayEngine {
         }.value
 
         guard version == editVersion else {
+            lastBakeExit = "full stale (v\(editVersion) -> v\(version))"
             scheduleBake() // edits landed mid-bake: this result is stale
             return
         }
-        guard var cache = baked else { return }
+        guard var cache = baked else {
+            lastBakeExit = "full eval failed"
+            return
+        }
         cache.bakedItemCount = itemCount
         cache.dirtyCells = nil
         fieldCache = cache
         fieldCacheVersion += 1
         lastBakeWasPartial = false
+        bakesCompleted += 1
+        lastBakeExit = "full ok"
         refreshSafeStepScale()
         commit() // wake the renderer
     }
@@ -4822,7 +4845,21 @@ final class ClayEngine {
 
         let coarseVoxel = max(extent.x / Float(cnx),
                               max(extent.y / Float(cny), extent.z / Float(cnz)))
-        let band = coarseVoxel * 3.0
+        // The shell band assumes |coarse| bounds the distance to the surface,
+        // which is only true of a field with slope <= 1. A flatten/polish
+        // volume DECLARES a steeper field (that is what drops the document's
+        // safe step scale), and with it a coarse sample can read "far away"
+        // one coarse cell from clay it never saw: the fine pass skips those
+        // cells and bakes the crater the artist then stares at. Widen the
+        // band by the document's own declared bound — the same factor the
+        // raymarcher already applies per step. Clamped: a pathological scale
+        // must degrade to a slow bake, never a wrong one, and the coarse
+        // sample itself is biased by at most one coarse voxel.
+        var stepScale: Float = 1
+        _ = clay_safe_step_scale(bakeDoc, &stepScale)
+        let lipschitz = (stepScale.isFinite && stepScale > 0)
+            ? min(stepScale, 1) : 1
+        let band = (coarseVoxel * 3.0 + coarseVoxel) / max(lipschitz, 0.04)
 
         var distances = [Float16](repeating: 0, count: nx * ny * nz)
         // Far cells shade never; default color is the clay blue.
